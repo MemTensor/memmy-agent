@@ -1,13 +1,13 @@
 /**
  * 临时预览页：把成员协助的各处界面用真实组件与样式渲出来，便于对照方案自查。
- * 地址参数 `?view=dialog|dialog-other|dialog-attachments|dialog-review|dialog-skipped|conversation-review|board|board-tasks|detail|conversation|conversation-attachments|chain|chain-memmy|task|task-ask|task-long|card|card-running|card-stopped-by-me|conversation-stop|task-stopped|requester|settings|settings-off|project-settings-owner|project-settings-member|project-settings-local`，不连接本机接口。
+ * 地址参数 `?view=dialog|board-header|dialog-other|dialog-attachments|dialog-review|dialog-skipped|conversation-review|board|board-tasks|detail|conversation|conversation-attachments|chain|chain-memmy|task|task-ask|task-long|card|card-running|card-stopped-by-me|conversation-stop|task-stopped|requester|settings|settings-off|project-settings-owner|project-settings-member|project-settings-local`，不连接本机接口。
  * `detail` 与 `conversation` 是同一份协助会话（两轮请求：发起方由 Memmy 发起、执行方由 Memmy 执行，第二轮按限时授权直接执行），
  * 没有发起方记录，就是旧记录的显示。`chain` 是完整链条：DeepSeek Harness 发起、Memmy 执行，两轮（第二轮 --continue）；
  * `chain-memmy` 是 Memmy 发起的完整链条，第二轮收到后的记录还在同步。
  */
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { Link2, ListChecks, RefreshCw, Search, User } from "lucide-react";
+import { Cloud, Link2, ListChecks, PanelRight, RefreshCw, Search, Settings, User, UserPlus } from "lucide-react";
 import type { AssistExecution, AssistGrant, AssistInboxItem, AssistRequest, AssistThread, CollabClient } from "../../../api/collab-client.js";
 import { I18nProvider } from "../../../i18n/i18n-provider.js";
 import { CollabAssistDialog } from "../../collab-assist-dialog.js";
@@ -724,6 +724,43 @@ function Preview() {
             onFailed={() => undefined}
           />
         </ApiClientsContext.Provider>
+      </div>
+    );
+  }
+
+  if (view === "board-header") {
+    // 看板头部：只为了量「邀请 / 收起配置 / 项目设置」这几个按钮的热区与悬停反馈。
+    return (
+      <div className={board.page} style={{ height: "100vh" }}>
+        <div className={board.scroller}>
+          <div className={board.wrap}>
+            <header className={board.boardHeader}>
+              <span className={board.boardIcon} aria-hidden="true">
+                <Cloud size={22} />
+              </span>
+              <h1 className={board.boardName}>项目协作体验</h1>
+              <span className={board.boardScope}>1 位成员</span>
+              <span className={board.grow} />
+              <span className={board.boardActions}>
+                <Button size="sm" variant="ghost" className={board.boardAction}>
+                  <UserPlus size={15} aria-hidden="true" />
+                  邀请
+                  <span className={board.requestBadge} aria-hidden="true">1</span>
+                </Button>
+                <Button size="sm" variant="ghost" className={`${board.boardAction} ${board.boardIconAction}`} aria-label="展开项目配置" title="展开项目配置">
+                  <PanelRight size={15} aria-hidden="true" />
+                </Button>
+                <Button size="sm" variant="ghost" className={`${board.boardAction} ${board.boardIconAction}`} aria-label="项目设置" title="项目设置">
+                  <Settings size={15} aria-hidden="true" />
+                </Button>
+              </span>
+            </header>
+            <div className={board.boardTabs} role="tablist" aria-label="看板内容">
+              <button type="button" role="tab" aria-selected="true" className={`${board.boardTab} ${board.boardTabOn}`}>任务</button>
+              <button type="button" role="tab" aria-selected="false" className={board.boardTab}>协助</button>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }

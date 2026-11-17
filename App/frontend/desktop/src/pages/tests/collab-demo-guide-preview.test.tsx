@@ -53,32 +53,47 @@ describe("the demo guide preview", () => {
     expect(document.body.textContent).toContain("项目协作体验");
   });
 
-  it("opens with the join notice before the first step", async () => {
+  it("lights the members on the board when the demo member joins", async () => {
     expect(DEMO_GUIDE_PREVIEW_STEPS["0-joined"]).toBe("joined");
     await render("0-joined");
 
-    // 居中的提示窗带 Memmy 的吉祥物（不是应用图标），只有标题与「开始体验」，没有正文，没有跳过，也没有蒙版。
-    expect(document.querySelector("[data-demo-join]")).toBeTruthy();
-    expect(document.querySelector("[data-demo-join] img")?.getAttribute("src")).toContain("mascot/memmy-celebrate");
-    expect(document.body.textContent).toContain("小饭团加入了项目");
-    expect(document.body.textContent).not.toContain("一起开展一次协作");
-    expect(document.body.textContent).toContain("开始体验");
-    expect(document.body.textContent).not.toContain("跳过这一步");
-    expect(document.querySelector("[data-demo-mask]")).toBeNull();
+    // 加入不再是一张居中的提示窗：亮区锚点是看板头部的成员徽章，旧的 [data-demo-join] 没有了。
+    expect(document.querySelector("[data-demo-guide='board-members']")).toBeTruthy();
+    expect(document.querySelector("[data-demo-join]")).toBeNull();
+    expect(document.body.textContent).not.toContain("小饭团加入了项目");
+    expect(document.body.textContent).not.toContain("开始体验");
   });
 
-  it("covers the four tour steps on the board, ending on the sidebar new-task button", async () => {
+  it("draws all six screens before the project exists, each on its own anchor", async () => {
+    for (const [step, anchor] of [
+      ["0-intro", "create-dialog"],
+      ["0-name", "create-name"],
+      ["0-folder", "create-folder"],
+      ["0-collab", "create-collab"],
+      ["0-join-entry", "create-join"],
+      ["0-create-project", "create-project-submit"]
+    ] as const) {
+      await render(step);
+      expect(document.querySelector(`[data-demo-guide='${anchor}']`)).toBeTruthy();
+      // 六屏都在新建弹窗上：名称已填、协作开关已开。
+      expect(document.body.textContent).toContain("项目协作体验");
+    }
+  });
+
+  it("covers the tour steps on the board, ending on the sidebar new-task button", async () => {
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-board"]).toBe("tour-board");
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-tabs"]).toBe("tour-tabs");
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-associate"]).toBe("tour-associate");
+    expect(DEMO_GUIDE_PREVIEW_STEPS["t-associate-pick"]).toBe("tour-associate-pick");
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-new-task"]).toBe("tour-new-task");
 
-    // 每一步的锚点都在预览页上：任务列表那一片、tab 那一行、工具条右侧的关联任务、侧栏的「＋」。
-    // 「项目名与成员」那一步已经删掉，导览只剩四步，也没有 board-header 这个锚点。
+    // 每一步的锚点都在预览页上：任务列表那一片、tab 那一行、工具条右侧的关联任务、关联会话弹窗、侧栏的「＋」。
+    // 「项目名与成员」那一步已经删掉，也没有 board-header 这个锚点。
     for (const [step, anchor] of [
       ["t-board", "board-list"],
       ["t-tabs", "board-tabs"],
       ["t-associate", "board-associate"],
+      ["t-associate-pick", "associate-pick"],
       ["t-new-task", "sidebar-new-task"]
     ] as const) {
       await render(step);
@@ -86,7 +101,16 @@ describe("the demo guide preview", () => {
       // 导览段不描边：没有任何「这里可以点」的控件。
       expect(document.querySelector("[data-demo-stroke]")).toBeNull();
     }
-    expect(Object.values(DEMO_GUIDE_PREVIEW_STEPS).filter((phase) => phase.startsWith("tour-"))).toHaveLength(4);
+    // 五站；「关联会话」那一站另有一张未授权的样子，是同一站的第二个预览。
+    expect(new Set(Object.values(DEMO_GUIDE_PREVIEW_STEPS).filter((phase) => phase.startsWith("tour-")))).toHaveLength(5);
+    // 「关联会话」真的摆出了扫到的会话与计数（卡片上的计数在真实客户端里渲染，预览只验弹窗本身）。
+    await render("t-associate-pick");
+    expect(document.body.textContent).toContain("共 3 个会话");
+    expect(document.body.textContent).toContain("这里只做展示，不会改动任何任务。");
+    // 同一站的未授权样子：弹窗是授权说明，一条会话都不摆。
+    await render("t-associate-lock");
+    expect(document.body.textContent).toContain("授权后才能读取这台电脑上的会话。");
+    expect(document.body.textContent).not.toContain("共 3 个会话");
     await render("t-board");
     expect(document.querySelector("[data-demo-guide='board-header']")).toBeNull();
   });

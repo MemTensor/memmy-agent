@@ -47,6 +47,7 @@ import {
 } from "./agent-message-content.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { Tooltip } from "../components/tooltip.js";
+import { withoutDemoGuideHint } from "../lib/demo-guide-hint.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { userTimeZone } from "../lib/user-time-zone.js";
 import type { MessageKey, MessageValues, ResolvedLanguage } from "../i18n/messages.js";
@@ -652,21 +653,25 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
       );
     }
     const hasContent = message.content.trim().length > 0;
+    // 新手引导第二步发出去的那句话后面跟着一段给 Agent 的执行提示：发送时必须带着，显示时去掉。
+    // 去掉之后再判断一次有没有内容：只剩提示的那条消息不画气泡。
+    const visibleContent = withoutDemoGuideHint(message.content);
+    const hasVisibleContent = visibleContent.trim().length > 0;
     const timestamp = messageTimestamp(message.createdAt);
-    const copyAction = <MessageBubbleCopyButton text={message.content} align="right" timestamp={timestamp} />;
+    const copyAction = <MessageBubbleCopyButton text={visibleContent} align="right" timestamp={timestamp} />;
     return (
       <div className="agent-user-turn flex min-w-0 justify-end" data-agent-message-id={message.id || undefined}>
         <div className="agent-user-turn__stack flex min-w-0 flex-col items-end gap-2 w-full">
           {message.media?.length ? (
             <UserMediaPreviewGrid media={message.media} artifactClient={props.artifactClient} onPreviewFile={props.onPreviewFile} />
           ) : null}
-          {hasContent ? (
+          {hasContent && hasVisibleContent ? (
             <div className="agent-chat-bubble-frame agent-chat-bubble-frame--user w-full max-w-full min-w-0">
               <div
                 className="agent-chat-bubble agent-chat-bubble--user max-w-full min-w-0 overflow-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
                 data-agent-search-root=""
               >
-                {message.content}
+                {visibleContent}
               </div>
               {props.recallEvidenceTurnId && props.memoryRuntimeClient ? (
                 <TurnRecallEvidence

@@ -12,6 +12,8 @@ import type { CollabClient } from "../../api/collab-client.js";
 import { requestAssistFocus } from "../../app/collab-assist-focus.js";
 import { requestDemoGuideInvite } from "../../app/collab-demo-guide-invite.js";
 import {
+  demoGuideBackTarget,
+  demoGuideLivesOnTaskPage,
   demoGuideStepNumberOf,
   dispatchDemoGuide,
   endDemoGuide,
@@ -177,7 +179,8 @@ export function CollabDemoGuideHost(props: {
         dispatchDemoGuide({ type: "assist-delivered" });
         return;
       }
-      if (latest.status === "rejected" || latest.status === "failed" || latest.status === "expired" || latest.status === "cancelled") {
+      // `cancelled` 不在这里：那是引导自己撤回的那一条（人点了「上一步」），不算这一步没做成。
+      if (latest.status === "rejected" || latest.status === "failed" || latest.status === "expired") {
         // 真的被拒或执行失败：这才是这一步确实没完成。
         dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.request") });
       }
@@ -286,23 +289,79 @@ export function CollabDemoGuideHost(props: {
   }, [state.phase, state.error]);
 
   // 第二句只预填用户看到的那一句话；执行提示在发送时单独追加给 Agent（见 home-page）。
-  const askPrefill = () => t("collab.demo.prefill.ask", { name: state.memberName });
+  // 那句话里「请某某做什么」由云端剧本给，不在这边另写一份。
+  const askPrefill = () => t("collab.demo.prefill.ask", { name: state.memberName, ask: state.copy.askSentence });
+
+  /** 退回上一屏时要重新填进输入框的那句话：退到哪一屏就给哪一屏的句子，其余屏不带。 */
+  const backPrefill = () => {
+    const target = demoGuideBackTarget(state);
+    if (target === "compose") return t("collab.demo.prefill.task", { name: state.memberName, next: state.copy.taskNext });
+    if (target === "ask-compose") return askPrefill();
+    return undefined;
+  };
+
+  /**
+   * 退回上一屏时把这一步已经做出去的事收回来，并把页面/弹窗恢复到那一屏该有的样子。
+   *
+   * 先换屏再收回：收回都是异步的，屏幕上不该先闪一句「正在停止」。
+   * 换完屏再停那一轮 Agent（在 home-page），它结束时就对不上任何一屏了，不会被当成「做完」或「没完成」。
+   */
+  const onBack = () => {
+    const phase = state.phase;
+    const projectId = state.projectId;
+    const memberUserId = state.memberUserId;
+    const client = props.collab;
+    const target = demoGuideBackTarget(state);
+    dispatchDemoGuide({ type: "back", prefill: backPrefill() });
+    // 退回去的那一屏在哪个页面，就先把人放回那个页面：任务里的屏留在看板上、看板上的屏留在任务页，
+    // 蒙版都会因为找不到锚点而一片空白（看起来就是「引导消失了」）。
+    if (target) {
+      if (demoGuideLivesOnTaskPage(target)) {
+        if (props.route !== "/main") openTaskPageRef.current();
+      } else if (props.route !== "/collab" && state.localProjectId) {
+        openBoardRef.current(state.localProjectId);
+      }
+    }
+    if (!client || !projectId) return;
+    // 第二步的请求已经建出来了：撤回来。不撤的话小饭团照样去执行，人重发一次就执行两遍。
+    if (phase === "ask-waiting" && memberUserId) {
+      void cancelAskRequest(client, projectId, memberUserId).then((cancelled) => {
+        // 撤不回来（对方已经接了）就实说，不要装作已经收回去了。
+        if (!cancelled) setNotice(t("collab.demo.recallFailed"));
+      });
+      return;
+    }
+    // 第三步的「接收协助请求」是自己打开的：退回去要关回原样，不然人以为退回去就等于没开过。
+    if (phase === "settings-assist" || phase === "help-waiting" || phase === "help-dialog") {
+      void client.setAssistReceiving(projectId, false).catch(() => {
+        // 关不掉也不用拦人：下一次进项目设置时那一行会重新读一遍，看到的仍是开着的。
+      });
+    }
+  };
 
   return (
     <>
     <CollabDemoGuideOverlay
       state={state}
-      onJoined={() => dispatchDemoGuide({ type: "joined-confirmed" })}
-      onNext={() => dispatchDemoGuide({
-        type: "next",
-        // 第一步做完就直接请成员协助：那句话在进入这一步时才填；看板导览段不预填任何东西。
-        prefill: state.phase === "reply-done" ? askPrefill() : undefined
-      })}
-      onSkip={() => dispatchDemoGuide({
-        type: "skip",
-        // 跳过第一步就直接去请成员协助：那句话要跟着填上。导览段与后两步都不预填。
-        prefill: demoGuideStepNumberOf(state.phase) === 1 ? askPrefill() : undefined
-      })}
+      onSkipJoinEntry={() => dispatchDemoGuide({ type: "skip-join-entry" })}
+      onBack={onBack}
+      onNext={() => dispatchDemoGuide(state.phase === "joined"
+        // 加入那一屏的主按钮是「继续」：与旧的「开始体验」同一个事件，进看板导览。
+        ? { type: "joined-confirmed" }
+        : {
+          type: "next",
+          // 第一步做完就直接请成员协助：那句话在进入这一步时才填；看板导览段与建项目之前不预填任何东西。
+          prefill: state.phase === "reply-done" ? askPrefill() : undefined
+        })}
+      onSkip={() => dispatchDemoGuide(state.phase === "tour-associate-pick"
+        // 「关联会话」不是一步，而是导览里的一站：跳过它只往下一站走，不结束整轮演示。
+        ? { type: "pass" }
+        : {
+          type: "skip",
+          // 跳过第一步就直接去请成员协助：那句话要跟着填上。导览段与后两步都不预填。
+          prefill: demoGuideStepNumberOf(state.phase) === 1 ? askPrefill() : undefined
+        })}
+      onGrant={() => dispatchDemoGuide({ type: "grant-access" })}
       onExit={() => void endDemoGuide("exited")}
       onRetry={() => dispatchDemoGuide({ type: "retry" })}
       onCloseComplete={() => {
@@ -331,6 +390,34 @@ export function useDemoGuideActiveFor(localProjectId: string | null): boolean {
   const state = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState);
   if (!localProjectId || state.status !== "active") return false;
   return state.localProjectId === localProjectId;
+}
+
+/**
+ * 撤回第二步已经发出去的那条协助请求。
+ *
+ * 返回 false 表示没撤回来（对方已经接了、已经开始执行、或云端不允许撤）：
+ * 那时界面要说「已经发出去了」，不能当作撤回成功。
+ * 根本没建出请求（Agent 还没跑到那一步）也算收回成功：没有东西留在对方那边。
+ */
+async function cancelAskRequest(client: CollabClient, projectId: string, memberUserId: string): Promise<boolean> {
+  let requestId: string | null = null;
+  try {
+    const listing = await client.assistThreads(projectId);
+    const thread = listing.threads.find((item) => item.requester.mine && item.executor.userId === memberUserId);
+    const latest = thread?.requests[0];
+    if (!latest) return true;
+    if (latest.status !== "pending" && latest.status !== "running" && latest.status !== "confirm") return true;
+    requestId = latest.id;
+  } catch {
+    // 读不到就没法确认对方已经动手：按没撤回来处理，让人知道可能已经发出去了。
+    return false;
+  }
+  try {
+    await client.cancelAssist(requestId);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 全局是否在演示中：其他大卡与提示据此不出现。 */

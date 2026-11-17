@@ -23,6 +23,14 @@ export interface DemoGuideTarget {
   stroke: string | null;
   /** true：亮区里除描边控件外的位置都不接点击（读面板、弹窗这些自带多个按钮的地方）。 */
   blockRest: boolean;
+  /**
+   * true：连描边那个控件自己也不接点击。
+   *
+   * 给「只介绍、不让人动手」的屏用：建项目之前那几屏讲的是新建弹窗上的设置项，
+   * 描边只是标出「正在讲这一项」，开关不该被顺手拨过去、按钮也不该被顺手点下去，
+   * 想往下走只能按卡片上的「下一步」（最后一屏的「创建项目」除外，那一屏要点真实按钮）。
+   */
+  blockStroke?: boolean;
   /** 主锚点不在这一页时（比如执行中的协助条在任务页，人却在看板上）改用在的这一个。 */
   fallback?: string;
   /**
@@ -30,22 +38,46 @@ export interface DemoGuideTarget {
    * 卡片不能盖住它们。
    */
   cardBottomReserve?: number;
+  /** 亮区与描边的圆角（px）：按被高亮的控件自身形状给，默认 12。 */
+  radius?: number;
+  /** 亮区的内边距（px）：默认 DEMO_GUIDE_HOLE_PADDING（6）。 */
+  padding?: number;
+  /** 只压暗、不画描边：isDev 引导的出场那一步用。 */
+  clean?: boolean;
+  /** 说明卡优先贴在哪一边；不填按原来的候选顺序（先右、再左、再下、再上）。 */
+  prefer?: "left" | "right" | "top" | "bottom";
 }
 
 const TARGETS: Record<DemoGuidePhase, DemoGuideTarget> = {
-  // 建项目之前：只亮新建弹窗里的「创建项目」，名称与开关已经替人填好。
-  "create-project": { region: "create-project-submit", stroke: "create-project-submit", blockRest: false },
-  // 加入提示窗自带遮罩，不用亮区；这一项只是为了让每个阶段都有目标。
-  joined: { region: "board-main", stroke: null, blockRest: false },
+  // 建项目之前的六屏：都在新建弹窗上，一屏一个亮区；按控件自己的形状给圆角。
+  // 这一段只介绍、不让人动手：整张弹窗（`intro`）与每一项设置都不接点击，只能按卡片上的「下一步」。
+  // 出场那一步只压暗、不描边，让人先看整张弹窗。
+  intro: { region: "create-dialog", stroke: null, blockRest: true, radius: 18, padding: 8, clean: true, prefer: "right" },
+  // 项目名称那一行：描边标出正在讲的是这一项，但输入框里点不进去（想改名得等引导结束）。
+  name: { region: "create-name", stroke: "create-name", blockRest: true, blockStroke: true, radius: 13, padding: 6, prefer: "bottom" },
+  // 文件夹区块：同样只展示，「添加」按不动。
+  folder: { region: "create-folder", stroke: "create-folder", blockRest: true, blockStroke: true, radius: 14, padding: 6, prefer: "bottom" },
+  // 协作开关整行：讲的是开与关的差别，开关本身不给拨；说明卡贴在上边，不压住下面的按钮。
+  collab: { region: "create-collab", stroke: "create-collab", blockRest: true, blockStroke: true, radius: 13, padding: 6, prefer: "top" },
+  // 左下角的「加入项目」：只讲它的用途，点不动；卡片贴在上边。
+  "join-entry": { region: "create-join", stroke: "create-join", blockRest: true, blockStroke: true, radius: 10, padding: 6, prefer: "top" },
+  // 「创建项目」：唯一可点的控件——这一屏没有「下一步」，建项目这件事由人自己点。
+  "create-project": { region: "create-project-submit", stroke: "create-project-submit", blockRest: false, radius: 10, padding: 7, prefer: "right" },
+  // 加入那一屏：亮区套住看板上的成员徐章，不描边也不挡点击。
+  joined: { region: "board-members", stroke: null, blockRest: false, radius: 10, padding: 7, prefer: "right" },
   // 看板导览：纯介绍，只亮区域、不描边、不接点击（`blockRest` 让亮区里也点不动）。
   // 第一站只框任务列表那一片：看板头部与工具条不属于这一步要讲的东西。
-  "tour-board": { region: "board-list", stroke: null, blockRest: true },
+  "tour-board": { region: "board-list", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" },
   // 第二站只讲「协助」：亮区落在 tab 那一行上。
-  "tour-tabs": { region: "board-tabs", stroke: null, blockRest: true },
+  "tour-tabs": { region: "board-tabs", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" },
   // 「关联任务」这一步只亮给人看：不描边、点了也不打开弹窗、不写任何数据。
-  "tour-associate": { region: "board-associate", stroke: null, blockRest: true },
+  "tour-associate": { region: "board-associate", stroke: null, blockRest: true, radius: 10, padding: 6, prefer: "bottom" },
+  // 「关联会话」：整张弹窗作为亮区，亮区里一个控件都不给点（blockRest 且不描边）；
+  // 卡片贴到弹窗左边，把扫描出来的列表完整留在右边。
+  "tour-associate-pick": { region: "associate-pick", stroke: null, blockRest: true, radius: 16, padding: 6, prefer: "left" },
   // 侧栏当前项目右侧的「＋」：亮给它，同样点不动。
-  "tour-new-task": { region: "sidebar-new-task", stroke: null, blockRest: true },
+  "tour-new-task": { region: "sidebar-new-task", stroke: null, blockRest: true, radius: 9, padding: 5, prefer: "bottom" },
+  // 体验三步：圆角与内边距沿用默认值（12 / 6），与改造前一致。
   "task-row": { region: "board-task-row", stroke: "board-task-row", blockRest: false },
   // 只读面板可以滚动阅读，但只有头部那个「继续任务」能点。
   reader: { region: "reader-panel", stroke: "reader-continue", blockRest: true },

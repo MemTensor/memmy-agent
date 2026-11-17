@@ -26,7 +26,17 @@ const ProjectSchema = z.object({
     active: z.boolean(),
     memberUserId: z.string(),
     memberName: z.string(),
-    step: z.string().nullish().transform((value) => value ?? null)
+    step: z.string().nullish().transform((value) => value ?? null),
+    /**
+     * 剧本里要出现在界面上的几句。三步实际做什么只有云端知道，界面上的话得跟着剧本走。
+     * 早于该字段的后端不返回，由桌面端用本地缺省（与云端缺省剧本同一套）兵底。
+     */
+    copy: z.object({
+      taskTitle: z.string(),
+      taskNext: z.string(),
+      askSentence: z.string(),
+      helpSentence: z.string()
+    }).nullish().transform((value) => value ?? null)
   }).nullish().transform((value) => (value && value.active ? value : null))
 });
 
@@ -104,7 +114,9 @@ const ProjectsResponseSchema = z.object({
   applications: z.array(ApplicationSchema).optional(),
   decisions: z.array(DecisionSchema).optional(),
   /** 每个账号可创建的在线项目数上限；旧后端不返回，桌面端就不提前提示额度。 */
-  maxOwnedProjects: z.number().optional()
+  maxOwnedProjects: z.number().optional(),
+  /** 云端判断「这个人可以体验一次新手引导」；旧后端不返回，桌面端按不能体验处理。 */
+  demoEligible: z.boolean().optional()
 });
 const CreateProjectResponseSchema = z.object({ project: ProjectSchema, localDirectory: z.string().optional() });
 const ProjectSessionsResponseSchema = z.object({
@@ -604,6 +616,8 @@ export interface CollabClient {
     decisions?: CollabApplicationDecision[];
     /** 本人还能创建多少个在线项目，由后端给出上限；旧后端不返回。 */
     maxOwnedProjects?: number;
+    /** 云端判定可以再体验一次新手引导；旧后端不返回该字段。 */
+    demoEligible?: boolean;
   }>;
   /**
    * Creates the cloud project and returns the directory its tasks run in, absent on a backend without it.
@@ -789,13 +803,18 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
       }));
       // 旧后端没有申请列表时也就不带额度，两个字段都不填。
       if (!result.applications) {
-        return { projects: result.projects, ...(decisions ? { decisions } : {}) };
+        return {
+          projects: result.projects,
+          ...(decisions ? { decisions } : {}),
+          ...(result.demoEligible === undefined ? {} : { demoEligible: result.demoEligible })
+        };
       }
       return {
         projects: result.projects,
         applications: result.applications.map((item) => ({ projectId: item.projectId, projectName: item.projectName })),
         ...(decisions ? { decisions } : {}),
-        ...(result.maxOwnedProjects === undefined ? {} : { maxOwnedProjects: result.maxOwnedProjects })
+        ...(result.maxOwnedProjects === undefined ? {} : { maxOwnedProjects: result.maxOwnedProjects }),
+        ...(result.demoEligible === undefined ? {} : { demoEligible: result.demoEligible })
       };
     },
 

@@ -11,7 +11,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollabClient } from "../../../api/collab-client.js";
-import type { DemoGuideState } from "../../../app/collab-demo-guide-store.js";
+import { DEMO_GUIDE_COPY_FALLBACK, type DemoGuideState } from "../../../app/collab-demo-guide-store.js";
 import {
   dispatchDemoGuide,
   getDemoGuideState,
@@ -42,7 +42,8 @@ function demoState(phase: DemoGuideState["phase"], overrides: Partial<DemoGuideS
     localProjectId: "local-1",
     memberUserId: "9001",
     memberName: "小饭团",
-    error: null,
+    copy: DEMO_GUIDE_COPY_FALLBACK,
+error: null,
     done: { task: false, ask: false, help: false },
     skipped: { task: false, ask: false, help: false },
     askDelivered: false,
@@ -88,6 +89,21 @@ function client(overrides: Partial<CollabClient>): CollabClient {
   } as unknown as CollabClient;
 }
 
+/** 在页面上挂一个 `data-demo-guide` 锚点，位置固定：happy-dom 里量不出布局，只能自己给。 */
+function stubAnchor(name: string, box: { left: number; top: number; width: number; height: number }): void {
+  const element = document.createElement("button");
+  element.setAttribute("data-demo-guide", name);
+  element.getBoundingClientRect = (() => ({
+    ...box,
+    x: box.left,
+    y: box.top,
+    right: box.left + box.width,
+    bottom: box.top + box.height,
+    toJSON: () => box
+  })) as unknown as typeof element.getBoundingClientRect;
+  document.body.append(element);
+}
+
 describe("the demo guide host", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -126,6 +142,7 @@ describe("the demo guide host", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    for (const element of Array.from(document.querySelectorAll("[data-demo-guide]"))) element.remove();
     resetDemoGuideStore();
     vi.useRealTimers();
   });
@@ -230,18 +247,35 @@ describe("the demo guide host", () => {
     expect(getDemoGuideState().done.help).toBe(false);
   });
 
-  it("opens the walkthrough with the join notice and waits for the person", async () => {
+  it("opens the walkthrough on the board with the join card and waits for the person", async () => {
+    // 加入那一屏走看板蒙版：亮区套住成员徐章，卡片在旁边说这次由小饭团加入。
+    stubAnchor("board-members", { left: 640, top: 48, width: 72, height: 26 });
     await mount(client({}), demoState("joined"));
-    // 先出现的是那张居中的提示窗：有昵称、只有一个「开始体验」，没有正文，也没有跳过。
-    expect(document.body.textContent).toContain("小饭团加入了项目");
-    expect(document.body.textContent).not.toContain("一起开展一次协作");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120);
+    });
+    expect(document.querySelector("[data-demo-join]")).toBeNull();
+    expect(document.querySelector("[data-demo-mask]")).not.toBeNull();
+    expect(document.body.textContent).toContain("项目里还没有其他成员。这次先由我加入项目，带你完成一次协作。");
     expect(document.body.textContent).not.toContain("跳过这一步");
     expect(getDemoGuideState().phase).toBe("joined");
 
-    const start = Array.from(document.querySelectorAll("button")).find((entry) => entry.textContent?.includes("开始体验"));
+    const start = Array.from(document.querySelectorAll("button")).find((entry) => entry.textContent?.trim() === "继续");
     await act(async () => start?.click());
     // 点完先进看板导览：第一步的蒙版此时才出现。
     expect(getDemoGuideState().phase).toBe("tour-board");
+  });
+
+  it("skips the join entry when the dialog does not show the join button", async () => {
+    // API Key 模式下没有「加入项目」：不能把气泡指向空处，直接进「创建项目」。
+    await mount(client({}), demoState("join-entry"));
+    expect(getDemoGuideState().phase).toBe("create-project");
+  });
+
+  it("stays on the join entry while the join button is on screen", async () => {
+    stubAnchor("create-join", { left: 320, top: 620, width: 88, height: 30 });
+    await mount(client({}), demoState("join-entry"));
+    expect(getDemoGuideState().phase).toBe("join-entry");
   });
 
   it("stays on the board for the whole tour and never pulls the page around", async () => {
@@ -280,5 +314,111 @@ describe("the demo guide host", () => {
     });
     // 成员数、任务列表不等下一轮轮询：蒙版一收就重读。
     expect(store.loadCollabProjects).toHaveBeenCalledWith(collab);
+  });
+
+  it("cancels the request it already sent when the person goes back", async () => {
+    // 第二步已经发出去了：不退回来的话小饭团照样去执行，人重发一次就执行两遍。
+    const cancelAssist = vi.fn().mockResolvedValue({ id: "req-1", status: "cancelled" });
+    const collab = client({
+      assistThreads: vi.fn().mockResolvedValue({ threads: [askThread("pending")] }),
+      cancelAssist
+    });
+    stubAnchor("conversation", { left: 100, top: 60, width: 1000, height: 620 });
+    await mount(collab, demoState("ask-waiting"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    const back = Array.from(document.querySelectorAll("button"))
+      .find((entry) => entry.textContent?.trim() === "上一步");
+    expect(back).toBeTruthy();
+    await act(async () => {
+      back?.click();
+      await Promise.resolve();
+    });
+
+    expect(getDemoGuideState().phase).toBe("ask-compose");
+    expect(cancelAssist).toHaveBeenCalledWith("req-1");
+  });
+
+  it("turns receiving back off when the person goes back out of the third step", async () => {
+    // 「接收协助请求」是这一步自己打开的：退回去要关回原样，不能留在开着。
+    const setAssistReceiving = vi.fn().mockResolvedValue({ enabled: false, grants: [] });
+    const collab = client({ setAssistReceiving });
+    stubAnchor("board-main", { left: 100, top: 60, width: 1000, height: 620 });
+    await mount(collab, demoState("help-waiting"));
+    // 等蒙版量到锚点、把卡片画出来（真机上靠每帧重算）。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    const back = Array.from(document.querySelectorAll("button"))
+      .find((entry) => entry.textContent?.trim() === "上一步");
+    await act(async () => {
+      back?.click();
+      await Promise.resolve();
+    });
+
+    expect(getDemoGuideState().phase).toBe("settings-open");
+    expect(setAssistReceiving).toHaveBeenCalledWith("cloud-1", false);
+  });
+
+  it("refills the sentence when the person backs into the first step's composer", async () => {
+    await mount(client({}), demoState("reply-waiting"));
+    stubAnchor("conversation", { left: 100, top: 60, width: 1000, height: 620 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    const back = Array.from(document.querySelectorAll("button"))
+      .find((entry) => entry.textContent?.trim() === "上一步");
+    await act(async () => {
+      back?.click();
+    });
+    // 回到输入框，那句话重新填上（nonce 换一个，输入框才知道要再填一次）。
+    expect(getDemoGuideState().phase).toBe("compose");
+    expect(getDemoGuideState().prefill?.text).toContain("接着");
+    expect(getDemoGuideState().prefill?.nonce).toBeGreaterThan(0);
+  });
+
+  it("goes back to the page the previous screen lives on", async () => {
+    // 项目设置那一屏在看板上，上一屏是第二步的结果（「协助请求已返回」）：它在任务里。
+    // 不跳回去的话，`conversation` 锚点在看板上根本不存在，蒙版就一片空白（看起来就是引导没了）。
+    const openTaskPage = vi.fn();
+    const openBoard = vi.fn();
+    stubAnchor("board-settings", { left: 900, top: 60, width: 28, height: 28 });
+    await mount(client({}), demoState("settings-open"), { route: "/collab", openTaskPage, openBoard });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    const back = Array.from(document.querySelectorAll("button"))
+      .find((entry) => entry.textContent?.trim() === "上一步");
+    await act(async () => {
+      back?.click();
+    });
+    expect(getDemoGuideState().phase).toBe("ask-done");
+    expect(openTaskPage).toHaveBeenCalledTimes(1);
+    expect(openBoard).not.toHaveBeenCalled();
+  });
+
+  it("goes back to the board when the previous screen is the read panel", async () => {
+    // 输入框那一屏在任务里，上一屏是项目看板上成员任务的只读面板：退回去要先把看板拉回来。
+    const openBoard = vi.fn();
+    const openTaskPage = vi.fn();
+    stubAnchor("composer", { left: 300, top: 600, width: 800, height: 120 });
+    stubAnchor("composer-send", { left: 1040, top: 660, width: 36, height: 36 });
+    await mount(client({}), demoState("compose"), { route: "/main", openBoard, openTaskPage });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    const back = Array.from(document.querySelectorAll("button"))
+      .find((entry) => entry.textContent?.trim() === "上一步");
+    await act(async () => {
+      back?.click();
+    });
+    expect(getDemoGuideState().phase).toBe("reader");
+    expect(openBoard).toHaveBeenCalledWith("local-1");
+    expect(openTaskPage).not.toHaveBeenCalled();
   });
 });

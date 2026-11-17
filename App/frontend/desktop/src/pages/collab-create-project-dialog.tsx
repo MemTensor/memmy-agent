@@ -7,6 +7,7 @@ import {
   requestCollabAccessPrompt,
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
+import { readDemoGuideDone } from "../app/collab-demo-guide-store.js";
 import { prepareProjectDirectory } from "../api/projects-client.js";
 import { useOptionalAgentRuntimeBridge } from "../app/agent-runtime-bridge.js";
 import { useOptionalApiClients } from "../app/providers.js";
@@ -108,7 +109,9 @@ export function CreateProjectModal(props: {
    * 加入过别人的项目不影响：加入他人项目本身不演示，之后第一次自己创建时仍然演示。
    * 带了这个标记也不代表一定演示：云端会再判断开关、名单与是否已经体验过，返回 `demo.active` 才真的开始。
    * 从大卡「新建项目」进来的人不看这一条：那条路已经明确要体验，云端按名单与是否体验过决定。
+   * 本机退出过引导就不再请求演示：在建项目之前退出时云端还没有项目可记，只能靠本机这个标记。
    */
+  const demoRequested = !readDemoGuideDone();
   const firstSharedProject = share && shareAvailable && ownedCount === 0;
 
   /**
@@ -180,7 +183,8 @@ export function CreateProjectModal(props: {
       // The cloud record points at the folder the project already runs in, so both keep the same directory.
       const created = await props.collab.createProject(trimmed, workingDirectory, {
         // 大卡入口已经明确要体验一次：这时不再要求「名下没有在线项目」，交云端按名单判断。
-        demo: firstSharedProject || demo
+        // 本机已经退出过引导就不再请求演示：云端不会开始，项目照常建为普通协作项目。
+        demo: demoRequested && (firstSharedProject || demo)
       });
       sharingStarted = true;
       props.onShared(created.project);
@@ -221,10 +225,17 @@ export function CreateProjectModal(props: {
       backdropClassName={demo ? `${styles.backdrop} ${styles.backdropYield}` : styles.backdrop}
       bodyClassName={styles.simpleCreateBody}
       footerClassName={styles.simpleCreateFooter}
+      // 引导第一步亮的是整个弹窗：锚点挂在 Modal 根元素上，它与弹窗自身的尺寸、间距无关。
+      demoGuideAnchor={demo ? "create-dialog" : undefined}
       footer={(
         <>
           {shareAvailable && props.onJoinProject ? (
-            <Button variant="secondary" size="sm" onClick={props.onJoinProject}>
+            <Button
+              variant="secondary"
+              size="sm"
+              data-demo-guide={demo ? "create-join" : undefined}
+              onClick={props.onJoinProject}
+            >
               {t("collab.create.joinEntry")}
             </Button>
           ) : <span />}
@@ -243,7 +254,7 @@ export function CreateProjectModal(props: {
       )}
     >
       {/* 名称占满一行：图标与竖线在框内左侧，其余都交给输入本身，不放常驻说明 */}
-      <div className={styles.simpleNameField}>
+      <div className={styles.simpleNameField} data-demo-guide={demo ? "create-name" : undefined}>
         <span className={styles.simpleNameIcon} aria-hidden="true"><Folder size={16} /></span>
         <span className={styles.simpleNameDivider} aria-hidden="true" />
         <input
@@ -273,7 +284,7 @@ export function CreateProjectModal(props: {
         <InfoHint label={t("collab.create.folderHelpLabel")} text={t("collab.create.dirHint")} />
       </div>
       {/* 只支持一个目录：选了就把那一行显示出来，没选时给一个大框放「添加」 */}
-      <div className={styles.simpleFolderBox}>
+      <div className={styles.simpleFolderBox} data-demo-guide={demo ? "create-folder" : undefined}>
         {directory ? (
           <div className={styles.simpleFolderRow}>
             <Folder size={15} aria-hidden="true" className={styles.simpleFolderIcon} />
@@ -311,6 +322,7 @@ export function CreateProjectModal(props: {
           {/* 共享和名称、文件夹一样是一个字段框：不用分隔线另起一段，点整框任意位置都能切换（问号除外） */}
           <div
             className={`${styles.simpleShareField}${share ? ` ${styles.simpleShareFieldOn}` : ""}`}
+            data-demo-guide={demo ? "create-collab" : undefined}
             onClick={() => setShare((current) => !current)}
           >
             <Users size={16} aria-hidden="true" className={styles.simpleShareIcon} />
