@@ -157,7 +157,7 @@ import {
   type WindowsDataLayout
 } from "./windows-data-layout.js";
 import { assertWindowsRuntimeOwnership } from "./windows-runtime-ownership.js";
-import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js";
+import { createWindowsUpdateLauncherFile, waitForWindowsUpdateLauncher } from "./windows-update-launcher.js";
 import { createWindowsUpdateVerificationScript, validateWindowsUpdateInstaller, windowsUpdatePowerShellExecutable, windowsUpdatePowerShellFile, type WindowsUpdateVerification } from "./windows-update-validation.js";
 import { applyLocalTestProfileEnvironment, prepareLocalTestProfile,
   readExecutableSigningTeamIdentifier, type LocalTestProfile } from './local-test-profile.js';
@@ -3564,7 +3564,7 @@ async function installWindowsUpdateInBackground(
   const updatesDirectory = resolveUpdatesDirectory();
   await mkdir(updatesDirectory, { recursive: true });
   const helperPath = join(updatesDirectory, `install-win-update-${Date.now()}.ps1`);
-  const launcherPath = join(updatesDirectory, `launch-win-update-${Date.now()}.vbs`);
+  const launcherPath = join(updatesDirectory, `launch-win-update-${Date.now()}.ps1`);
   const logPath = join(updatesDirectory, "win-update-install.log");
   if (options.showUpdatePrompt) {
     await writeWindowsUpdatePromptLanguage(resolveWindowsUpdatePromptLanguageFromAppSettings());
@@ -3592,15 +3592,25 @@ async function installWindowsUpdateInBackground(
   ]));
   await appendFile(logPath, `[${new Date().toISOString()}] queued Memmy Windows update helper "${helperPath}"\n`).catch(() => undefined);
 
-  const helper = spawn("wscript.exe", [launcherPath], {
+  const helper = spawn(windowsUpdatePowerShellExecutable(), [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-WindowStyle",
+    "Hidden",
+    "-File",
+    launcherPath
+  ], {
     detached: true,
     stdio: "ignore",
     windowsHide: true
   });
-  helper.once("error", (error) => {
-    void appendFile(logPath, `[${new Date().toISOString()}] failed to start Memmy Windows update helper: ${String(error)}\n`).catch(() => undefined);
-  });
-  helper.unref();
+  try {
+    await waitForWindowsUpdateLauncher(helper);
+  } catch (error) {
+    await appendFile(logPath, `[${new Date().toISOString()}] failed to start Memmy Windows update helper: ${String(error)}; launcher log: ${launcherPath}.log\n`).catch(() => undefined);
+    throw error;
+  }
   isManagedUpdateInstallerRunning = true;
   if (options.quitCurrentApp) {
     scheduleQuitForManualUpdateInstall();
