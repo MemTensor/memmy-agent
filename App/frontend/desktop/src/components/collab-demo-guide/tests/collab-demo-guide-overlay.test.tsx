@@ -184,6 +184,16 @@ describe("demo guide overlay tracking", () => {
     for (const element of Array.from(document.querySelectorAll("[data-demo-guide]"))) element.remove();
   });
 
+  it("keeps the step name but drops the pointless 1 / 1 progress on the single hands-on step", async () => {
+    await mount("reader");
+
+    const text = cardText();
+    // 动手体验只有一步：进度「1 / 1」不说任何事，头部只留步骤名。
+    expect(text).toContain("接续成员的任务");
+    expect(text).not.toContain("1 / 1");
+    expect(document.querySelector(`.${styles.head}`)).not.toBeNull();
+  });
+
   it("covers the settled target and keeps tracking while it is still moving", async () => {
     await mount("reader");
 

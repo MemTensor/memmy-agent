@@ -12,7 +12,7 @@ import type { CollabClient } from "../api/collab-client.js";
  *
  * 分三段：先是「建项目之前」的新建弹窗六屏，再是「看板导览」（`tour-*`，纯介绍，不让人操作），
  * 最后是「动手体验」（一步，接续成员的任务）。
- * 体验段的「1 / 1」由 {@link demoGuideStepNumberOf} 给出，另外两段没有进度可讲。
+ * 体验段只有一步，卡片上不写进度；哪一屏属于体验段由 {@link demoGuideStepNumberOf} 给出。
  */
 export type DemoGuidePhase =
   // 建项目之前的那一段：新建弹窗刚打开，一路在弹窗上走完六屏，还没有云端项目。
@@ -357,8 +357,9 @@ const IDLE: DemoGuideState = {
 };
 
 /**
- * 一个子状态属于体验段的第几步：卡片上的「1 / 1」按它算。
+ * 一个子状态属于体验段的第几步。
  *
+ * 体验段只有一步，卡片上不写进度（只有一步的「1 / 1」没有信息量）；这个值仍然用来区分「体验段」与其余两段。
  * 建项目之前、加入提示窗与看板导览都还没有进度可讲，返回 null：卡片上不出现进度条，改用一个「介绍」标签。
  */
 export function demoGuideStepNumberOf(phase: DemoGuidePhase): 1 | null {

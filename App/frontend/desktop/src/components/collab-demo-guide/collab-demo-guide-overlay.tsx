@@ -48,9 +48,9 @@ import styles from "./collab-demo-guide.module.css";
 type Translate = (key: MessageKey, values?: Record<string, string | number>) => string;
 
 export interface DemoGuideCard {
-  /** 体验段是第几步：进度写「1 / 1」。导览段与建项目之前没有进度，为 null。 */
+  /** 体验段是第几步：只有不止一步时头部才写进度（如「1 / 2」）。导览段与建项目之前没有进度，为 null。 */
   step: 1 | null;
-  /** 头部那一行左边的徽章：「1 / 1」或「介绍」。没有徽章时这一行只剩步骤名，两者都没有时整行不出现。 */
+  /** 头部那一行左边的徽章：进度或「介绍」。没有徽章时这一行只剩步骤名，两者都没有时整行不出现。 */
   badge: string | null;
   /** 头部那一行右边的步骤名。 */
   stepName: string | null;
@@ -114,7 +114,8 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
   const copy = state.copy ?? DEMO_GUIDE_COPY_FALLBACK;
   const base = (step: 1 | null, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
     step,
-    badge: step === null
+    // 只有一步时进度（「1 / 1」）没有任何信息量：这一段就这一件事，头部只留步骤名。
+    badge: step === null || DEMO_GUIDE_STEPS.length <= 1
       ? null
       : t("collab.demo.progress", { step: String(step), total: String(DEMO_GUIDE_STEPS.length) }),
     stepName: step === null ? null : t(("collab.demo.stepName." + String(step)) as MessageKey),
@@ -349,6 +350,8 @@ export function CollabDemoGuideOverlay(props: {
   /** 窗口缩放、滚动、动画结束都会让它加一：测量随之一并重跑。 */
   const [measureTick, setMeasureTick] = useState(0);
   const cardRef = useRef<HTMLDivElement | null>(null);
+  /** 上一次把锚点滚进视野的时间：锚点没露出就隔一会儿再滚一次，不跟每帧的测量抢。 */
+  const scrolledPhaseRef = useRef(0);
   /** 蒙版自己铺满整个窗口：视口尺寸量它，而不是问 window——两处在截图与内嵌环境里可能不一致。 */
   const rootRef = useRef<HTMLDivElement | null>(null);
   // 阶段表里没有这一屏（例如某个阶段的锚点被移除后忘了同步更新）时，不画蒙版也不崩：
@@ -372,7 +375,17 @@ export function CollabDemoGuideOverlay(props: {
       ?? (target.fallback ? document.querySelector<HTMLElement>(`[data-demo-guide="${target.fallback}"]`) : null);
     if (!region) return { layout: null, key: "none" };
     const regionRect = region.getBoundingClientRect();
-    if (!rectVisible(regionRect, viewport)) return { layout: null, key: "none" };
+    if (!rectVisible(regionRect, viewport)) {
+      // 锚点在窗口外时不能就这样空着：侧栏项目一多，当前项目那一行会折到窗口下方，
+      // 亮区量不出来，整块引导（蒙版、说明卡、跳过）就一起消失，人既看不到在讲什么也走不下去。
+      // 所以先把它滚进视野，下一帧的测量自然接上；量到的位置不对（还在动、还没排版）时隔一会儿再试一次。
+      const now = Date.now();
+      if (now - scrolledPhaseRef.current > 800) {
+        scrolledPhaseRef.current = now;
+        region.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+      return { layout: null, key: "none" };
+    }
     // 亮区默认外扩 6px；某些阶段（弹窗整体、创建按钮）按规格另外给了 pad。
     const hole = padRect(regionRect, target.padding ?? DEMO_GUIDE_HOLE_PADDING, viewport);
     const strokeElement = target.stroke ? document.querySelector<HTMLElement>(`[data-demo-guide="${target.stroke}"]`) : null;
@@ -383,7 +396,7 @@ export function CollabDemoGuideOverlay(props: {
       : "-");
     const key = `${rectKey(hole)}|${rectKey(strokeRect)}|${viewport.width}x${viewport.height}`;
     return { layout: { hole, stroke: strokeRect, viewport }, key };
-  }, [target?.region, target?.stroke, target?.fallback, target?.padding]);
+  }, [target?.region, target?.stroke, target?.fallback, target?.padding, state.phase]);
 
   /**
    * 跟着目标走：侧滑、缩放、居中补高这些入场过程里每帧位置都不一样，只量一次必然画偏。

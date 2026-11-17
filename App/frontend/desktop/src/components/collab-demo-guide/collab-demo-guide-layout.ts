@@ -257,7 +257,7 @@ export interface CardPlacement {
   arrow: { side: "left" | "right" | "top" | "bottom"; offset: number };
 }
 
-/** 常规说明卡宽：单行放得下「1 / 1 · 接续成员的任务」这类短标题，不被压成两行。 */
+/** 常规说明卡宽：单行放得下「接续成员的任务」这类短标题，不被压成两行。 */
 export const DEMO_GUIDE_CARD_WIDTH = 340;
 /** 带对话或任务示意的说明卡宽一档：示意图不挤。 */
 export const DEMO_GUIDE_CARD_WIDTH_WIDE = 400;
