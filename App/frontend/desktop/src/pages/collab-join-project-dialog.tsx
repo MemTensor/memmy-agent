@@ -1,4 +1,4 @@
-import { Cloud, Folder, MessageSquare, Sparkles, X } from "lucide-react";
+import { Cloud, Folder, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createHttpCollabClient, type CollabClient, type CollabInvitePreview, type CollabProject } from "../api/collab-client.js";
 import { useOptionalApiClients } from "../app/providers.js";
@@ -21,8 +21,6 @@ export function CollabJoinProjectDialog(props: {
   onJoined: (project: CollabProject) => void;
   /** 申请已提交。调用方把它放进侧边栏，显示项目名称和「申请中」。 */
   onApplied?: (application: { projectId: string; projectName: string }) => void;
-  /** Switches the same dialog to creating a project; both entries live in one place now. */
-  onCreateProject?: () => void;
   /** 深链接带进来的邀请码：打开即预填并预览。 */
   initialReference?: string;
 }) {
@@ -43,7 +41,6 @@ export function JoinProjectModal(props: {
   onClose: () => void;
   onJoined: (project: CollabProject) => void;
   onApplied?: (application: { projectId: string; projectName: string }) => void;
-  onCreateProject?: () => void;
   /**
    * 带着邀请码打开：浏览器里的邀请链接经 memmy://invite/<code> 拉起桌面端时用。
    * 直接预填并预览，用户点开链接就是想加入，不必再粘贴一次。
@@ -130,15 +127,14 @@ export function JoinProjectModal(props: {
   }
 
   const pending = preview?.status === "pending";
+  // 已成员也显示「加入」：从邀请链接进来的人看到的就是加入这个动作，点下去直接打开项目。
   const primaryLabel = !preview
     ? t("collab.join.next")
-    : preview.status === "member"
-      ? t("collab.join.open")
-      : pending
-        ? t("collab.join.pending")
-        : preview.joinMode === "direct"
-          ? t("collab.join.join")
-          : t("collab.join.apply");
+    : pending
+      ? t("collab.join.pending")
+      : preview.status === "member" || preview.joinMode === "direct"
+        ? t("collab.join.join")
+        : t("collab.join.apply");
 
   return (
     <>
@@ -149,16 +145,13 @@ export function JoinProjectModal(props: {
         closeLabel={t("common.close")}
         closeContent={<X size={16} aria-hidden="true" />}
         initialFocusRef={inputRef}
-        className={`${styles.createModal} ${styles.simpleCreateModal}`}
+        className={`${styles.createModal} ${styles.simpleCreateModal} ${styles.joinModal}`}
         backdropClassName={styles.backdrop}
+        bodyClassName={styles.joinBody}
         footerClassName={styles.simpleCreateFooter}
         footer={(
           <>
-            {props.onCreateProject ? (
-              <Button variant="secondary" className={styles.simpleCreateFooterButton} onClick={props.onCreateProject}>
-                {t("collab.join.createEntry")}
-              </Button>
-            ) : <span />}
+            <span />
             <span className={styles.footerButtons}>
               <Button variant="ghost" className={styles.simpleCreateFooterButton} onClick={props.onClose}>
                 {preview ? t("collab.join.later") : t("collab.cancel")}
@@ -188,16 +181,7 @@ export function JoinProjectModal(props: {
                 ))}
               </span>
             </div>
-            <ul className={styles.joinNotes}>
-              <li className={styles.joinNote}>
-                <MessageSquare size={16} aria-hidden="true" className={styles.joinNoteIcon} />
-                <span>{t("collab.join.noteSessions")}</span>
-              </li>
-              <li className={styles.joinNote}>
-                <Sparkles size={16} aria-hidden="true" className={styles.joinNoteIcon} />
-                <span>{t("collab.join.noteAgent")}</span>
-              </li>
-            </ul>
+            <p className={styles.joinNote}>{t("collab.join.noteSessions")}</p>
             {preview.status === "member" ? null : (
               <div className={styles.field}>
                 <span>{t("collab.create.dirOptional")}</span>

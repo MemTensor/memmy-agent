@@ -2774,28 +2774,26 @@
   margin-left: -8px;
 }
 
-.joinNotes {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
+/* 说明只有文字，没有图标（2026-11-17 按评审删掉左侧两个图标，同年同日删掉第二句）。 */
 .joinNote {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  margin: 0;
   color: var(--collab-muted);
   font-size: 13.5px;
   line-height: 1.6;
 }
 
-.joinNoteIcon {
-  flex: none;
-  margin-top: 3px;
-  color: var(--collab-accent-deep);
+/*
+ * 加入项目：正文只剩一句说明。宽度仍与新建项目一致（520），这一句刚好一行放下，不会被折成
+ * 两行、留下孤零零几个字；删掉第二句后高度自己就收下来了，不再另调宽度。
+ */
+:global(.modal).createModal.joinModal {
+  width: min(520px, calc(100vw - 32px));
+}
+
+/* 正文与标题同一套左右留白（24），卡片与说明之间 12px，比默认的 14 紧密一点。 */
+:global(.modal-body).joinBody {
+  gap: 12px;
+  padding: 0 24px 4px;
 }
 
 /* 项目配置：卡片式列表，宽 300px，可收起（PRD 3.8） */

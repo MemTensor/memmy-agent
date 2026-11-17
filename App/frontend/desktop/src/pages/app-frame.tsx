@@ -2175,13 +2175,6 @@ export function AppFrame(props: AppFrameProps) {
         open={joinProjectOpen}
         // 深链接带进来的邀请码：弹窗打开即预填并预览。
         initialReference={inviteLinkCode ?? undefined}
-        onCreateProject={() => {
-          setJoinProjectOpen(false);
-          setInviteLinkCode(null);
-          // 从「加入项目」切过来的是普通新建：不预先打开共享。
-          setCreateProjectShare(false);
-          setCreateProjectOpen(true);
-        }}
         onClose={() => {
           setJoinProjectOpen(false);
           setInviteLinkCode(null);

@@ -214,7 +214,6 @@ describe("join project dialog", () => {
   const onJoined = vi.fn();
   const onApplied = vi.fn();
   const onClose = vi.fn();
-  const onCreateProject = vi.fn();
   const invite = {
     code: "AbCdEfGhIjKlMnOpQrStUv",
     projectId: "cloud-1",
@@ -240,7 +239,6 @@ describe("join project dialog", () => {
             onClose={onClose}
             onJoined={onJoined}
             onApplied={onApplied}
-            onCreateProject={onCreateProject}
           />
         </I18nProvider>
       );
@@ -264,8 +262,9 @@ describe("join project dialog", () => {
   it("applies by default and says the request was sent", async () => {
     await paste(invite);
     expect(hasText("用户A 邀请你加入项目")).toBe(true);
-    expect(hasText("你在项目中的任务记录同步至云端，对项目成员可见；本地文件不会上传。")).toBe(true);
-    expect(hasText("项目中已有成员同步的任务。在输入框输入 @ 引用任务，Agent 将读取其完整对话。")).toBe(true);
+    // 一句说明，分号已改逗号；原本讲 @ 引用的第二句按评审删掉了。
+    expect(hasText("你在项目中的任务记录同步至云端，对项目成员可见，本地文件不会上传")).toBe(true);
+    expect(hasText("项目中已有成员同步的任务")).toBe(false);
     expect(hasText("任务在该目录中执行。未选择时，任务不访问本地文件。")).toBe(true);
     expect(button("暂不加入")).toBeTruthy();
 
@@ -293,10 +292,13 @@ describe("join project dialog", () => {
     expect(button("已申请，等待审核").disabled).toBe(true);
   });
 
-  it("switches back to creating a project from the footer button instead of the old tabs", async () => {
-    // 顶部那块「新建项目 | 加入协作项目」标签已经去掉，两个弹窗靠页脚左侧的按钮互切。
+  it("has no tabs and no create-project entry, and an existing member still lands on join", async () => {
+    // 顶部的「新建项目 | 加入协作项目」标签早就不在了；页脚左侧的新建入口也去掉了（新建走侧栏「+」）。
     expect(document.querySelector("[role='tablist']")).toBeNull();
-    await act(async () => button("新建项目").click());
-    expect(onCreateProject).toHaveBeenCalledTimes(1);
+    expect(Array.from(document.querySelectorAll("button")).some((item) => item.textContent?.trim() === "新建项目")).toBe(false);
+    // 已经是成员时也显示「加入项目」，不再另写「打开项目」。
+    await paste({ ...invite, status: "member" });
+    expect(button("加入项目")).toBeTruthy();
+    expect(hasText("打开项目")).toBe(false);
   });
 });
