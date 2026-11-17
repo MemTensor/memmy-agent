@@ -24,7 +24,7 @@ import {
 } from "../app/collab-demo-guide-store.js";
 import { mentionEmptyLabelKey } from "./collab-session-mention.js";
 import { CollabShareToggle } from "./collab-share-toggle.js";
-import { getCollabProjectsSnapshot, selectCollabProject, sharedProjectFor, subscribeCollabProjects } from "../app/collab-projects-store.js";
+import { getCollabProjectsSnapshot, sharedProjectFor, subscribeCollabProjects } from "../app/collab-projects-store.js";
 import { handOffDraftShare } from "../app/collab-share-intent.js";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
@@ -1191,23 +1191,8 @@ export function HomePage() {
     />
   ) : null;
   /**
-   * 标题栏的面包屑只在项目任务上出现：项目 / 项目名 / 任务标题。
-   * 普通任务（不属于任何项目）保持原来的单行标题；是否共享由输入框旁的开关自己说，这里不再重复。
+   * 标题栏只显示任务标题；项目内任务不再加「项目 / 项目名」面包屑，是否共享看输入框旁的开关。
    */
-  const activeSessionProject = useMemo(() => {
-    const projectId = state.agent.currentSessionKey
-      ? state.agent.sessions.find((session) => session.key === state.agent.currentSessionKey)?.projectId
-      : null;
-    if (!projectId) return null;
-    return state.agent.projects.find((project) => project.id === projectId) ?? null;
-  }, [state.agent.currentSessionKey, state.agent.projects, state.agent.sessions]);
-  const projectCrumb = activeSessionProject ? {
-    name: activeSessionProject.name,
-    onOpen: () => {
-      selectCollabProject(activeSessionProject.id);
-      dispatch(appActions.navigate("/collab"));
-    }
-  } : null;
   const environmentScope = resolveWorkspaceEnvironmentScope(
     state.agent.currentSessionKey,
     selectedDraftProject?.id ?? null,
@@ -3553,7 +3538,6 @@ export function HomePage() {
           key={chatScopeKey}
           title={activeConversationTitleDisplay}
           titleTrailing={activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
-          projectCrumb={projectCrumb}
           messages={state.agent.messages}
           panelOpen={threadPanel.phase === "open"}
           onOpenPanel={threadPanel.open}
