@@ -95,7 +95,7 @@ describe("ToolsPageView", () => {
   it("保留页面骨架，三个分类共用紧凑目录的布局", () => {
     const html = renderView(initialToolsState);
 
-    expect(html).toContain('padding-top:calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px) + -8px)');
+    expect(html).toContain('padding-top:calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px) + -20px)');
     expect(html).toContain('class="app-frame-page-content h-full overflow-y-auto tools-page-content"');
     expect(html).toContain('style="padding-bottom:24px"');
     expect(html).toContain('data-tour-anchor="product-tour-tools-content"');

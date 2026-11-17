@@ -60,13 +60,12 @@ describe("AppFrame", () => {
     expect(html).not.toContain('class="px-2 space-y-1"');
     expect(html).toContain("app-frame-content-topbar");
     expect(html).toContain("relative min-w-0 flex-1 overflow-hidden flex flex-col bg-content-bg");
-    expect(html).toContain('data-tour-anchor="product-tour-memory-nav"');
+    expect(html).not.toContain('data-tour-anchor="product-tour-memory-nav"');
     expect(html).toContain('data-icon="message-square-plus"');
     expect(html).toContain('data-icon="link-2"');
-    expect(html).toContain('data-icon="brain-circuit"');
+    expect(html).not.toContain('data-icon="brain-circuit"');
     expect(html).toContain('data-icon="panel-left"');
     expect(html).not.toContain('data-icon="arrow-right"');
-    expect(html).toContain("M12 5a3 3 0 1 0-5.997.125");
     expect(html).toContain('data-icon="search"');
     expect(html).not.toContain('data-icon="minimize-2"');
     expect(html).not.toContain("桌宠");
@@ -654,6 +653,8 @@ describe("AppFrame", () => {
     expect(html).toContain('id="settings-tab-tokens"');
     expect(html).toContain('id="settings-tab-preferences"');
     expect(html).toContain('id="settings-tab-about"');
+    expect(html.indexOf('id="settings-tab-computer-use"')).toBeLessThan(html.indexOf('记忆管理'));
+    expect(html.indexOf('记忆管理')).toBeLessThan(html.indexOf('id="settings-tab-about"'));
     expect(html).toContain("账户");
     expect(html).toContain("模型配置");
     expect(html).toContain("Token 用量");

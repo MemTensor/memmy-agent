@@ -1937,6 +1937,19 @@
   padding: 16px 24px 20px;
 }
 
+.simpleCreateFooter :global(.button) {
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 9px;
+  box-shadow: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.simpleCreateFooter :global(.button:hover:not(:disabled)) {
+  transform: none;
+}
+
 /* 名称：整行输入框，图标与竖线在框内左侧，聚焦时整框描主题色 */
 .simpleNameField {
   display: flex;

@@ -281,7 +281,7 @@ function CreateProjectSurface() {
         </div>
         {/* 左下是「加入项目」，右下是取消与创建：与真实弹窗的页脚一致。 */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 20 }}>
-          <button type="button" className="button button-secondary button-sm" data-demo-guide="create-join">加入项目</button>
+          <button type="button" className="button button-secondary button-md" data-demo-guide="create-join">加入项目</button>
           <span style={{ display: "flex", gap: 8 }}>
             <button type="button" className="button button-ghost">取消</button>
             <button type="button" className="button button-primary" data-demo-guide="create-project-submit">创建项目</button>
