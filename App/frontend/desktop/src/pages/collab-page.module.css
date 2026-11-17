@@ -1336,7 +1336,7 @@
 }
 
 :global(.modal).pickModal {
-  width: min(880px, calc(100vw - 32px));
+  width: min(560px, calc(100vw - 32px));
 }
 
 /*

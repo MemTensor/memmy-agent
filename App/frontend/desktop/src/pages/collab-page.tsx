@@ -2056,8 +2056,6 @@ function ProjectTaskPickerDialog(props: {
     >
       {tasks === null ? (
         <p className={styles.loading}>{error ?? t("collab.loading")}</p>
-      ) : count === 0 ? (
-        <p className={styles.localEmpty}>{t("collab.tasks.empty")}</p>
       ) : (
         // One bordered card holds the select-all row and the sessions, so every box sits on the same left edge.
         <div className={styles.tasksCard}>
