@@ -6,7 +6,7 @@ import { Repositories, type EpisodeRecord, type EvolutionJobRecord, type Feedbac
 import type { MemoryRow } from "../../../src/types.js";
 import { FeedbackExperienceService, type FeedbackExperienceServiceDeps } from "../../../src/service/feedback/feedback-experience.js";
 import { NegativeExperiencePipeline, type NegativeExperiencePipelineDeps } from "../../../src/service/evolution/negative-experience-pipeline.js";
-import { listL2Candidates } from "../../../src/service/evolution/l2-candidate-service.js";
+import { listL2Candidates, markL2CandidatesProcessed } from "../../../src/service/evolution/l2-candidate-service.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const fixture = createMemoryServiceFixture();
@@ -40,7 +40,7 @@ function setup() {
     upsertEvolutionMemory: forbidden,
     traceMeta: traceMetaFromMemory
   };
-  return { repos, forbidden, jobs,
+  return { repos, forbidden, jobs, enqueueJob,
     feedback: new FeedbackExperienceService(shared as unknown as FeedbackExperienceServiceDeps),
     negative: new NegativeExperiencePipeline(shared as unknown as NegativeExperiencePipelineDeps)
   };
@@ -84,6 +84,93 @@ function negativeJob(payload: Record<string, unknown>): EvolutionJobRecord {
 }
 
 describe("unified special L2 admission", () => {
+  it("replaces one reward source across queue jobs while preserving independent feedback", async () => {
+    const test = setup();
+    const memory = source(test.repos, "revision-source");
+    episode(test.repos, [memory.id]);
+    const feedback = test.repos.runtime.insertFeedback({ ...feedbackRecord(memory.id), polarity: "negative" });
+    await test.negative.materialize(negativeJob({ source: "negative_feedback", feedbackId: feedback.id }));
+    await test.negative.materialize(negativeJob({ source: "episode_reward", rewardReason: "old assessment" }));
+    const before = listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" })[0]!;
+    await test.negative.materialize({ ...negativeJob({ source: "episode_reward", rewardReason: "old assessment" }), id: "retry-job" });
+    const repeated = listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" })[0]!;
+    expect(repeated.sourceVersion).toBe(before.sourceVersion);
+    await test.negative.materialize({ ...negativeJob({ source: "episode_reward", rewardReason: "revised assessment" }), id: "revised-job" });
+    const revised = listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" })[0]!;
+    expect(revised.signals).toHaveLength(2);
+    expect(revised.signals.find(signal => signal.feedbackId === feedback.id)).toEqual(before.signals.find(signal => signal.feedbackId === feedback.id));
+    expect(revised.signals.find(signal => !signal.feedbackId)?.text).toContain("revised assessment");
+    expect(revised.signals.find(signal => !signal.feedbackId)?.text).not.toContain("old assessment");
+  });
+
+  it.each(["open", "reclosed"] as const)("does not admit stale reward evidence after %s", async state => {
+    const test = setup();
+    episode(test.repos, [source(test.repos, "stale-source").id]);
+    test.repos.runtime.reopenEpisode("episode");
+    if (state === "reclosed") test.repos.runtime.closeEpisode("episode");
+    await test.negative.materialize(negativeJob({ source: "episode_reward", episodeGeneration: 0 }));
+    expect(listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" })).toEqual([]);
+    expect(test.jobs).toEqual([]);
+  });
+
+  it("keeps completed reward evidence completed on a new queue job", async () => {
+    const test = setup();
+    episode(test.repos, [source(test.repos, "processed-source").id]);
+    await test.negative.materialize(negativeJob({ source: "episode_reward", sourceEventId: "episode" }));
+    const candidates = listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" });
+    markL2CandidatesProcessed(test.repos, candidates, [], at);
+    const saved = test.repos.runtime.getUnifiedL2Candidate(candidates[0]!.id, DEVICE_MEMORY_OWNER);
+    const count = test.jobs.length;
+    await test.negative.materialize({ ...negativeJob({ source: "episode_reward" }), id: "another-queue-job" });
+    expect(test.repos.runtime.getUnifiedL2Candidate(candidates[0]!.id, DEVICE_MEMORY_OWNER)).toEqual(saved);
+    expect(test.jobs).toHaveLength(count);
+  });
+
+  it("rolls back candidate admission if downstream enqueue fails", async () => {
+    const test = setup();
+    episode(test.repos, [source(test.repos, "atomic-source").id]);
+    test.enqueueJob.mockImplementationOnce(() => { throw new Error("injected queue failure"); });
+    await expect(test.negative.materialize(negativeJob({ source: "episode_reward" }))).rejects.toThrow("injected queue failure");
+    expect(listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" })).toEqual([]);
+  });
+
+  it("preserves independent corrective feedback when its Episode reopens", async () => {
+    const test = setup();
+    const memory = source(test.repos, "feedback-reopen");
+    episode(test.repos, [memory.id]);
+    const feedback = test.repos.runtime.insertFeedback({ ...feedbackRecord(memory.id), polarity: "negative" });
+    test.repos.runtime.reopenEpisode("episode");
+    await test.negative.materialize(negativeJob({ source: "negative_feedback", feedbackId: feedback.id, episodeGeneration: 0 }));
+    expect(listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" })[0]?.signals)
+      .toEqual([expect.objectContaining({ feedbackId: feedback.id })]);
+  });
+
+  it.each([false, true])("withdraws reward evidence on success and preserves independent feedback: %s", async independent => {
+    const test = setup();
+    const memory = source(test.repos, "withdraw-source");
+    episode(test.repos, [memory.id]);
+    if (independent) {
+      const feedback = test.repos.runtime.insertFeedback({ ...feedbackRecord(memory.id), polarity: "negative" });
+      await test.negative.materialize(negativeJob({ source: "negative_feedback", feedbackId: feedback.id }));
+    }
+    await test.negative.materialize(negativeJob({ source: "episode_reward" }));
+    const original = listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" })[0]!;
+    markL2CandidatesProcessed(test.repos, [original], [], at);
+    test.repos.runtime.updateEpisodeReward("episode", { rTask: 1, rewardDetail: { reason: "corrected" } }, at);
+    await test.negative.materialize(negativeJob({ source: "episode_reward" }));
+    const remaining = listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" });
+    expect(remaining).toHaveLength(independent ? 1 : 0);
+    if (independent) expect(remaining[0]?.signals).toEqual([expect.objectContaining({ feedbackId: "feedback" })]);
+    const saved = test.repos.runtime.getUnifiedL2Candidate(original.id, DEVICE_MEMORY_OWNER);
+    await test.negative.materialize(negativeJob({ source: "episode_reward" }));
+    expect(test.repos.runtime.getUnifiedL2Candidate(original.id, DEVICE_MEMORY_OWNER)).toEqual(saved);
+    test.repos.runtime.updateEpisodeReward("episode", { rTask: -0.8, rewardDetail: {} }, at);
+    await test.negative.materialize(negativeJob({ source: "episode_reward" }));
+    const restored = listL2Candidates(test.repos, { userId: DEVICE_MEMORY_OWNER, episodeId: "episode" });
+    expect(restored[0]?.id).toBe(original.id);
+    expect(restored[0]?.signals).toHaveLength(independent ? 2 : 1);
+  });
+
   it("keeps low-value feedback L1 and its rule fallback in the shared pool without a direct L2 write", async () => {
     const test = setup();
     const memory = source(test.repos, "low-value");

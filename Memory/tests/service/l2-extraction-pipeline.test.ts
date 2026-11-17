@@ -100,6 +100,25 @@ describe("unified L2 extraction persistence", () => {
   });
   afterEach(() => db?.close());
 
+  it.each([false, true])("tracks real extraction provenance when a failure becomes success; independent feedback=%s", async independent => {
+    admit();
+    repos.runtime.createSession({ id: "withdraw-session", userId: DEVICE_MEMORY_OWNER, source: "codex", profileId: "default",
+      status: "closed", meta: {}, openedAt: AT, closedAt: AT, updatedAt: AT });
+    repos.runtime.createEpisode({ id: "e", userId: DEVICE_MEMORY_OWNER, sessionId: "withdraw-session", status: "closed",
+      l1MemoryIds: ["l1"], rawTurnIds: [], feedbackIds: [], decisionRepairIds: [], l2PolicyIds: [], l3WorldModelIds: [],
+      skillMemoryIds: [], turnCount: 1, rTask: -1, rewardDetail: {}, pipelineStatus: "idle", meta: {}, openedAt: AT, closedAt: AT, updatedAt: AT });
+    upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: "l1", route: "negative", at: AT,
+      signal: { eventId: "e", route: "negative", sourceBasis: "implicit_failure_analysis", text: "Task failed" } });
+    if (independent) upsertL2Candidate(repos, { userId: DEVICE_MEMORY_OWNER, sourceMemoryId: "l1", route: "feedback", at: AT,
+      signal: { eventId: "feedback", route: "feedback", feedbackId: "feedback", sourceBasis: "user_corrective_feedback", text: "Always verify totals" } });
+    await pipeline().induce(job());
+    const created = repos.memories.list({ memoryLayer: "L2" }, 100)[0]!;
+    repos.runtime.updateEpisodeReward("e", { rTask: 1, rewardDetail: {} }, AT);
+    const revised = recomputePolicyStats(created.id, AT)!;
+    expect(policyMetaFromMemory(revised)?.support).toBe(independent ? 1 : 0);
+    if (!independent) expect(policyMetaFromMemory(revised)?.status).toBe("quarantined");
+  });
+
   it("deduplicates identical documents without dropping candidates and reuses vectors after model failure", async () => {
     admit();
     for (const id of ["old-a", "old-b", "old-c"]) repos.memories.insert(row(id, "L2"));

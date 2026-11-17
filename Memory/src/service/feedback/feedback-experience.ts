@@ -1,3 +1,4 @@
+import { initialPolicyContributions, readPolicyContributions, revisePolicyFeedback } from "../evolution/episode-contributions.js";
 import { embeddingIdentity, vectorEmbeddingIdentity, type EmbeddingIdentity } from "../../model/embedding-identity.js";
 import { updateMemoryVectorField } from "../embedding/embedding-pipeline.js";
 import type {
@@ -1673,11 +1674,13 @@ applyRecallOutcome(
         const policy = policyMetaFromMemory(next);
         if (policy) {
           const direction = outcome === "positive" ? 1 : -1;
-          const nextGain = clampNumber(
-            policy.gain + direction * 0.02 * clampNumber(feedback.magnitude, 0, 1),
-            -1,
-            1
-          );
+          const rawPolicy = isRecord(next.properties.internal_info.policy) ? next.properties.internal_info.policy : {};
+          const settings = this.deps.config.algorithm.l2Induction;
+          const prior = readPolicyContributions(rawPolicy.gain_contributions) ?? initialPolicyContributions(
+            policy.gain, policy.support, settings.gainEmaAlpha, settings.tauSoftmax);
+          const contributions = revisePolicyFeedback(prior, `${event.id}:${feedback.id}`,
+            direction * 0.02 * clampNumber(feedback.magnitude, 0, 1), policy.gain);
+          const nextGain = contributions.lastGain;
           const status = policyStatusAfterGain({
             currentStatus: policy.status === "active"
               ? "active"
@@ -1699,6 +1702,8 @@ applyRecallOutcome(
             sourceTraceIds: policy.sourceTraceIds,
             updatedAt: at
           });
+          next.properties.internal_info = { ...next.properties.internal_info,
+            policy: { ...(next.properties.internal_info.policy as Record<string, unknown>), gain_contributions: contributions } };
         }
       }
       const saved = this.deps.repos.memories.update(next);

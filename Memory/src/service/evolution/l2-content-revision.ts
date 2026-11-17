@@ -25,6 +25,7 @@ export function revisedL2Memory(memory: MemoryRow, lesson: NewL2Lesson, sourceId
   const old = isRecord(internal.policy) ? internal.policy : {};
   const fields = {
     schema_version: 2, content_revision: l2ContentRevision(memory) + 1, lesson_type: lesson.type,
+    gain_contributions: undefined, gain_input_version: undefined,
     status: "candidate", support: new Set(episodeIds).size, gain: 0, raw_gain: 0,
     source_memory_ids: sourceIds, source_l1_memory_ids: sourceIds, source_trace_ids: sourceIds,
     source_episode_ids: [...new Set(episodeIds)], source_feedback_ids: [], source_repair_ids: [],
@@ -32,7 +33,7 @@ export function revisedL2Memory(memory: MemoryRow, lesson: NewL2Lesson, sourceId
     successful_episode_count: 0, evidence_event_count: sourceIds.length,
     pending_conflict_count: 0, gain_status: "not_computed", skill_eligible: false,
     experience_type: "repair_instruction", evidence_polarity: "neutral",
-    signature: "_|_|_|_", source_routes: [], source_basis: [], last_verified_at: null, revalidate_after: null,
+    signature: "_|_|_|_", source_admissions: {}, source_routes: [], source_basis: [], last_verified_at: null, revalidate_after: null,
     generation_method: "model", extraction_status: "complete", rule_fallback: false,
     // Revision evidence justifies the text; it is not proof of successful execution.
     policy_confidence: 0.5, confidence: 0.5,

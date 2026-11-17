@@ -1,3 +1,4 @@
+import { revisionInputHash, episodeGeneration, episodeRewardInputVersion, rewardInputIsCurrent } from "./episode-revision.js";
 import { languageSteeringLine, steeredPromptLanguage } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
@@ -90,7 +91,7 @@ export class BigTurnSpanPipeline {
   constructor(private readonly deps: BigTurnSpanDeps) {}
 
   async splitAndStore(job: EvolutionJobRecord): Promise<void> {
-    if (!SPAN_BIG_TURN_ENABLED || !this.deps.llm.isConfigured()) return;
+    if (!SPAN_BIG_TURN_ENABLED) return;
     const source = job.targetMemoryId
       ? this.deps.repos.memories.get(job.targetMemoryId)
       : undefined;
@@ -98,13 +99,32 @@ export class BigTurnSpanPipeline {
     const rawTurn = rawTurnId
       ? this.deps.repos.runtime.getRawTurn(rawTurnId)
       : undefined;
-    if (!source || !rawTurn || rawTurn.toolCalls.length < SPAN_BIG_TURN_MIN_TOOL_CALLS) return;
+    if (!source || !rawTurn) return;
 
+    const episodeId = rawTurn.episodeId ?? job.episodeId;
+    if (rawTurn.episodeId && job.episodeId && rawTurn.episodeId !== job.episodeId) return;
+    const episode = episodeId ? this.deps.repos.runtime.getEpisode(episodeId) : undefined;
+    const episodeVersion = episode ? episodeRewardInputVersion(this.deps.repos, episode) : undefined;
+    const rawVersion = revisionInputHash(rawTurn);
+    if (episode && (episode.status !== "closed" || (typeof job.payload.episodeGeneration === "number"
+      && job.payload.episodeGeneration !== episodeGeneration(episode)))) return;
+    const rTask = typeof episode?.rTask === "number" ? episode.rTask : Number(job.payload.rTask ?? 0);
+    const eligible = rTask > 0 && !episode?.rewardDetail.skipped && !rawTurn.deletedAt && !rawTurn.redactedAt
+      && rawTurn.toolCalls.length >= SPAN_BIG_TURN_MIN_TOOL_CALLS;
+    const completionKey = `span-result:v1:${source.id}`;
+    const inputVersion = revisionInputHash({ eligible, prompt: bigTurnPromptPayload(source, rawTurn, job),
+      raw: { userText: rawTurn.userText, assistantText: rawTurn.assistantText, reasoningSummary: rawTurn.reasoningSummary,
+        toolCalls: rawTurn.toolCalls, toolResults: rawTurn.toolResults, status: rawTurn.status,
+        deletedAt: rawTurn.deletedAt, redactedAt: rawTurn.redactedAt },
+      language: this.deps.config.language, model: [this.deps.llm.config.provider, this.deps.llm.config.model] });
+    const completed = this.deps.repos.runtime.getKv(completionKey)?.value;
+    if (isRecord(completed) && completed.inputVersion === inputVersion) return;
+    if (eligible && !this.deps.llm.isConfigured()) return;
     const lang = steeredPromptLanguage(this.deps.config.language, [
       rawTurn.userText,
       rawTurn.assistantText
     ]);
-    const result = await this.deps.llm.completeJson<{
+    const result = eligible ? await this.deps.llm.completeJson<{
       reason?: unknown;
       spans?: unknown;
     }>([
@@ -112,22 +132,49 @@ export class BigTurnSpanPipeline {
       { role: "system", content: languageSteeringLine(lang) },
       {
         role: "user",
-        content: stableStringify(bigTurnPromptPayload(source, rawTurn, job))
+        content: JSON.stringify(bigTurnPromptPayload(source, rawTurn, job))
       }
     ], {
       operation: SPAN_BIG_TURN_OPERATION,
       thinkingMode: "disabled",
       temperature: 0.6,
       maxTokens: 4096
-    });
+    }) : { spans: [] };
     const spans = validateSpanResult(result, rawTurn.toolCalls.length);
-    if (!spans) return;
     this.deps.repos.transaction(() => {
+      const current = this.deps.repos.memories.get(source.id);
+      if (!current || current.status !== "activated" || current.version !== source.version
+        || revisionInputHash(this.deps.repos.runtime.getRawTurn(rawTurn.id)) !== rawVersion
+        || (episode && episodeVersion && !rewardInputIsCurrent(this.deps.repos, episode.id, episodeVersion))) {
+        throw new Error("span source changed during generation");
+      }
+      const oldTrace = current.properties.internal_info.trace;
+      const oldIds = isRecord(oldTrace) && Array.isArray(oldTrace.span_ids)
+        ? oldTrace.span_ids.filter((id): id is string => typeof id === "string") : [];
       const spanIds: string[] = [];
       for (const [spanIndex, span] of spans.entries()) {
-        spanIds.push(this.storeSpan({ source, rawTurn, job, span, spanIndex }));
+        const id = this.storeSpan({ source, rawTurn, job, span, spanIndex });
+        if (id) spanIds.push(id);
+      }
+      for (const id of oldIds) {
+        if (spanIds.includes(id)) continue;
+        const previous = this.deps.repos.memories.get(id);
+        if (!previous || previous.status !== "activated") continue;
+        const internal = previous.properties.internal_info;
+        if (!isRecord(internal.span) || internal.span.source_trace_id !== source.id) continue;
+        if (typeof internal.span_generated_content_hash === "string"
+          && internal.span_generated_content_hash !== revisionInputHash(previous.memoryValue)) continue;
+        const retired = this.deps.repos.memories.update({ ...previous, status: "archived",
+          properties: { ...previous.properties, status: "archived", internal_info: { ...internal,
+            span_replacement: { sourceTraceId: source.id, retiredVersion: previous.version + 1 } } },
+          updatedAt: job.updatedAt });
+        this.deps.repos.runtime.appendChange({ memoryId: id, namespaceId: this.deps.namespaceIdFromMemory(retired),
+          kind: "span", op: "updated", entityId: id, userId: retired.userId,
+          changeType: "span_replaced", before: previous, after: retired,
+          source: "worker.span_big_turn.v1", createdAt: job.updatedAt });
       }
       this.linkSpansToSourceTrace(source.id, spanIds, job);
+      this.deps.repos.runtime.setKv(completionKey, { inputVersion, spanIds }, job.updatedAt);
     });
   }
 
@@ -137,9 +184,18 @@ export class BigTurnSpanPipeline {
     job: EvolutionJobRecord;
     span: SpanDraft;
     spanIndex: number;
-  }): string {
+  }): string | undefined {
     const { source, rawTurn, job, span, spanIndex } = input;
     const id = spanId(source.id, span);
+    const previous = this.deps.repos.memories.getIncludingDeleted(id);
+    if (previous?.deletedAt || previous?.status === "deleted") return undefined;
+    const retirement = previous?.properties.internal_info.span_replacement;
+    if (previous?.status === "archived" && (!isRecord(retirement)
+      || retirement.sourceTraceId !== source.id || retirement.retiredVersion !== previous.version)) return undefined;
+    const generatedHash = previous?.properties.internal_info.span_generated_content_hash;
+    if (previous && typeof generatedHash === "string" && generatedHash !== revisionInputHash(previous.memoryValue)) {
+      return previous.status === "activated" ? previous.id : undefined;
+    }
     const value = [
       `Goal: ${span.spanGoal}`,
       `Summary: ${span.summary}`
@@ -169,6 +225,7 @@ export class BigTurnSpanPipeline {
       },
       internal: {
         source: "worker.span_big_turn.v1",
+        span_generated_content_hash: revisionInputHash(value),
         plugin_algorithm: "span.big_turn.v1",
         summary: span.summary,
         span: {
@@ -186,7 +243,6 @@ export class BigTurnSpanPipeline {
       },
       createdAt: job.createdAt
     });
-    const previous = this.deps.repos.memories.get(id);
     const saved = previous
       ? this.deps.repos.memories.update({
           ...memory,
@@ -323,8 +379,8 @@ function redactAndClip(value: string, maxChars: number): string {
 function validateSpanResult(
   result: { spans?: unknown },
   toolCallCount: number
-): SpanDraft[] | null {
-  if (Array.isArray(result.spans) && result.spans.length === 0) return null;
+): SpanDraft[] {
+  if (Array.isArray(result.spans) && result.spans.length === 0) return [];
   if (!Array.isArray(result.spans) || result.spans.length < 2 || result.spans.length > 6) {
     throw new Error("span.big_turn returned invalid span count");
   }

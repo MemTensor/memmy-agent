@@ -1,3 +1,4 @@
+import { SkillTrialBoundaryError, readSkillEtaContributions, reviseSkillEtaTrial, skillEtaBodyRevision } from "../evolution/skill-eta-contributions.js";
 import {
   skillEtaAfterTrial,
   skillMetaFromMemory,
@@ -141,7 +142,19 @@ pendingTrialsForFeedback(feedback: FeedbackRecord): SkillTrialRecord[] {
     return [];
   }
 
-updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
+updateSkillTrialStats(trial: SkillTrialRecord, at: string): "updated" | "cannot_recompute" | undefined {
+    try {
+      return this.deps.repos.transaction(() => this.updateSkillTrialStatsInTransaction(trial, at));
+    } catch (error) {
+      if (!(error instanceof SkillTrialBoundaryError)) throw error;
+      recordApiLog(this.deps.repos.runtime, "skill_evolve",
+        { skillId: trial.skillMemoryId, trialId: error.trialId, phase: "blocked", reason: error.reason },
+        { kind: "skill.trial.recompute_blocked", reason: error.message }, 0, false, at);
+      return "cannot_recompute";
+    }
+  }
+
+  private updateSkillTrialStatsInTransaction(trial: SkillTrialRecord, at: string): "updated" | undefined {
     const startedAt = performance.now();
     const memory = this.deps.repos.memories.get(trial.skillMemoryId);
     if (!memory || memory.memoryLayer !== "Skill" || isImportedSkill(memory)) {
@@ -152,13 +165,15 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
     if (isRecord(data) && data.status === "suspended" && isRecord(data.pending_policy_revisions)) return;
     // Historical trials remain auditable, but cannot validate rewritten content.
     if (revisedAt && trial.createdAt <= revisedAt) return;
-    const trials = this.deps.repos.runtime
-      .listSkillTrials({ skillMemoryId: trial.skillMemoryId, limit: 1000 })
-      .filter((item) => item.outcome !== "unknown" && (!revisedAt || item.createdAt > revisedAt));
-    const attempted = trials.length;
-    const passed = trials.filter((item) => item.outcome === "success").length;
+    let contributions = readSkillEtaContributions(isRecord(data) ? data.eta_contributions : undefined);
+    const currentTrials = this.deps.repos.runtime
+      .listSkillTrials({ skillMemoryId: trial.skillMemoryId, limit: contributions ? Number.MAX_SAFE_INTEGER : 1000 })
+      .filter((item) => !revisedAt || item.createdAt > revisedAt);
+    const trials = currentTrials.filter(item => item.outcome !== "unknown");
+    let attempted = trials.length;
+    let passed = trials.filter((item) => item.outcome === "success").length;
     const currentSkill = skillMetaFromMemory(memory);
-    const eta = attempted > 0
+    let eta = attempted > 0
       ? skillEtaAfterTrial({
           currentEta: currentSkill?.eta ?? 0,
           previousAttempts: currentSkill?.trialsAttempted ?? 0,
@@ -167,6 +182,24 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
           nextPasses: passed
         })
       : currentSkill?.eta ?? 0;
+    if (contributions) {
+      // Only recorded baselines may be replayed; legacy aggregate histories remain opaque.
+      const bodyRevision = skillEtaBodyRevision(memory);
+      const current = { eta: currentSkill?.eta ?? 0, attempts: currentSkill?.trialsAttempted ?? 0,
+        passes: currentSkill?.trialsPassed ?? 0 };
+      const records = currentTrials.sort((a, b) => (a.resolvedAt ?? a.createdAt).localeCompare(b.resolvedAt ?? b.createdAt) || a.id.localeCompare(b.id));
+      const recorded = new Set(contributions.order.filter(event => event.kind === "trial").map(event => event.id));
+      let first = true;
+      for (const record of records) {
+        if (record.outcome === "unknown" && !recorded.has(record.id) &&
+          !Object.hasOwn(contributions.baselineTrials ?? {}, record.id)) continue;
+        contributions = reviseSkillEtaTrial(contributions, bodyRevision, record.id,
+          record.outcome === "unknown" ? null : record.outcome === "success" ? "success" : "failure",
+          first ? current : contributions.last);
+        first = false;
+      }
+      ({ eta, attempts: attempted, passes: passed } = first ? current : contributions.last);
+    }
     const status = skillStatusAfterTrial({
       currentStatus: currentSkill?.status ?? "candidate",
       eta,
@@ -177,6 +210,8 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
       repairOrigin: currentSkill?.repairOrigin ?? false,
       archiveEta: this.deps.config.algorithm.skill.archiveEta
     });
+    if (contributions && isRecord(data) && JSON.stringify(contributions) === JSON.stringify(data.eta_contributions) &&
+      eta === currentSkill?.eta && attempted === currentSkill.trialsAttempted && passed === currentSkill.trialsPassed && status === currentSkill.status) return;
     const previous = memory;
     const next = updateSkillStats(memory, {
       trialsAttempted: attempted,
@@ -185,6 +220,10 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
       status,
       updatedAt: at
     });
+    if (contributions) {
+      next.properties.internal_info.skill = { ...(isRecord(next.properties.internal_info.skill) ? next.properties.internal_info.skill : {}),
+        eta_contributions: contributions };
+    }
     const saved = this.deps.repos.memories.update(next);
     this.deps.repos.runtime.appendChange({
       memoryId: saved.id,
@@ -214,6 +253,7 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
       true,
       nowIso()
     );
+    return "updated";
   }
 
 resolvePendingSkillTrialsForReward(input: {
