@@ -6,8 +6,9 @@ import type { DemoGuidePhase } from "../../../app/collab-demo-guide-store.js";
 import {
   blockerRects,
   cardPlacement,
-  clickHintAnchor,
+  clickHintPlacement,
   DEMO_GUIDE_CARD_WIDTH,
+  DEMO_GUIDE_HINT_RADIUS,
   demoGuideClickTarget,
   demoGuideTarget,
   maskRects,
@@ -190,14 +191,44 @@ describe("demo guide layout", () => {
     expect(demoGuideTarget("not-a-phase" as DemoGuidePhase)).toBeUndefined();
   });
 
-  it("puts the breathing click arrow on the control each screen asks people to click", () => {
-    // 大块（任务行、输入区）指正中：一眼看出要点的是这一条。
-    expect(clickHintAnchor({ left: 100, top: 200, width: 800, height: 100 })).toEqual({ left: 500, top: 250 });
-    // 小控件（按钮、齿轮、开关）指右下角：箭头与波纹压在边上，不挡住按钮上的图标与字。
-    expect(clickHintAnchor({ left: 900, top: 600, width: 96, height: 32 })).toEqual({ left: 996, top: 632 });
-    expect(clickHintAnchor({ left: 40, top: 40, width: 28, height: 28 })).toEqual({ left: 68, top: 68 });
+  it("puts the breathing click dot on the control each screen asks people to click", () => {
+    const radius = DEMO_GUIDE_HINT_RADIUS;
+    // 一体规则：圆心落在控件某条边的中点上，整个圆点在控件外面，所以永远不会盖住按钮上的字与图标。
+    // 窄的按钮：默认贴下沿，圆心落在下沿中点、整个圆点在按钮外面，所以永远不会盖住按钮上的字。
+    const button = { left: 900, top: 600, width: 96, height: 32 };
+    expect(clickHintPlacement(button, viewport)).toEqual({
+      side: "bottom",
+      left: button.left + button.width / 2,
+      top: button.top + button.height + radius + 1
+    });
+    // 按钮贴着窗口下沿（下方放不下）时改贴上沿，圆心照样在边中点上。
+    const low = { left: 900, top: 760, width: 96, height: 32 };
+    expect(clickHintPlacement(low, viewport)).toEqual({
+      side: "top",
+      left: low.left + low.width / 2,
+      top: low.top - radius - 1
+    });
+    // 一长条（任务行）：贴右端中点，圆点整个在行外，也不占下方——那里要放说明卡。
+    // 右侧真的贴到窗口边（放不下整颗）时改贴左端中点，不夹进行里盖住内容。
+    const row = { left: 100, top: 300, width: 900, height: 76 };
+    expect(clickHintPlacement(row, viewport)).toEqual({
+      side: "right",
+      left: row.left + row.width + radius + 1,
+      top: row.top + row.height / 2
+    });
+    const edgeRow = { left: 100, top: 300, width: 1160, height: 76 };
+    expect(clickHintPlacement(edgeRow, viewport)).toEqual({
+      side: "left",
+      left: edgeRow.left - radius - 1,
+      top: edgeRow.top + edgeRow.height / 2
+    });
+    // 四周都没空地（控件比窗口还大）时夹回窗口里：宁可压住控件一点，也要整颗看得见。
+    const huge = { left: -20, top: -20, width: 1300, height: 900 };
+    const clamped = clickHintPlacement(huge, viewport);
+    expect(clamped.left).toBeGreaterThanOrEqual(radius);
+    expect(clamped.top).toBeGreaterThanOrEqual(radius);
 
-    // 真的要人点的那几屏都摆箭头：建的按钮、任务行、接续任务、发送、齿轮、接收开关、允许。
+    // 真的要人点的那几屏都摆圆点：建的按钮、任务行、接续任务、发送、齿轮、接收开关、允许。
     for (const phase of [
       "create-project",
       "task-row",
@@ -210,7 +241,7 @@ describe("demo guide layout", () => {
     ] as const) {
       expect(demoGuideClickTarget(demoGuideTarget(phase)), phase).toBe(demoGuideTarget(phase).stroke);
     }
-    // 只介绍、只等结果的屏一个都不摆：没有可点的控件时箭头只会指错地方。
+    // 只介绍、只等结果的屏一个都不摆：没有可点的控件时圆点只会指错地方。
     for (const phase of [
       "intro",
       "name",

@@ -107,7 +107,7 @@ export function demoGuideTarget(phase: DemoGuidePhase): DemoGuideTarget {
 export const DEMO_GUIDE_HOLE_PADDING = 6;
 
 /**
- * 这一屏要不要在亮区上摆一个「点这里」的呼吸箭头。
+ * 这一屏要不要在亮区上摆一个「点这里」的呼吸圆点。
  *
  * 判据只看亮区里有没有一个真的接点击的控件：`stroke` 有、且不是「只介绍、不让人动手」的 `blockStroke`
  * 与只压暗的 `clean`。看板导览、加入那一屏、等结果这几屏没有任何可点的控件，就不摆。
@@ -117,17 +117,61 @@ export function demoGuideClickTarget(target: DemoGuideTarget): string | null {
   return target.stroke;
 }
 
+/** 呼吸圆点的半径（px）：圆点直径 22，白心 7，外面再一圈 2px 白边。 */
+export const DEMO_GUIDE_HINT_RADIUS = 11;
+
+/** 圆点贴在控件哪条边上。 */
+export type DemoGuideHintSide = "bottom" | "right" | "left" | "top";
+
+export interface ClickHintPlacement {
+  /** 圆点的圆心：它一定落在控件某条边的中点上，再沿边法线往外让开一个半径。 */
+  left: number;
+  top: number;
+  side: DemoGuideHintSide;
+}
+
+/** 宽到这个程度的控件是「一条」，圆点贴在右端中点比贴在下方正中好看：下方正中会被说明卡占住。 */
+const WIDE_TARGET = 420;
+
 /**
- * 呼吸箭头落在哪一点（箭头尖就在这个点上）。
+ * 呼吸圆点落在哪：圆心贴在控件某条边的中点上，整个圆点在控件外面（不遮字、不遮图标）。
  *
- * 大块的控件（任务行、输入区）指正中：一眼看出要点的是这一条；
- * 小控件（按钮、齿轮、开关）指右下角外侧，箭头只压在角上，不遮挡按钮上的字与图标。
+ * 上一版把箭头挂在控件右下角外侧、且箭尖与缩放原点各用一个常数，人看到的就是「飘在角上、没对上」。
+ * 现在只有一条规则：**圆心 = 某条边的中点 + 半径**，所以它总是居中地贴在控件某一条边上，
+ * 圆点与扩散的波纹共用同一个圆心，肉眼能直接验证「就是这个控件」。
+ *
+ * 选哪条边：控件自身宽不宽决定优先级——宽的是整条任务行，优先贴右侧（下方要留给说明卡，正中又会被下方
+ * 的说明卡抢走），右侧放不下或会被夹回控件里时改贴左侧；窄的按钮一律先贴下沿，下方确实放不下时再试上、右、左。
+ * 四条边都放不下（控件比窗口还大）就取最宽的那边并夹回窗口里。
  */
-export function clickHintAnchor(rect: Rect): { left: number; top: number } {
-  const small = rect.height <= 56 || rect.width <= 140;
-  return small
-    ? { left: rect.left + rect.width, top: rect.top + rect.height }
-    : { left: rect.left + rect.width / 2, top: rect.top + rect.height / 2 };
+export function clickHintPlacement(rect: Rect, viewport: Viewport): ClickHintPlacement {
+  const radius = DEMO_GUIDE_HINT_RADIUS;
+  const space = {
+    bottom: viewport.height - (rect.top + rect.height),
+    top: rect.top,
+    right: viewport.width - (rect.left + rect.width),
+    left: rect.left
+  };
+  const fits = (side: DemoGuideHintSide) => space[side] >= radius * 2 + 8;
+  const order: DemoGuideHintSide[] = rect.width >= WIDE_TARGET
+    ? ["right", "left", "bottom", "top"]
+    : ["bottom", "top", "right", "left"];
+  const side: DemoGuideHintSide = order.find(fits)
+    ?? order.reduce((best, candidate) => (space[candidate] > space[best] ? candidate : best));
+  const gap = radius + 1;
+  const point = side === "bottom"
+    ? { left: rect.left + rect.width / 2, top: rect.top + rect.height + gap }
+    : side === "right"
+      ? { left: rect.left + rect.width + gap, top: rect.top + rect.height / 2 }
+      : side === "left"
+        ? { left: rect.left - gap, top: rect.top + rect.height / 2 }
+        : { left: rect.left + rect.width / 2, top: rect.top - gap };
+  // 控件贴到窗口边上时圆点会被切掉：夹回窗口里，宁可与控件重叠一点也要整颗都看得见。
+  return {
+    side,
+    left: Math.max(radius + 2, Math.min(point.left, viewport.width - radius - 2)),
+    top: Math.max(radius + 2, Math.min(point.top, viewport.height - radius - 2))
+  };
 }
 
 /** 亮区不能压在窗口边缘上：至少留出这点距离，说明卡才放得下。 */

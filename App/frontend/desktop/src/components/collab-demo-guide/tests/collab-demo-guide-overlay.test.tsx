@@ -576,31 +576,34 @@ describe("demo guide overlay tracking", () => {
     expect(document.body.textContent).toContain("正在本机执行，完成后结果会回传给小饭团");
   });
 
-  it("marks the one control a screen asks people to click with a breathing arrow", async () => {
-    // 第一步亮的是一整条任务行（大块）：箭头落在亮区正中，看的人一眼知道要点的就是这一条。
+  it("marks the one control a screen asks people to click with a breathing dot", async () => {
+    // 第一步亮的是一整条任务行：圆点贴它右端中点，整个在行外（下方要留给说明卡）。
     anchor("board-task-row", () => rect({ left: 90, top: 300, width: 1000, height: 100 }));
     await mount("task-row");
 
     const hint = document.querySelector<HTMLElement>("[data-demo-click-hint]");
     expect(hint).toBeTruthy();
-    // 亮区是任务行外扩 6px（84,294 → 1096,406），正中就是箭尖的位置。
-    expect(Number.parseFloat(hint!.style.left)).toBe(590);
+    // 描边是任务行外扩 3px（87,297,1006,106）：圆心 = 右沿 +11+1、竖向中点。
+    expect(hint!.dataset.demoClickHint).toBe("right");
+    expect(Number.parseFloat(hint!.style.left)).toBe(1105);
     expect(Number.parseFloat(hint!.style.top)).toBe(350);
-    // 一枚箭头 + 两圈波纹（呼吸的那一下在箭头自己身上，由 CSS 动画负责）。
+    // 一颗绿色圆点（里面一个白心）+ 两圈波纹：呼吸由 CSS 负责，圆心与波纹圆心是同一个定位点。
     expect(hint!.querySelectorAll("." + styles.clickRipple)).toHaveLength(2);
-    expect(hint!.querySelector("." + styles.clickCursor)).toBeTruthy();
-    // 箭头不接点击：压在按钮上也不能把按钮挡掉。
+    expect(hint!.querySelector("." + styles.clickDisc)).toBeTruthy();
+    expect(hint!.querySelector("." + styles.clickPip)).toBeTruthy();
+    // 圆点不接点击：压在控件边上也不能把它挡掉。
     expect(hint!.getAttribute("aria-hidden")).toBe("true");
 
-    // 小控件（只读面板头部的「继续任务」）箭头落在右下角外侧，不盖住按钮上的字。
+    // 小控件（只读面板头部的「继续任务」）：圆心落在按钮下沿中点，整个圆点在按钮外面，不盖住字。
     await mount("reader");
     const small = document.querySelector<HTMLElement>("[data-demo-click-hint]");
     expect(small).toBeTruthy();
-    // 描边是「继续任务」外扩 3px（1127,93,80,34），箭尖就压在它的右下角上。
-    expect(Number.parseFloat(small!.style.left)).toBe(1207);
-    expect(Number.parseFloat(small!.style.top)).toBe(127);
+    // 描边是「继续任务」外扩 3px（1127,93,80,34）：圆心 = 横向中点、下沿 +11+1。
+    expect(small!.dataset.demoClickHint).toBe("bottom");
+    expect(Number.parseFloat(small!.style.left)).toBe(1167);
+    expect(Number.parseFloat(small!.style.top)).toBe(139);
 
-    // 只介绍或只等结果的屏一个箭头都不摆：看板导览每一站、等一位成员回话。
+    // 只介绍或只等结果的屏一个圆点都不摆：看板导览每一站、等一位成员回话。
     anchor("board-list", () => rect({ left: 90, top: 132, width: 1000, height: 560 }));
     await mount("tour-board");
     expect(document.querySelector("[data-demo-click-hint]")).toBeNull();

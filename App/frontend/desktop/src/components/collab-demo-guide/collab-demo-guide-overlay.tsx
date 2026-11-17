@@ -27,7 +27,7 @@ import { useTranslation } from "../../i18n/use-translation.js";
 import {
   blockerRects,
   cardPlacement,
-  clickHintAnchor,
+  clickHintPlacement,
   DEMO_GUIDE_CARD_WIDTH,
   DEMO_GUIDE_CARD_WIDTH_WIDE,
   DEMO_GUIDE_HOLE_PADDING,
@@ -604,9 +604,9 @@ export function CollabDemoGuideOverlay(props: {
   // 描边那一圈的意思是「这里可以点」：出场那屏（`clean`）、没有可点控件的阶段（看板导览、加入、等结果），
   // 以及建项目之前那几屏「只介绍、不让人动手」（`blockStroke`）都只压暗。
   const quietRing = target.clean === true || target.stroke === null || target.blockStroke === true;
-  // 这一屏要人点的那个控件上再摆一个呼吸箭头：只画一圈线时，人常常不知道那圈线是「点这里」的意思。
-  // 箭头尖落在大块控件的正中、小按钮的右下角（见 `clickHintAnchor`），本身不接点击。
-  const clickAnchor = demoGuideClickTarget(target) && stroke ? clickHintAnchor(stroke) : null;
+  // 这一屏要人点的那个控件旁边再摆一颗呼吸圆点：只画一圈线时，人常常不知道那圈线是「点这里」的意思。
+  // 圆点的圆心贴在控件某条边的中点上、整个在控件外面（见 `clickHintPlacement`），本身不接点击。
+  const clickHint = demoGuideClickTarget(target) && stroke ? clickHintPlacement(stroke, viewport) : null;
   // 亮区几乎占满窗口时（对话区就是这种情况）卡片只能压在它上面：这里再夹一次，保证不出窗口。
   const cardTop = Math.max(8, Math.min(placement.top, viewport.height - cardHeight - 8));
   const cardLeft = Math.max(8, Math.min(placement.left, viewport.width - cardWidth - 8));
@@ -678,19 +678,19 @@ export function CollabDemoGuideOverlay(props: {
         style={{ left: hole.left, top: hole.top, width: hole.width, height: hole.height, borderRadius: `${holeRadius}px` }}
         aria-hidden="true"
       />
-      {clickAnchor ? (
+      {clickHint ? (
         <span
           key={`click-${state.phase}`}
           className={styles.clickHint}
-          data-demo-click-hint=""
-          style={{ left: clickAnchor.left, top: clickAnchor.top }}
+          data-demo-click-hint={clickHint.side}
+          style={{ left: clickHint.left, top: clickHint.top }}
           aria-hidden="true"
         >
           <span className={styles.clickRipple} />
           <span className={`${styles.clickRipple} ${styles.clickRippleLate}`} />
-          <svg className={styles.clickCursor} viewBox="0 0 24 24" focusable="false" aria-hidden="true">
-            <path d="M3 2 L3 19.2 L7.3 14.9 L10 21 L12.9 19.7 L10.2 13.7 L16.4 13.6 Z" />
-          </svg>
+          <span className={styles.clickDisc}>
+            <span className={styles.clickPip} />
+          </span>
         </span>
       ) : null}
       <div

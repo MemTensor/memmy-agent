@@ -72,8 +72,11 @@
 }
 
 /*
- * 要人点的那一个控件上的「点这里」：一枚呼吸的箭头，加两圈从箭尖扩散出去的点击波纹。
- * 整块不接点击（箭头压在按钮上也不能挡住按钮），只负责把人指过去。
+ * 要人点的那一个控件上的「点这里」：一颗绿色实心圆点、中间一个白点，像被按下的一枚键，
+ * 加两圈从圆心扩散出去的波纹。整块不接点击（压在控件边上也不能把它挡掉），只负责把人指过去。
+ *
+ * 圆心就是外面那个 span 的定位点（见 `clickHintPlacement`）：圆点用负 margin 把自己移到圆心正中，
+ * 呼吸缩放的原点也是圆心，所以动画期间它与波纹圆心始终重合——上一版「箭尖与波纹错开」不会再出现。
  */
 .clickHint {
   position: fixed;
@@ -81,18 +84,18 @@
   pointer-events: none;
 }
 
-/* 波纹从箭尖往外扩：外圈延时半拍，看起来像连点了两下。 */
+/* 波纹从圆心往外扩：外圈延时半拍，看起来像连点了两下。 */
 .clickRipple {
   position: absolute;
   left: 0;
   top: 0;
-  width: 50px;
-  height: 50px;
-  margin: -25px 0 0 -25px;
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
   border-radius: 50%;
   border: 2px solid var(--color-action-sky);
-  background: color-mix(in srgb, var(--color-action-sky) 16%, transparent);
-  transform: scale(0.35);
+  background: color-mix(in srgb, var(--color-action-sky) 14%, transparent);
+  transform: scale(0.36);
   opacity: 0;
   animation: clickRipple 1.9s ease-out infinite;
 }
@@ -102,36 +105,47 @@
 }
 
 @keyframes clickRipple {
-  0% { transform: scale(0.35); opacity: 0.9; }
-  70% { transform: scale(1); opacity: 0; }
-  100% { transform: scale(1); opacity: 0; }
+  0% { transform: scale(0.36); opacity: 0.85; }
+  70% { transform: scale(1.55); opacity: 0; }
+  100% { transform: scale(1.55); opacity: 0; }
 }
 
-/* 箭尖落在左上角外一点：`clickHint` 的定位点就是箭尖（见 `clickHintAnchor`）。 */
-.clickCursor {
+/* 绿色实心圆：22px，白描边一圈把它从白底与压暗底上分出来，再带一点投影。 */
+.clickDisc {
   position: absolute;
-  left: -4px;
-  top: -3px;
-  width: 32px;
-  height: 32px;
-  fill: var(--color-text-ink, #1b2423);
-  stroke: var(--color-background-paper, #fff);
-  stroke-width: 1.3;
-  stroke-linejoin: round;
-  filter: drop-shadow(0 2px 4px rgba(16, 26, 25, 0.32));
-  transform-origin: 2px 2px;
+  left: 0;
+  top: 0;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+  background: var(--color-action-sky);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-background-paper, #fff) 92%, transparent),
+    0 2px 6px rgba(16, 26, 25, 0.28);
   animation: clickBreathe 1.9s ease-in-out infinite;
 }
 
-/* 呼吸：箭头自己慢慢放大再收回，比只画一圈静态描边显眼，也不至于晃眼。 */
+/* 中间那个白点：7px，正压在圆心上，像按下去的那一下。 */
+.clickPip {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: var(--color-background-paper, #fff);
+}
+
+/* 呼吸：圆点自己慢慢放大再收回，比只画一圈静态描边显眼，也不至于晃眼。原点在圆心，位置不动。 */
 @keyframes clickBreathe {
   0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.14); }
+  50% { transform: scale(1.16); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .clickCursor { animation: none; }
-  .clickRipple { animation: none; opacity: 0.5; transform: scale(0.7); }
+  .clickDisc { animation: none; }
+  .clickRipple { animation: none; opacity: 0.45; transform: scale(0.8); }
 }
 
 .card {
