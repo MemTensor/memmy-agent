@@ -110,7 +110,10 @@ async function main() {
   const command = resolveWindowsLoginItemCommand(environment);
   assert.deepEqual(command, { path: powershell,
     args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', launcherPath] });
-  assert.equal(setWindowsLaunchAtLogin(application, environment, true), true);
+  const enabled = setWindowsLaunchAtLogin(application, environment, true);
+  assert.equal(enabled, true, JSON.stringify({
+    command, settings: app.getLoginItemSettings(command), rawRunCommand: readSystemRunCommand(),
+  }, null, 2));
   executeRegisteredCommand();
   assert.equal(repairWindowsLaunchAtLogin(application, environment), false);
 
@@ -126,7 +129,7 @@ async function main() {
       const settings = app.getLoginItemSettings(command);
       const item = settings.launchItems.find(value => value.name === itemName && value.scope === 'user');
       assert.ok(item);
-      assert.deepEqual(item.args, command.args);
+      assert.deepEqual(item.args, command.args.filter(value => !value.startsWith('-')));
       assert.equal(item.enabled, enabled);
       assert.equal(settings.openAtLogin, true);
       assert.equal(getWindowsLaunchAtLogin(application, environment), enabled);
@@ -144,7 +147,7 @@ async function main() {
     for (const [name, enabled] of [[itemName, ownEnabled], [aliasName, aliasEnabled]]) {
       const item = settings.launchItems.find(value => value.name === name && value.scope === 'user');
       assert.ok(item);
-      assert.deepEqual(item.args, command.args);
+      assert.deepEqual(item.args, command.args.filter(value => !value.startsWith('-')));
       assert.equal(item.enabled, enabled);
     }
     const expected = ownEnabled || aliasEnabled;

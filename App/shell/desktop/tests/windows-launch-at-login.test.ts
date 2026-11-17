@@ -167,6 +167,41 @@ describe("Windows launch at login", () => {
   });
 
   it.each([
+    { openAtLogin: true, args: ["Bypass", "Hidden", launcherPath], expected: true },
+    { openAtLogin: false, args: ["Bypass", "Hidden", launcherPath], expected: false },
+    { openAtLogin: true, args: ["Restricted", "Hidden", launcherPath], expected: false },
+    { openAtLogin: true, args: ["Bypass", "Normal", launcherPath], expected: false },
+    { openAtLogin: true, args: ["Bypass", "Hidden", "C:\\Other\\startup.ps1"], expected: false },
+    { openAtLogin: true, args: [launcherPath], expected: false }
+  ])("reads Electron's positional argument representation without dropping the app gate: %j", ({ openAtLogin, args, expected }) => {
+    const application: WindowsLoginItemApplication = {
+      getLoginItemSettings: vi.fn(() => ({
+        openAtLogin, executableWillLaunchAtLogin: true,
+        launchItems: [{ name: "cn.memtensor.memmy", scope: "user", path: powerShellPath, args, enabled: true }]
+      })),
+      setLoginItemSettings: vi.fn()
+    };
+    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(expected);
+  });
+
+  it("repairs a quoted PowerShell entry when Electron strips its switches", () => {
+    const quotedArguments = [...launcherArguments.slice(0, -1), `"${launcherPath}"`];
+    const application: WindowsLoginItemApplication = {
+      getLoginItemSettings: vi.fn(command => ({
+        openAtLogin: command.path === powerShellPath && command.args.at(-1) === quotedArguments.at(-1),
+        executableWillLaunchAtLogin: true,
+        launchItems: [{ name: "cn.memtensor.memmy", scope: "user", path: powerShellPath,
+          args: ["Bypass", "Hidden", `"${launcherPath}"`], enabled: false }]
+      })),
+      setLoginItemSettings: vi.fn()
+    };
+    expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(true);
+    expect(application.setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({
+      path: powerShellPath, args: launcherArguments, openAtLogin: true, enabled: false
+    });
+  });
+
+  it.each([
     { firstEnabled: false, ownEnabled: true, expected: true },
     { firstEnabled: true, ownEnabled: false, expected: true },
     { firstEnabled: false, ownEnabled: false, expected: false }

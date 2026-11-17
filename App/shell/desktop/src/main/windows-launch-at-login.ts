@@ -96,8 +96,7 @@ export const repairWindowsLaunchAtLogin = (
       item.name === "cn.memtensor.memmy"
       && item.scope === "user"
       && normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(legacyCommand.path)
-      && item.args.length === legacyCommand.args.length
-      && item.args.every((argument, index) => argument === legacyCommand.args[index])
+      && matchesElectronLoginArguments(item.args, legacyCommand.args)
     ));
     if (!legacyItem) continue;
     application.setLoginItemSettings({ ...command, openAtLogin: true, enabled: legacyItem.enabled });
@@ -124,8 +123,7 @@ export const getWindowsLaunchAtLogin = (
 
   const matchingItems = settings.launchItems.filter((item) => (
     normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(command.path)
-    && item.args.length === command.args.length
-    && item.args.every((argument, index) => argument === command.args[index])
+    && matchesElectronLoginArguments(item.args, command.args)
   ));
   // Aliases can have their own StartupApproved state. Entry ordering must not
   // hide an enabled command, and PowerShell's aggregate includes unrelated scripts.
@@ -153,3 +151,12 @@ export const setWindowsLaunchAtLogin = (
 };
 
 const normalizeWindowsCommandPath = (path: string): string => path.replaceAll("/", "\\").toLowerCase();
+
+/** Electron's Chromium parser omits switch tokens from launchItems[].args. */
+const matchesElectronLoginArguments = (actual: string[], expected: string[]): boolean => {
+  const sameArguments = (argumentsToMatch: string[]) => actual.length === argumentsToMatch.length
+    && actual.every((argument, index) => argument === argumentsToMatch[index]);
+  // openAtLogin above still gates on this app ID's complete raw Run command.
+  // Aliases can only be compared using the argument representation Electron exposes.
+  return sameArguments(expected) || sameArguments(expected.filter(argument => !argument.startsWith("-")));
+};

@@ -1,6 +1,6 @@
 import { spawnSync, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -74,7 +74,7 @@ describe("Windows update launcher", () => {
   it.runIf(process.platform === "win32")(
     "launches a PowerShell helper from a Chinese path through the launcher script",
     async () => {
-      const root = await mkdtemp(join(tmpdir(), "memmy-ps-launcher-"));
+      const root = await realpath(await mkdtemp(join(tmpdir(), "memmy-ps-launcher-")));
       const chineseRoot = join(root, "中文路径 O'Brien User");
       const helperPath = join(chineseRoot, "probe.ps1");
       const markerPath = join(chineseRoot, "marker.txt");
@@ -125,7 +125,7 @@ describe("Windows update launcher", () => {
   it.runIf(process.platform === "win32")(
     "preserves the child's received Windows arguments exactly",
     async () => {
-      const root = await mkdtemp(join(tmpdir(), "memmy-launcher-argv-"));
+      const root = await realpath(await mkdtemp(join(tmpdir(), "memmy-launcher-argv-")));
       const probeRoot = join(root, "中文路径 O'Brien User");
       const helperPath = join(probeRoot, "argument probe.cjs");
       const markerPath = join(probeRoot, "received arguments.json");
@@ -154,7 +154,7 @@ describe("Windows update launcher", () => {
   it.runIf(process.platform === "win32")(
     "returns failure and retains diagnostics when the helper cannot be started",
     async () => {
-      const root = await mkdtemp(join(tmpdir(), "memmy-launcher-failure-"));
+      const root = await realpath(await mkdtemp(join(tmpdir(), "memmy-launcher-failure-")));
       const launcherPath = join(root, "launcher.ps1");
       try {
         await writeFile(launcherPath, createWindowsUpdateLauncherFile([join(root, "missing helper.exe")]));

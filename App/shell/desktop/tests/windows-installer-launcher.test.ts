@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -37,7 +37,9 @@ describe.runIf(process.platform === "win32")("installed PowerShell launch proxy"
   it.each(["中文 Path", "中文 $USERNAME `tick O'Brien"])(
     "preserves literal installation and launcher paths containing %s",
     (pathPart) => {
-      const root = mkdtempSync(join(tmpdir(), "memmy-installer-launcher-"));
+      // PowerShell expands 8.3 aliases in $PSScriptRoot (e.g. RUNNER~1). Use the
+      // same filesystem identity while retaining all special path characters.
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), "memmy-installer-launcher-")));
       roots.push(root);
       const installDir = join(root, pathPart, "Program Files", "Memmy");
       const launcherDir = join(root, pathPart, "Local AppData", "Memmy", "launcher");
