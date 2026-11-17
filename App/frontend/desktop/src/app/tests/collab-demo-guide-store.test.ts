@@ -171,17 +171,66 @@ describe("demo guide state machine", () => {
     expect(after.phase).toBe("tour-new-task");
   });
 
-  it("moves past the link-session step when this computer has nothing to scan", () => {
-    // 没授权读其他 Agent 的记录：这一步没有可展示的东西，直接接到下一站。
+  it("asks for the authorization in this very step, then scans, then lets the person move on", () => {
+    // 没授权：弹窗退回授权说明，「下一步」换成「授权并查看」。
     const atPick = run(touring(), [{ type: "next" }, { type: "next" }, { type: "next" }]);
-    const skipped = demoGuideReducer(atPick, { type: "scan-unavailable" });
-    expect(skipped.phase).toBe("tour-new-task");
-    expect(skipped.scan).toEqual({ status: "done", count: 0 });
-    // 别的阶段发这两个事件不改变任何东西（同一个状态对象原样返回）。
+    const locked = demoGuideReducer(atPick, { type: "scan-locked" });
+    expect(locked.scan).toEqual({ status: "locked", count: 0 });
+    // 没授权时「下一步」也过不去：这一站要真的把会话摆出来才能往下走。
+    expect(demoGuideReducer(locked, { type: "next" })).toBe(locked);
+
+    // 点了「授权并查看」：进安装态，重复点不再发第二次。
+    const granting = demoGuideReducer(locked, { type: "grant-access" });
+    expect(granting.scan).toEqual({ status: "granting", count: 0 });
+    expect(demoGuideReducer(granting, { type: "grant-access" })).toBe(granting);
+
+    // 装完：真的开始扫，扫完才放行。
+    const scanning = demoGuideReducer(granting, { type: "grant-settled" });
+    expect(scanning.scan).toEqual({ status: "scanning", count: 0 });
+    expect(demoGuideReducer(scanning, { type: "next" })).toBe(scanning);
+    const done = demoGuideReducer(scanning, { type: "scan-settled", count: 0 });
+    expect(done.scan).toEqual({ status: "done", count: 0 });
+    expect(demoGuideReducer(done, { type: "next" }).phase).toBe("tour-new-task");
+  });
+
+  it("goes back to the authorization note when it did not finish, and lets the person skip the stop", () => {
+    const granting = run(touring(), [
+      { type: "next" },
+      { type: "next" },
+      { type: "next" },
+      { type: "scan-locked" },
+      { type: "grant-access" }
+    ]);
+    const failed = demoGuideReducer(granting, { type: "grant-failed", reason: "没有完成授权" });
+    expect(failed.scan).toEqual({ status: "locked", count: 0 });
+    expect(failed.error).toBe("没有完成授权");
+    // 再试一次就是清掉原因，卡片回到「授权并查看」。
+    expect(demoGuideReducer(failed, { type: "retry" }).error).toBeNull();
+
+    // 只放过这一站：往下一站走，不结束整轮。
+    const passed = demoGuideReducer(failed, { type: "pass" });
+    expect(passed.phase).toBe("tour-new-task");
+    expect(passed.status).toBe("active");
+    expect(passed.scan).toEqual({ status: "idle", count: 0 });
+
+    // 正在装、或已经扫完：迟到的「没授权」不能把它顶回去（看板读到的授权状态比这里晚一步）。
+    const retried = demoGuideReducer(failed, { type: "retry" });
+    const grantingAgain = demoGuideReducer(retried, { type: "grant-access" });
+    expect(grantingAgain.scan).toEqual({ status: "granting", count: 0 });
+    expect(demoGuideReducer(grantingAgain, { type: "scan-locked" })).toBe(grantingAgain);
+    const finished = demoGuideReducer(demoGuideReducer(grantingAgain, { type: "grant-settled" }), { type: "scan-settled", count: 4 });
+    expect(finished.scan).toEqual({ status: "done", count: 4 });
+    expect(demoGuideReducer(finished, { type: "scan-locked" })).toBe(finished);
+
+    // 别的阶段发这几条都不改变任何东西（同一个状态对象原样返回）。
     const board = touring();
     expect(demoGuideReducer(board, { type: "scan-settled", count: 3 })).toBe(board);
+    expect(demoGuideReducer(board, { type: "scan-locked" })).toBe(board);
+    expect(demoGuideReducer(board, { type: "pass" })).toBe(board);
+    expect(demoGuideReducer(board, { type: "grant-access" })).toBe(board);
     const experience = started();
-    expect(demoGuideReducer(experience, { type: "scan-unavailable" })).toBe(experience);
+    expect(demoGuideReducer(experience, { type: "scan-locked" })).toBe(experience);
+    expect(demoGuideReducer(experience, { type: "pass" })).toBe(experience);
   });
 
   it("skips the whole walkthrough when the tour is skipped", () => {
@@ -570,6 +619,9 @@ describe("demo guide state machine", () => {
     expect(back.phase).toBe("tour-associate-pick");
     expect(back.scan).toEqual({ status: "scanning", count: 0 });
     expect(demoGuideReducer(back, { type: "next" })).toBe(back);
+    // 退回来重新扫时看板会按当时的授权状态再判一次：已授权就直接扫，没授权就退回门帘。
+    const relocked = demoGuideReducer(back, { type: "scan-locked" });
+    expect(relocked.scan).toEqual({ status: "locked", count: 0 });
   });
 
   it("stops treating a step as skipped once it is really done again", () => {

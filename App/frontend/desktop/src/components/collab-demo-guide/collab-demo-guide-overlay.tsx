@@ -57,7 +57,8 @@ export interface DemoGuideCard {
   title: string | null;
   body: string;
   status: string | null;
-  action: "next" | "start" | "done" | null;
+  /** `grant`：这一屏要先授权（关联会话还没授权），主按钮写「授权并查看」。 */
+  action: "next" | "start" | "done" | "grant" | null;
   /** 这一屏有没有「上一步」：事情已经办成的屏没有，卡片上就不出现那个按钮。 */
   canGoBack: boolean;
   /** 主按钮上的字：默认按 `action` 取「下一步 / 开始协作 / 完成」，只有加入这一屏写「继续」。 */
@@ -139,18 +140,23 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
     const action: DemoGuideCard["action"] = demoGuideStartsExperience(state.phase) ? "start" : "next";
     // 导览里每一站都能退回上一站（第一站除外，由调用方按阶段算）。
     const canGoBack = demoGuideBackTarget(state) !== null;
-    // 「关联会话」：弹窗真的在扫本机历史会话，扫完之前不给「下一步」，卡片上一直写清在做什么。
+    // 「关联会话」：没授权时弹窗只给授权说明，主按钮变成「授权并查看」；授权后真的在扫，扫完之前不给「下一步」。
     if (state.phase !== "tour-associate-pick") return { ...tour, action, canGoBack };
+    const locked = state.scan.status === "locked";
     return {
       ...tour,
-      action,
+      action: locked ? "grant" : action,
       canGoBack,
-      actionDisabled: state.scan.status !== "done",
-      status: state.scan.status === "done"
-        ? (state.scan.count > 0
-          ? t("collab.demo.scan.done", { count: String(state.scan.count) })
-          : t("collab.demo.scan.empty"))
-        : t("collab.demo.scan.scanning")
+      actionDisabled: !locked && state.scan.status !== "done",
+      status: locked
+        ? t("collab.demo.scan.locked")
+        : state.scan.status === "granting"
+          ? t("collab.demo.scan.granting")
+          : state.scan.status === "done"
+            ? (state.scan.count > 0
+              ? t("collab.demo.scan.done", { count: String(state.scan.count) })
+              : t("collab.demo.scan.empty"))
+            : t("collab.demo.scan.scanning")
     };
   }
   switch (state.phase) {
@@ -242,7 +248,7 @@ export function demoGuideTourCard(index: number, t: Translate): DemoGuideCard {
     action: null,
     // 导览第一屏前面只有「已加入」提示窗，没有可退的一屏；由调用方按阶段再算一次。
     canGoBack: false,
-    // 导览段没有禁用的时候：只有「关联会话」在扫描期间由调用方改成不可点。
+    // 导览段只有「关联会话」在授权与扫描期间不可点，且这一站没有上一步以外的跳过按钮。
     actionDisabled: false
   };
 }
@@ -251,7 +257,9 @@ export function demoGuideTourCard(index: number, t: Translate): DemoGuideCard {
 export function demoGuideSkippable(phase: DemoGuidePhase): boolean {
   // 建项目之前没有可跳过的内容：不建项目就没有后面的演示；加入那一屏也不是一步。
   if (demoGuideIsBeforeProjectPhase(phase) || phase === "joined") return false;
-  // 看板导览是纯介绍，只留「下一步」与「跳过引导」：没有「跳过这一步」。
+  // 「关联会话」不是一步、而是导览里的一站：授权装不上时也要能只放过这一站，所以这里给一个「跳过这一站」。
+  if (phase === "tour-associate-pick") return true;
+  // 看板导览其余各站是纯介绍，只留「下一步」与「跳过引导」：没有「跳过这一步」。
   if (demoGuideIsTourPhase(phase)) return false;
   return phase !== "reply-done" && phase !== "ask-done" && phase !== "help-done" && phase !== "help-rejected" && phase !== "complete";
 }
@@ -350,6 +358,8 @@ function preferredPlacement(
 export function CollabDemoGuideOverlay(props: {
   state: DemoGuideState;
   onNext: () => void;
+  /** 「关联会话」没授权时主按钮是「授权并查看」：由看板就地授权。 */
+  onGrant?: () => void;
   /** 退回上一屏：与「下一步」一一对应，退的是刚才那一屏。 */
   onBack: () => void;
   onSkip: () => void;
@@ -616,7 +626,9 @@ export function CollabDemoGuideOverlay(props: {
     ? t("collab.demo.next")
     : card.action === "start"
       ? t("collab.demo.tour.start")
-      : t("collab.demo.done"));
+      : card.action === "grant"
+        ? t("collab.demo.scan.grant")
+        : t("collab.demo.done"));
 
   return (
     <div ref={rootRef} className={styles.root}>
@@ -772,7 +784,7 @@ export function CollabDemoGuideOverlay(props: {
                       <button
                         type="button"
                         className={styles.action}
-                        onClick={props.onNext}
+                        onClick={card.action === "grant" ? (props.onGrant ?? props.onNext) : props.onNext}
                         disabled={card.actionDisabled === true}
                       >
                         {primaryLabel}

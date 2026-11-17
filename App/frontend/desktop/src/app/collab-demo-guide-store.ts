@@ -252,11 +252,24 @@ export function demoGuideAcceptsFailure(phase: DemoGuidePhase): boolean {
 export type DemoGuideStatus = "active" | "complete" | "ended";
 
 /**
- * 「关联会话」这一步的扫描进度。
+ * 「关联会话」这一步的状态：授权、扫描、出结果。
  *
- * 弹窗自己真实地扫本机历史会话，扫完把一个数交给这里：卡片据此才给「下一步」。
+ * 关联会话是整条引导里唯一需要「在其他 Agent 中使用协作项目」授权的地方：没授权时弹窗只给授权说明，
+ * 人点卡片的「授权并查看」就地授权，装完再真的扫一遍这台电脑上的历史会话；扫出结果才给「下一步」。
  */
-export type DemoGuideScan = { status: "idle" | "scanning" | "done"; count: number };
+export type DemoGuideScanStatus =
+  /** 还没进这一站。 */
+  | "idle"
+  /** 没授权：弹窗是授权说明（门帘），卡片主按钮是「授权并查看」。 */
+  | "locked"
+  /** 正在装本机 Agent 的协作组件。 */
+  | "granting"
+  /** 授权完成，正在读本机会话。 */
+  | "scanning"
+  /** 扫完了：`count` 是可以关联的会话数，0 也一样放行。 */
+  | "done";
+
+export type DemoGuideScan = { status: DemoGuideScanStatus; count: number };
 
 export interface DemoGuideState {
   status: DemoGuideStatus;
@@ -367,8 +380,21 @@ export type DemoGuideEvent =
   | { type: "skip"; prefill?: string }
   /** 关联会话窗口扫完了：`count` 是可以关联的会话数。 */
   | { type: "scan-settled"; count: number }
-  /** 这一步没有可扫的东西（没授权读其他 Agent 的记录）：直接放过，不让人卡住。 */
-  | { type: "scan-unavailable" }
+  /** 这一步还没授权：弹窗退回授权说明，「下一步」换成「授权并查看」。 */
+  | { type: "scan-locked" }
+  /** 人点了「授权并查看」：由看板就地发起授权，界面进安装态。 */
+  | { type: "grant-access" }
+  /** 授权完成：开始真实扫描。 */
+  | { type: "grant-settled" }
+  /** 授权没成：退回授权说明，卡片报原因并给「再试一次」。 */
+  | { type: "grant-failed"; reason: string }
+  /**
+   * 跳过这一站，只前进一格。
+   *
+   * 导览里的「跳过」是整轮收场（这一站不是一步，跳过引导就没什么可讲的了）；
+   * 授权装不上时人要能只放过这一站、继续往下看，所以单给一条只走一格的事件。
+   */
+  | { type: "pass" }
   | { type: "settings-opened" }
   | { type: "receiving-on" }
   | { type: "help-request-seen" }
@@ -570,8 +596,13 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
         phase: target,
         error: null,
         prefill: nextPrefill(state, refill),
-        // 退回「关联会话」时弹窗会重新打开、重新扫一遍：扫描进度也要重新等，不能留着上一次的计数。
-        scan: target === "tour-associate-pick" ? { status: "scanning", count: 0 } : state.scan
+        // 退回「关联会话」时弹窗会重新打开、重新扫一遍：授权与扫描状态都重新等，不能留着上一次的计数。
+        // 离开这一站时也清掉：再进来要重新判断是不是已经授权，不能沿用上一轮的「已扫完」。
+        scan: target === "tour-associate-pick"
+          ? { status: "scanning", count: 0 }
+          : state.phase === "tour-associate-pick"
+            ? { status: "idle", count: 0 }
+            : state.scan
       };
     }
     case "skip": {
@@ -609,11 +640,31 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       return state.status === "active" && state.phase === "tour-associate-pick"
         ? { ...state, scan: { status: "done", count: Math.max(0, Math.round(event.count)) } }
         : state;
-    case "scan-unavailable": {
-      // 没有授权读本机其他 Agent 的记录：这一步没什么可展示的，直接接到下一站。
+    case "scan-locked":
+      // 没授权就读不到本机会话：弹窗退回授权说明，等人点「授权并查看」。
+      // 只在还没开始时接：正在装、装失败了（还带着原因）、已经扫完的都不回退，否则会把进度顶掉。
+      return state.status === "active" && state.phase === "tour-associate-pick"
+        && (state.scan.status === "idle" || state.scan.status === "scanning")
+        ? { ...state, scan: { status: "locked", count: 0 } }
+        : state;
+    case "grant-access":
+      return state.status === "active" && state.phase === "tour-associate-pick" && state.scan.status === "locked"
+        ? { ...state, scan: { status: "granting", count: 0 }, error: null }
+        : state;
+    case "grant-settled":
+      // 授权完了才开始扫：扫描结果仍由弹窗自己报回来。
+      return state.status === "active" && state.phase === "tour-associate-pick" && state.scan.status === "granting"
+        ? { ...state, scan: { status: "scanning", count: 0 }, error: null }
+        : state;
+    case "grant-failed":
+      return state.status === "active" && state.phase === "tour-associate-pick" && state.scan.status === "granting"
+        ? { ...state, scan: { status: "locked", count: 0 }, error: event.reason }
+        : state;
+    case "pass": {
+      // 只在这一站成立：其余屏的跳过是另一步的事，不能借它绕开结果。
       if (state.status !== "active" || state.phase !== "tour-associate-pick") return state;
       const next = demoGuideNextTourPhase(state.phase);
-      return next ? { ...state, phase: next, scan: { status: "done", count: 0 }, error: null } : state;
+      return next ? { ...state, phase: next, scan: { status: "idle", count: 0 }, error: null } : state;
     }
     case "settings-opened":
       return state.status === "active" && state.phase === "settings-open" ? { ...state, phase: "settings-assist" } : state;

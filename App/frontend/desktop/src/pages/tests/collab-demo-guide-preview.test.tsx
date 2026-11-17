@@ -101,11 +101,16 @@ describe("the demo guide preview", () => {
       // 导览段不描边：没有任何「这里可以点」的控件。
       expect(document.querySelector("[data-demo-stroke]")).toBeNull();
     }
-    expect(Object.values(DEMO_GUIDE_PREVIEW_STEPS).filter((phase) => phase.startsWith("tour-"))).toHaveLength(5);
+    // 五站；「关联会话」那一站另有一张未授权的样子，是同一站的第二个预览。
+    expect(new Set(Object.values(DEMO_GUIDE_PREVIEW_STEPS).filter((phase) => phase.startsWith("tour-")))).toHaveLength(5);
     // 「关联会话」真的摆出了扫到的会话与计数（卡片上的计数在真实客户端里渲染，预览只验弹窗本身）。
     await render("t-associate-pick");
     expect(document.body.textContent).toContain("共 3 个会话");
     expect(document.body.textContent).toContain("这里只做展示，不会改动任何任务。");
+    // 同一站的未授权样子：弹窗是授权说明，一条会话都不摆。
+    await render("t-associate-lock");
+    expect(document.body.textContent).toContain("授权后才能读取这台电脑上的会话。");
+    expect(document.body.textContent).not.toContain("共 3 个会话");
     await render("t-board");
     expect(document.querySelector("[data-demo-guide='board-header']")).toBeNull();
   });

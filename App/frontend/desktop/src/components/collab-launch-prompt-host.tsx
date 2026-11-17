@@ -4,9 +4,7 @@
  * One run shows at most one large prompt and this one goes first: it claims the slot in the same effect that opens
  * it, before the other hosts read their own conditions, so they wait for the next launch instead of queueing behind.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createHttpCollabClient } from "../api/collab-client.js";
-import { useOptionalApiClients } from "../app/providers.js";
+import { useEffect, useRef, useState } from "react";
 import {
   areOtherPromptsDeferredForHistoryLaunch,
   isHistoryLaunchPromptOpen,
@@ -33,13 +31,6 @@ function localStorage(): Storage | undefined {
 
 export function CollabLaunchPromptHost() {
   const { state } = useAppState();
-  // Rendered inside the app shell, but also in tests and previews without providers: the card then has no client
-  // and only offers the new-project button.
-  const { clients } = useOptionalApiClients();
-  const collab = useMemo(
-    () => (clients ? createHttpCollabClient(clients.runtimeConfig) : null),
-    [clients]
-  );
   const [open, setOpen] = useState(false);
   const offeredRef = useRef(false);
   const preview = isDesktopPromptPreview("collabLaunch");
@@ -92,7 +83,6 @@ export function CollabLaunchPromptHost() {
 
   return (
     <CollabLaunchDialog
-      collab={collab}
       onClose={() => {
         setOpen(false);
         setCollabLaunchPromptOpen(false);

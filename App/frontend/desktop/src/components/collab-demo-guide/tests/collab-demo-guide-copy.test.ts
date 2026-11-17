@@ -123,6 +123,26 @@ describe("the demo guide copy", () => {
     ]);
   });
 
+  it("asks for the authorization on the link-session step before it can scan anything", () => {
+    const zh = translate("zh-CN");
+    // 没授权：弹窗只给授权说明，主按钮是「授权并查看」而不是「下一步」。
+    const locked = demoGuideCard({ ...stateFor("tour-associate-pick"), scan: { status: "locked", count: 0 } }, zh);
+    expect(locked.action).toBe("grant");
+    expect(locked.actionDisabled).toBe(false);
+    expect(locked.status).toBe("关联会话要读取这台电脑上的 Agent 记录，先授权一次即可。");
+
+    // 授权中：同一个按钮置灰，不让人连点。
+    const granting = demoGuideCard({ ...stateFor("tour-associate-pick"), scan: { status: "granting", count: 0 } }, zh);
+    expect(granting.action).toBe("next");
+    expect(granting.actionDisabled).toBe(true);
+    expect(granting.status).toBe("正在接入这台电脑上的 Agent…");
+
+    // 英文同步。
+    const en = demoGuideCard({ ...stateFor("tour-associate-pick"), scan: { status: "locked", count: 0 } }, translate("en-US"));
+    expect(en.action).toBe("grant");
+    expect(en.status).toBe("Linking sessions reads this computer's agent history. Authorize once to look.");
+  });
+
   it("holds the next button on the link-session step until the scan has a result", () => {
     const zh = translate("zh-CN");
     // 扫描中：按钮置灰，卡片写着正在扫，主按钮的字仍是「下一步」。
@@ -133,7 +153,7 @@ describe("the demo guide copy", () => {
     // 扫到会话：给出计数，按钮可用。
     const done = demoGuideCard({ ...stateFor("tour-associate-pick"), scan: { status: "done", count: 7 } }, zh);
     expect(done.actionDisabled).toBe(false);
-    expect(done.status).toBe("已扫描到 7 个会话，之后可以在这里选。");
+    expect(done.status).toBe("已扫描到 7 个会话");
     // 一个也没扫到也算有了结果：不让按钮一直置灰。
     const empty = demoGuideCard({ ...stateFor("tour-associate-pick"), scan: { status: "done", count: 0 } }, zh);
     expect(empty.actionDisabled).toBe(false);

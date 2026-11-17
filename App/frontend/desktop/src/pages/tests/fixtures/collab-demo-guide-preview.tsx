@@ -29,6 +29,8 @@ export const DEMO_GUIDE_PREVIEW_STEPS = {
   "t-tabs": "tour-tabs",
   "t-associate": "tour-associate",
   "t-associate-pick": "tour-associate-pick",
+  // 同一站、还没授权：弹窗是授权说明，「下一步」换成「授权并查看」。
+  "t-associate-lock": "tour-associate-pick",
   "t-new-task": "tour-new-task",
   "1-task-row": "task-row",
   "1-reader": "reader",
@@ -88,8 +90,10 @@ function stateFor(step: DemoGuidePreviewStep): DemoGuideState {
     askSeen: false,
     askDelivered: step === "2-done",
     askTurnEnded: false,
-    // 「关联会话」那一屏：预览里直接摆扫完的样子（列表 + 计数），主按钮可用。
-    scan: phase === "tour-associate-pick" ? { status: "done", count: 12 } : { status: "idle", count: 0 },
+    // 「关联会话」那一屏：预览里直接摆扫完的样子（列表 + 计数），主按钮可用；`t-associate-lock` 摆未授权的样子。
+    scan: phase === "tour-associate-pick"
+      ? (step === "t-associate-lock" ? { status: "locked", count: 0 } : { status: "done", count: 12 })
+      : { status: "idle", count: 0 },
     prefill: null,
     endReason: step === "complete" ? "finished" : null,
     cloudEnded: false
@@ -408,7 +412,7 @@ function SettingsSurface() {
  *
  * 真实组件还连本机接口真扫；预览只摆布局与亮区锚点，名字与真实弹窗的 `data-demo-guide` 一致。
  */
-function AssociatePickSurface() {
+function AssociatePickSurface({ locked = false }: { locked?: boolean }) {
   const rows = [
     { title: "把分享会的议程拆成待办", meta: "10:24" },
     { title: "核对上次分享会的签到表", meta: "昨天" },
@@ -426,6 +430,14 @@ function AssociatePickSurface() {
             所选任务将同步至「项目协作体验」，对项目成员可见；取消关联不会删除本地任务。
           </p>
         </header>
+        {locked ? (
+          <div style={{ padding: "18px 18px 22px", textAlign: "center" }}>
+            <p style={{ margin: 0, fontSize: 13.5, fontWeight: 600 }}>允许 Memmy 读取本机 Agent 的任务？</p>
+            <p style={{ margin: "6px 0 0", fontSize: 12.5, lineHeight: 1.7, color: "rgba(16,26,25,.55)" }}>
+              读取这台电脑上 Claude Code、Cursor 等 Agent 的任务，供你关联到项目；只共享你选中的任务。
+            </p>
+          </div>
+        ) : (
         <div style={{ display: "flex", gap: 12, padding: "4px 18px 12px" }}>
           <nav style={{ width: 148, display: "flex", flexDirection: "column", gap: 2 }} aria-label="Agent">
             {["Claude Code", "Cursor"].map((agent, index) => (
@@ -458,8 +470,9 @@ function AssociatePickSurface() {
             <p style={{ margin: "8px 0 0", fontSize: 11.5, color: "rgba(16,26,25,.45)" }}>{`共 ${rows.length} 个会话`}</p>
           </div>
         </div>
+        )}
         <footer style={{ padding: "10px 18px 14px", fontSize: 11.5, color: "rgba(16,26,25,.45)", borderTop: "1px solid rgba(16,26,25,.06)" }}>
-          这里只做展示，不会改动任何任务。
+          {locked ? "授权后才能读取这台电脑上的会话。" : "这里只做展示，不会改动任何任务。"}
         </footer>
       </section>
     </div>
@@ -607,7 +620,7 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
       <>
         <BoardSurface withSettings withAssistRow={false} withSidebar={phase === "tour-new-task"} />
         {phase === "tour-new-task" ? <PreviewSidebar /> : null}
-        {phase === "tour-associate-pick" ? <AssociatePickSurface /> : null}
+        {phase === "tour-associate-pick" ? <AssociatePickSurface locked={props.step === "t-associate-lock"} /> : null}
       </>
     );
   }

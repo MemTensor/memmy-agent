@@ -353,11 +353,15 @@ export function CollabDemoGuideHost(props: {
           // 第一步做完就直接请成员协助：那句话在进入这一步时才填；看板导览段与建项目之前不预填任何东西。
           prefill: state.phase === "reply-done" ? askPrefill() : undefined
         })}
-      onSkip={() => dispatchDemoGuide({
-        type: "skip",
-        // 跳过第一步就直接去请成员协助：那句话要跟着填上。导览段与后两步都不预填。
-        prefill: demoGuideStepNumberOf(state.phase) === 1 ? askPrefill() : undefined
-      })}
+      onSkip={() => dispatchDemoGuide(state.phase === "tour-associate-pick"
+        // 「关联会话」不是一步，而是导览里的一站：跳过它只往下一站走，不结束整轮演示。
+        ? { type: "pass" }
+        : {
+          type: "skip",
+          // 跳过第一步就直接去请成员协助：那句话要跟着填上。导览段与后两步都不预填。
+          prefill: demoGuideStepNumberOf(state.phase) === 1 ? askPrefill() : undefined
+        })}
+      onGrant={() => dispatchDemoGuide({ type: "grant-access" })}
       onExit={() => void endDemoGuide("exited")}
       onRetry={() => dispatchDemoGuide({ type: "retry" })}
       onCloseComplete={() => {

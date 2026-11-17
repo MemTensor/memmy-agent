@@ -48,11 +48,6 @@ import {
   subscribeDemoGuideInvite
 } from "../app/collab-demo-guide-invite.js";
 import { requestAssistInboxRefresh } from "../app/collab-assist-refresh.js";
-import {
-  getLaunchAuthorizationState,
-  retryLaunchAuthorization,
-  subscribeLaunchAuthorization
-} from "../app/collab-launch-authorization.js";
 import type { MemmyAgentProject } from "../api/memmy-agent-client.js";
 import { openAgentTaskInChat } from "../app/open-agent-task.js";
 import { Memmy } from "../components/mascot/memmy.js";
@@ -547,15 +542,6 @@ const CollabBoard = memo(function CollabBoard(props: {
    */
   const [agentAccess, setAgentAccess] = useState<CollabAgentAccessView | null>(null);
   const [accessOpen, setAccessOpen] = useState(false);
-  /**
-   * 大卡上的「新建项目」会在后台发起授权：进行中、或已经下发过（哪怕个别 Agent 没装上），看板都不再问一次。
-   * 这里订阅的是模块里的状态，大卡卸载之后它还在继续。
-   */
-  const launchAuthorization = useSyncExternalStore(
-    subscribeLaunchAuthorization,
-    getLaunchAuthorizationState,
-    getLaunchAuthorizationState
-  );
   /** 开启共享回到看板时手动触发一次状态重读。 */
   const [accessCheckKey, setAccessCheckKey] = useState(0);
   /** 同一次进入看板只主动问一次，弹窗关掉后靠设置或点「关联任务」再授权。 */
@@ -687,6 +673,8 @@ const CollabBoard = memo(function CollabBoard(props: {
    */
   const demoOwnsProject = demoGuide.status !== "ended" && projectId !== null && demoGuide.localProjectId === projectId;
   const demoMemberName = demoGuide.memberName;
+  /** 现在是导览「关联会话」那一站：弹窗要打开，未授权时先展示授权说明。 */
+  const demoPickPhase = demoActive && demoGuide.phase === "tour-associate-pick";
 
   /**
    * 这次要不要把授权询问让一让：设置与选择任务的弹窗开着，或者选择任务的请求还没被看板处理完。
@@ -726,31 +714,17 @@ const CollabBoard = memo(function CollabBoard(props: {
     void refreshAgentAccess();
   }, [refreshAgentAccess, sharedId, accessCheckKey]);
 
-  /** 后台授权有结果时重读一次：它决定「关联任务」是列任务还是给授权说明。 */
-  useEffect(() => {
-    if (launchAuthorization.inFlight) return;
-    if (!launchAuthorization.granted && launchAuthorization.failure === null) return;
-    void refreshAgentAccess();
-  }, [launchAuthorization, refreshAgentAccess]);
-
-  /**
-   * 后台授权已经发起：进行中视为已授权，下发之后（无论个别成败）也不再问，装失败的由下面的提示条负责重试。
-   * 大卡自己已经拿到过一次授权，再弹这个询问只会让人以为刚才那一下没生效。
-   */
-  const launchAuthorizationSettled = launchAuthorization.inFlight
-    || launchAuthorization.granted
-    || launchAuthorization.failure !== null;
-
   /**
    * 两个询问时机：刚开启共享后回到看板（创建者），以及加入他人项目的人第一次打开这个项目的看板。
    * 只要还没授权、也没在这里问过，就弹一次；选「暂不安装」之后不再弹。
    * 设置与选择任务的弹窗开着时先不问：刚开启共享往往跟着这两个弹窗，叠在一起会让人看不清先后。
+   *
+   * 授权本身只在两处发生：看板这一下，以及引导「关联会话」那一站的就地授权（先在那里授权过的，这里就不会再问）。
    */
   useEffect(() => {
     // 演示期间一律不问：演示结束后按「完成 / 邀请弹窗关闭 / 退出引导」的时机再弹。
     if (demoOwnsProject) return;
     if (!agentAccess || agentAccess.granted || agentAccess.askedInProject) return;
-    if (launchAuthorizationSettled) return;
     if (accessAskedRef.current) return;
     if (accessPromptHeld) return;
     const joined = shared !== null && shared.role !== "owner";
@@ -758,7 +732,7 @@ const CollabBoard = memo(function CollabBoard(props: {
     accessAskedRef.current = true;
     askAccessAfterShareRef.current = false;
     setAccessOpen(true);
-  }, [agentAccess, launchAuthorizationSettled, shared, accessPromptHeld, demoOwnsProject]);
+  }, [agentAccess, shared, accessPromptHeld, demoOwnsProject]);
 
   /** 关掉授权弹窗：选了「暂不安装」也记下已询问，之后只从设置里授权。 */
   const closeAccessDialog = useCallback((granted: boolean) => {
@@ -786,6 +760,26 @@ const CollabBoard = memo(function CollabBoard(props: {
       return false;
     }
   }, [collab]);
+
+  /**
+   * 引导「关联会话」那一站的授权：由看板就地发起，与弹窗里那个「授权并查看」是同一套。
+   *
+   * 授权完成就通知引导开始扫；没成则退回门帘并报原因，卡片上给「再试一次」与「跳过这一站」。
+   * `granting` 就是「正在跑」：跑完之前不会再发一次。
+   */
+  const demoGranting = demoPickPhase && demoGuide.scan.status === "granting";
+  const demoGrantRunRef = useRef(false);
+  useEffect(() => {
+    if (!demoGranting || demoGrantRunRef.current) return;
+    demoGrantRunRef.current = true;
+    void (async () => {
+      const granted = await grantAccessInPlace();
+      dispatchDemoGuide(granted
+        ? { type: "grant-settled" }
+        : { type: "grant-failed", reason: t("collab.demo.scan.grantFailed") });
+      demoGrantRunRef.current = false;
+    })();
+  }, [demoGranting, grantAccessInPlace, t]);
 
   // 宽看板默认展开配置；窄到放不下时先收起。用户点过收起或展开之后，以他的选择为准。
   useLayoutEffect(() => {
@@ -1185,24 +1179,28 @@ const CollabBoard = memo(function CollabBoard(props: {
   }, [demoActive, demoGuide.phase, settingsOpen]);
 
   /**
-   * 导览讲到「关联会话」时，真的把关联弹窗打开，让它扫一遍这台电脑上的历史会话。
+   * 导览讲到「关联会话」时，真的把关联弹窗打开。
    *
    * 演示期间人点不了这个弹窗（蒙版遮住整张弹窗）：这里只是把能力摆出来，不勾选、不保存。
-   * 没有授权读其他 Agent 的记录时弹窗里只有授权说明、扫不出东西，这一步就直接放过。
+   * 关联会话是整条引导里唯一需要授权的地方：还没授权时弹窗只给授权说明（门帘），
+   * 卡片的「授权并查看」就地授权，装完这里再真的扫一遍本机记录。
    */
-  const demoPickUnavailable = demoActive && demoGuide.phase === "tour-associate-pick"
-    && agentAccess !== null && !agentAccess.granted;
+  const demoPickLocked = demoPickPhase && agentAccess !== null && !agentAccess.granted;
   useEffect(() => {
-    if (demoPickUnavailable) dispatchDemoGuide({ type: "scan-unavailable" });
-  }, [demoPickUnavailable]);
+    // 只在还没开始时推一次：正在装、装完在扫、扫完与装失败（还带着原因）都不回退。
+    if (!demoPickLocked) return;
+    if (demoGuide.scan.status !== "idle" && demoGuide.scan.status !== "scanning") return;
+    dispatchDemoGuide({ type: "scan-locked" });
+  }, [demoPickLocked, demoGuide.scan.status]);
   /**
    * 弹窗是不是引导打开的那一次。
    *
    * 引导离开这一步（下一步、上一步、跳过、退出、心跳超时）就把它关掉；用户自己点的弹窗不受影响。
+   * 没授权时也照开：门帘就是这一站要给人看的东西。
    */
   const demoPickShownRef = useRef(false);
   useEffect(() => {
-    const wanted = demoActive && demoGuide.phase === "tour-associate-pick" && !demoPickUnavailable;
+    const wanted = demoPickPhase;
     if (wanted) {
       demoPickShownRef.current = true;
       setPickOpen(true);
@@ -1211,7 +1209,7 @@ const CollabBoard = memo(function CollabBoard(props: {
     if (!demoPickShownRef.current) return;
     demoPickShownRef.current = false;
     setPickOpen(false);
-  }, [demoActive, demoGuide.phase, demoPickUnavailable]);
+  }, [demoPickPhase]);
 
   const sessions = page?.sessions ?? null;
   const filtering = Boolean(query) || member !== "all";
@@ -1617,23 +1615,6 @@ const CollabBoard = memo(function CollabBoard(props: {
                 {notice !== null ? (
                   <div className={styles.cloudNotice} role="alert">
                     <span>{notice}</span>
-                  </div>
-                ) : null}
-                {/* 大卡打开项目时在后台做的授权有 Agent 没装上：留一条可重试的提示，成功后自己消失。 */}
-                {launchAuthorization.failure !== null ? (
-                  <div className={styles.cloudNotice} role="alert">
-                    <span>
-                      {launchAuthorization.failure.count === null
-                        ? t("collab.notice.agentAccessSome")
-                        : t("collab.notice.agentAccessPartial", { count: String(launchAuthorization.failure.count) })}
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => collab && retryLaunchAuthorization(collab)}
-                    >
-                      {t("collab.retry")}
-                    </Button>
                   </div>
                 ) : null}
                 {/* 只有已共享的项目才依赖云端；本地项目不提示云端异常，等开启共享时再报错。 */}
@@ -3550,6 +3531,9 @@ export function AssociateSessionsModal(props: {
   demoSettledRef.current = props.onDemoScanSettled;
   useEffect(() => {
     if (!open || !demoGuide) return undefined;
+    // 还没授权时只给授权说明（门帘），不去读本机记录：读也读不到，反而会把「0 个会话」报给引导。
+    // 授权完成后 `accessGranted` 变真，这一段重跑，真的把这台电脑上各个 Agent 的会话读一遍。
+    if (!accessGranted) return undefined;
     // 这次是真的扫描：不等上次缓存，直接把这台电脑上各个 Agent 的会话读一遍。
     let cancelled = false;
     setSessions(null);
@@ -3570,7 +3554,7 @@ export function AssociateSessionsModal(props: {
     return () => {
       cancelled = true;
     };
-  }, [collab, demoGuide, open]);
+  }, [accessGranted, collab, demoGuide, open]);
   /** 授权说明里列出的 Agent：只列可用的，关掉的单独用一句话说明。 */
   const gateAgents = (props.accessAgents ?? []).filter((agent) => agent.available && agent.enabled);
   const gateDisabledNames = (props.accessAgents ?? []).filter((agent) => agent.available && !agent.enabled).map((agent) => agent.name);
@@ -3781,7 +3765,13 @@ export function AssociateSessionsModal(props: {
       demoGuideAnchor={demoGuide ? "associate-pick" : undefined}
       footer={demoGuide ? (
         // 展示模式的底部没有按钮：只说清现在在做什么、什么也不会被改动。
-        <span>{sessions === null && !error ? t("collab.pick.demoScanning") : t("collab.pick.demoNote")}</span>
+        <span>
+          {!accessGranted
+            ? t("collab.pick.demoLocked")
+            : sessions === null && !error
+              ? t("collab.pick.demoScanning")
+              : t("collab.pick.demoNote")}
+        </span>
       ) : (
         <>
           {error ? <span className={styles.error} role="alert">{error}</span> : selectedCount > SESSIONS_PER_MEMBER_LIMIT ? (

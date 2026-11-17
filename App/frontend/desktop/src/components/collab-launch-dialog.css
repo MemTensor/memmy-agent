@@ -755,73 +755,6 @@
   color: #fff;
 }
 
-/* 按钮右侧的小问号与它的授权说明浮层 */
-.collab-launch-help-wrap {
-  position: relative;
-  display: inline-flex;
-}
-
-.collab-launch-help {
-  display: inline-grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: color-mix(in srgb, var(--color-text-ink) 42%, var(--color-background-paper));
-  cursor: pointer;
-}
-
-.collab-launch-help:hover,
-.collab-launch-help[aria-expanded="true"] {
-  color: var(--color-action-sky-hover);
-  background: color-mix(in srgb, var(--color-accent-mint) 55%, var(--color-background-paper));
-}
-
-.collab-launch-popover {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 10px);
-  z-index: 2;
-  width: 320px;
-  box-sizing: border-box;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 80%, var(--color-background-paper));
-  border-radius: 12px;
-  background: var(--color-background-paper);
-  box-shadow: 0 12px 30px rgba(17, 29, 28, 0.13);
-  color: color-mix(in srgb, var(--color-text-ink) 70%, var(--color-background-paper));
-  font-size: 12.5px;
-  line-height: 1.6;
-}
-
-.collab-launch-popover b {
-  display: block;
-  margin-bottom: 4px;
-  color: var(--color-text-ink);
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.collab-launch-popover ul {
-  margin: 0;
-  padding-left: 16px;
-  list-style: disc;
-}
-
-.collab-launch-popover li {
-  margin: 1px 0;
-}
-
-.collab-launch-popover__note {
-  margin: 8px 0 0;
-  padding-top: 8px;
-  border-top: 1px solid #eef3f2;
-  color: color-mix(in srgb, var(--color-text-ink) 55%, var(--color-background-paper));
-}
-
 .collab-launch-dialog button:focus-visible {
   outline: 2px solid var(--color-action-sky);
   outline-offset: 3px;
@@ -903,10 +836,5 @@
   .collab-launch-actions {
     flex-wrap: wrap;
     justify-content: flex-end;
-  }
-
-  /* 窄窗口里浮层不能比窗口还宽，否则右侧被推出屏幕。 */
-  .collab-launch-popover {
-    width: min(320px, calc(100vw - 96px));
   }
 }

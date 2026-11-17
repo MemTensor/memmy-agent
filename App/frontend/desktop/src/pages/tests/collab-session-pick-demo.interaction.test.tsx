@@ -57,6 +57,7 @@ describe("the session picker inside the demo guide", () => {
 
   async function render(props: {
     demoGuide?: boolean;
+    accessGranted?: boolean;
     listLocalSessions: ReturnType<typeof vi.fn>;
     onDemoScanSettled?: (count: number) => void;
   }): Promise<void> {
@@ -69,6 +70,7 @@ describe("the session picker inside the demo guide", () => {
             project={PROJECT}
             onClose={() => undefined}
             onLinked={() => undefined}
+            accessGranted={props.accessGranted}
             demoGuide={props.demoGuide}
             onDemoScanSettled={props.onDemoScanSettled}
           />
@@ -108,6 +110,27 @@ describe("the session picker inside the demo guide", () => {
     expect(document.querySelector("[aria-label='关闭']")).toBeNull();
     // 底部只写「这里只做展示」，没有可点的按钮。
     expect(document.body.textContent).toContain("这里只做展示，不会改动任何任务。");
+  });
+
+  it("shows the authorization note first and scans only after the person authorizes", async () => {
+    const listLocalSessions = vi.fn().mockResolvedValue({
+      sessions: [session("s-1", "把分享会的议程拆成待办")],
+      refreshing: false
+    });
+    const settled = vi.fn();
+
+    // 没授权：弹窗只给授权说明，一条本机记录都不读，也不替引导报「0 个会话」。
+    await render({ demoGuide: true, accessGranted: false, listLocalSessions, onDemoScanSettled: settled });
+    expect(document.body.textContent).toContain("授权后才能读取这台电脑上的会话。");
+    expect(listLocalSessions).not.toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
+
+    // 就地授权完成：同一个弹窗原地换成真实列表，扫完才把条数交给引导。
+    await render({ demoGuide: true, accessGranted: true, listLocalSessions, onDemoScanSettled: settled });
+    expect(listLocalSessions).toHaveBeenCalledWith(expect.objectContaining({ fresh: true }));
+    expect(settled).toHaveBeenCalledWith(1);
+    expect(document.body.textContent).toContain("把分享会的议程拆成待办");
+    expect(document.body.textContent).not.toContain("授权后才能读取这台电脑上的会话。");
   });
 
   it("keeps the normal picker untouched when the guide is not showing it", async () => {
