@@ -6,8 +6,27 @@ import YAML from "yaml";
 import { describe, expect, it } from "vitest";
 import { createMemmyConfigWriter } from "../../infrastructure/memmy-config/index.js";
 import { createAsrService } from "../asr-service.js";
+import { HTTP_STATUS_BY_CODE } from "../error-envelope.js";
 
 describe("asr service", () => {
+  it.each(["prepare", "transcribe"])("uses the existing error contract for an unavailable model during %s", async operation => {
+    const fixture = catalogFixture("byok");
+    try {
+      const config = YAML.parse(readFileSync(fixture.configPath, "utf8"));
+      config.modelAssignments.byok.asr = "missing-asr";
+      writeFileSync(fixture.configPath, YAML.stringify(config));
+      const service = createAsrService({
+        bootstrapRepository: { getAppSettings: () => ({ userMode: "byok" }) },
+        memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+        cloudClient: { transcribeAudio: async () => { throw new Error("must not upload audio"); } }
+      });
+      const error = await (operation === "prepare" ? service.prepare()
+        : service.transcribe({ audioBase64: "AQ==", mimeType: "audio/wav" })).catch(error => error);
+      expect(error).toMatchObject({ code: "invalid_argument", message: "Assigned ASR model is unavailable" });
+      expect(HTTP_STATUS_BY_CODE[error.code as keyof typeof HTTP_STATUS_BY_CODE]).toBe(400);
+    } finally { fixture.dispose(); }
+  });
+
   it.each(["account", "byok"] as const)("prepares %s recordings without adding BYOK realtime support", async mode => {
     const fixture = catalogFixture(mode);
     try {

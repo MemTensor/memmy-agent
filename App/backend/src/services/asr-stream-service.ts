@@ -114,7 +114,7 @@ function bridge(
     try {
       const snapshot = options.getSession(sessionId);
       if (snapshot.context.source !== "account") {
-        sendEvent(downstream, { type: "error", message: "Realtime ASR is only available for platform models", code: "model_selection_unavailable" });
+        sendEvent(downstream, { type: "error", message: "Realtime ASR is only available for platform models", code: "invalid_argument" });
         downstream.close(CLOSE_POLICY, "platform ASR required");
         return;
       }

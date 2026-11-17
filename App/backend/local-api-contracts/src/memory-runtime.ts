@@ -1118,7 +1118,7 @@ export const PanelJobsOutputSchema = z.object({
 });
 export type PanelJobsOutput = z.infer<typeof PanelJobsOutputSchema>;
 
-/** Shared error codes for the entire local API, including Memory, models, and plugins. */
+/** Schema for api error code. */
 export const ApiErrorCodeSchema = z.enum([
   "invalid_argument",
   "unauthorized",
@@ -1140,7 +1140,6 @@ export const ApiErrorCodeSchema = z.enum([
   "composio_not_configured",
   "toolkit_unsupported",
   "model_config_changed",
-  "model_selection_unavailable",
   "config_write_busy",
   "account_model_preset_conflict",
   "plugin_entitlement_required",

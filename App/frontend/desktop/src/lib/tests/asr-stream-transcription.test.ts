@@ -302,7 +302,7 @@ describe("ASR failure boundaries", () => {
 
 
 it.each([
-  ["model_selection_unavailable"],
+  ["invalid_argument"],
   ["unauthorized"],
   ["rate_limited"]
 ])("preserves %s on the reported WebSocket error", async (code) => {

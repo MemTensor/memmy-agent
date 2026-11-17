@@ -168,7 +168,7 @@ describe("asr stream relay", () => {
     cleanups.push(() => new Promise<void>(resolve => host.server.close(() => resolve())));
     const renderer = new WebSocket(`${host.url}?sessionId=byok-recording`);
     cleanups.push(() => renderer.terminate());
-    expect(await nextMessage(renderer)).toMatchObject({ type: "error", code: "model_selection_unavailable" });
+    expect(await nextMessage(renderer)).toMatchObject({ type: "error", code: "invalid_argument" });
     expect(cloud.connections).toHaveLength(0);
   });
 

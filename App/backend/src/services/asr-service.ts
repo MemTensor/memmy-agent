@@ -223,7 +223,7 @@ async function requireAsrSelection(
 
 function modelSelectionUnavailable(context?: Readonly<ActualModelContext>): Error {
   return Object.assign(new Error("Assigned ASR model is unavailable"), {
-    code: "model_selection_unavailable" as const,
+    code: "invalid_argument" as const,
     ...(context ? { actualModelContext: context } : {})
   });
 }
