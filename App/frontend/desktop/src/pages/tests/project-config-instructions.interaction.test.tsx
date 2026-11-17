@@ -227,7 +227,7 @@ describe("project board configuration", () => {
     expect(card).toBeTruthy();
     await act(async () => card!.click());
     await flush();
-    expect(document.body.textContent).toContain("仅所有者与管理员可编辑");
+    expect(document.body.textContent).toContain("仅创建者可编辑");
     expect(document.body.textContent).toContain("前端代码遵循《前端代码规范》。");
     expect(document.querySelector("textarea")).toBeNull();
   });

@@ -107,19 +107,18 @@ describe("project members dialog", () => {
     expect(onToast).toHaveBeenCalledWith("邀请链接已复制");
   });
 
-  it("lets owners and admins review requests and set other members' roles", async () => {
+  it("lets owners and admins review requests", async () => {
     await open({
       project,
       joinMode: "approval",
       canManage: true,
       members: [
         { userId: "7", name: "用户A", role: "owner", mine: false, joinedAt: null },
-        { userId: "8", name: "用户B", role: "admin", mine: true, joinedAt: null },
         { userId: "9", name: "用户C", role: "member", mine: false, joinedAt: null }
       ],
       requests: [{ userId: "10", name: "用户D", inviterName: "用户C", createdAt: null }]
     });
-    expect(hasText("项目成员 · 3")).toBe(true);
+    expect(hasText("项目成员 · 2")).toBe(true);
     expect(hasText("加入申请 · 1")).toBe(true);
     expect(hasText("通过 用户C 的邀请链接申请")).toBe(true);
 
@@ -129,14 +128,13 @@ describe("project members dialog", () => {
     expect(collab.approveRequest).toHaveBeenCalledWith("cloud-1", "10");
     expect(onToast).toHaveBeenCalledWith("用户D 已加入项目");
 
-    // The owner has a tag, oneself a plain role; only the other member gets a picker.
+    // The owner has a tag, oneself a plain role; only the other member gets a picker, and it offers no other role.
     expect(hasText("所有者")).toBe(true);
     const pickers = Array.from(document.querySelectorAll<HTMLButtonElement>("button[aria-haspopup='menu']"));
     expect(pickers.map((picker) => picker.textContent?.trim())).toEqual(["申请后加入", "成员"]);
     await act(async () => pickers[1]!.click());
-    await act(async () => button("管理员").click());
-    await flush();
-    expect(collab.setMemberRole).toHaveBeenCalledWith("cloud-1", "9", "admin");
+    expect(document.querySelectorAll("[role='menuitemradio']")).toHaveLength(1);
+    expect(collab.setMemberRole).not.toHaveBeenCalled();
   });
 
   it("shows members a plain list without management controls", async () => {
@@ -154,6 +152,25 @@ describe("project members dialog", () => {
     expect(hasText("获得链接者")).toBe(false);
     expect(document.querySelectorAll("button[aria-haspopup='menu']")).toHaveLength(0);
     expect(button("复制邀请链接")).toBeTruthy();
+  });
+
+  /** 云端的老项目里可能还剩 admin 成员：界面不再提供这个角色，已有的按普通成员展示，不报错也不留空。 */
+  it("shows an existing admin member as a plain member", async () => {
+    await open({
+      project: { ...project, role: "member" },
+      joinMode: "approval",
+      canManage: false,
+      members: [
+        { userId: "7", name: "用户A", role: "owner", mine: false, joinedAt: null },
+        { userId: "8", name: "用户B", role: "admin", mine: true, joinedAt: null }
+      ],
+      requests: []
+    });
+    const list = document.querySelector("section[aria-label^='项目成员']");
+    expect(list).toBeTruthy();
+    expect(list!.textContent).toContain("用户B（你）");
+    expect(list!.textContent).toContain("成员");
+    expect(document.body.textContent).not.toContain("管理员");
   });
 
   /** 轮询用假定时器：申请在别的电脑上提交，这里只等一个周期就能看到。 */
