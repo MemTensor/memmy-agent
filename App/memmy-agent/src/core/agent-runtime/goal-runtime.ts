@@ -832,8 +832,9 @@ export class GoalRuntime {
     return this.workReservations.has(sessionKey);
   }
 
-  ownsWorkReservation(sessionKey: string, turnId: string): boolean {
-    return this.workReservations.get(sessionKey)?.turnId === turnId;
+  ownsWorkReservation(sessionKey: string, turnId: string, kind?: GoalWorkReservation["kind"]): boolean {
+    const reservation = this.workReservations.get(sessionKey);
+    return reservation?.turnId === turnId && (kind === undefined || reservation.kind === kind);
   }
 
   releaseWork(sessionKey: string, turnId: string): void {

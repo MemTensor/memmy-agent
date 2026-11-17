@@ -1348,7 +1348,7 @@ function Get-MemmyProcesses {
 
     if (-not $isMemmy -and
         $name -match "(?i)^(cmd|powershell|pwsh|wscript|cscript)\.exe$" -and
-        $commandLine -match "(?i)(MemmyLauncher\.ps1|MemmyUpdatePrompt\.ps1|(?:install|launch)-win-update-[A-Za-z0-9._-]+\.(?:cmd|ps1|vbs))") {
+        $commandLine -match "(?i)(MemmyLauncher\.(?:vbs|ps1)|MemmyUpdatePrompt\.ps1|(?:install|launch)-win-update-[A-Za-z0-9._-]+\.(?:cmd|ps1|vbs))") {
       foreach ($helperRoot in @(
         (Join-Path $env:LOCALAPPDATA "Memmy\launcher"),
         (Join-Path $env:APPDATA "Memmy\updates"),

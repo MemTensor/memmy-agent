@@ -16,6 +16,8 @@ export interface WindowsLoginItemApplication {
     openAtLogin: boolean;
     executableWillLaunchAtLogin: boolean;
     launchItems: Array<{
+      name?: string;
+      scope?: string;
       path: string;
       args: string[];
       enabled: boolean;
@@ -37,9 +39,8 @@ export type WindowsPathExists = (path: string) => boolean;
 /**
  * Resolves the command Windows should run after the user signs in.
  *
- * Installed builds use the stable PowerShell launcher created by the NSIS package so
- * custom-drive upgrades follow the same recovery-aware launch chain as Start menu
- * shortcuts without depending on the optional VBScript host. A direct executable
+ * Installed builds use the PowerShell launcher created by NSIS, including on
+ * Windows installations without the optional VBScript host. A direct executable
  * fallback keeps older or partially repaired installations usable.
  */
 export const resolveWindowsLoginItemCommand = (
@@ -60,19 +61,52 @@ export const resolveWindowsLoginItemCommand = (
 
   return {
     path: powerShellPath,
-    args: [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-WindowStyle",
-      "Hidden",
-      "-File",
-      `"${launcherPath}"`
-    ]
+    // Electron formats each argv element for the Run value; literal quotes would be escaped again.
+    args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", launcherPath]
   };
 };
 
-/** Reads whether the packaged Windows launch command will effectively run at login. */
+/** Migrates only this app's old launchers, preserving Windows' enabled/disabled state. */
+export const repairWindowsLaunchAtLogin = (
+  application: WindowsLoginItemApplication,
+  environment: WindowsLaunchAtLoginEnvironment,
+  pathExists: WindowsPathExists = existsSync
+): boolean => {
+  if (environment.platform !== "win32" || !environment.isPackaged) {
+    return false;
+  }
+  const command = resolveWindowsLoginItemCommand(environment, pathExists);
+  if (command.args.length === 0) {
+    return false;
+  }
+
+  const legacyPath = windowsPath.join(environment.localAppDataPath!.trim(), "Memmy", "launcher", "MemmyLauncher.vbs");
+  const legacyHost = windowsPath.join(environment.systemRootPath!.trim(), "System32", "wscript.exe");
+  // Do not require the old .vbs to exist: the new installer already removes it.
+  const legacyCommands = [
+    { path: legacyHost, args: [legacyPath] },
+    { path: legacyHost, args: [`"${legacyPath}"`] },
+    { ...command, args: [...command.args.slice(0, -1), `"${command.args.at(-1)}"`] }
+  ];
+  for (const legacyCommand of legacyCommands) {
+    const settings = application.getLoginItemSettings(legacyCommand);
+    // This is the exact app ID's Run value, not the host's aggregate startup state.
+    if (!settings.openAtLogin) continue;
+    const legacyItem = settings.launchItems.find((item) => (
+      item.name === "cn.memtensor.memmy"
+      && item.scope === "user"
+      && normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(legacyCommand.path)
+      && item.args.length === legacyCommand.args.length
+      && item.args.every((argument, index) => argument === legacyCommand.args[index])
+    ));
+    if (!legacyItem) continue;
+    application.setLoginItemSettings({ ...command, openAtLogin: true, enabled: legacyItem.enabled });
+    return true;
+  }
+  return false;
+};
+
+/** Reads effective matching entries while retaining the app's own registration as the setting gate. */
 export const getWindowsLaunchAtLogin = (
   application: WindowsLoginItemApplication,
   environment: WindowsLaunchAtLoginEnvironment,
@@ -88,12 +122,14 @@ export const getWindowsLaunchAtLogin = (
     return false;
   }
 
-  const matchingItem = settings.launchItems.find((item) => (
+  const matchingItems = settings.launchItems.filter((item) => (
     normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(command.path)
     && item.args.length === command.args.length
     && item.args.every((argument, index) => argument === command.args[index])
   ));
-  return matchingItem?.enabled ?? settings.executableWillLaunchAtLogin;
+  // Aliases can have their own StartupApproved state. Entry ordering must not
+  // hide an enabled command, and PowerShell's aggregate includes unrelated scripts.
+  return matchingItems.some((item) => item.enabled);
 };
 
 /** Writes the packaged Windows login item and returns the effective system state. */

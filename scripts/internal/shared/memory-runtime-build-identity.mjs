@@ -6,10 +6,10 @@ import { join } from "node:path";
 // change identity even when a release forgets to increment Memory's version.
 export async function memoryRuntimeBuildIdentity(repoRoot) {
   const inputs = [
-    "Memory/src", "Memory/viewer/src", "Memory/viewer/public", "Memory/adapters", "AgentSourceCore/src",
+    "Memory/src", "Memory/viewer/src", "Memory/viewer/public", "Memory/adapters", "Memory/AgentSourceCore/src",
     "Memory/package.json", "Memory/tsconfig.json", "Memory/tsconfig.base.json",
     "Memory/viewer/package.json", "Memory/viewer/vite.config.ts", "Memory/viewer/index.html",
-    "AgentSourceCore/package.json", "AgentSourceCore/tsconfig.json", "tsconfig.base.json", "package-lock.json"
+    "Memory/AgentSourceCore/package.json", "Memory/AgentSourceCore/tsconfig.json", "tsconfig.base.json", "package-lock.json"
   ];
   const hash = createHash("sha256");
   async function addFile(path) {

@@ -61,18 +61,6 @@ function listAgentProcesses(binary: string): AgentProcess[] {
 }
 
 function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
-  // A regular file at the socket path is not a removed agent; reject immediately
-  // so callers can distinguish a stale non-socket entry from a cleanly stopped agent.
-  try {
-    if (!statSync(agent.socketPath).isSocket()) {
-      return Promise.reject(new Error(`Agent socket path is not a Unix socket: ${agent.socketPath}`));
-    }
-  } catch (statError) {
-    if ((statError as NodeJS.ErrnoException).code === 'ENOENT') {
-      return Promise.resolve(); // Socket already removed – agent already stopped.
-    }
-    return Promise.reject(statError as Error);
-  }
   const bundle = dirname(dirname(dirname(binary)));
   return new Promise((resolveStop, rejectStop) => {
     let connected = false;
@@ -91,10 +79,13 @@ function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
     const timer = setTimeout(() => finish(new Error('Native Computer Use agent shutdown timed out')), AGENT_STOP_TIMEOUT_MS);
     socket.setEncoding('utf8');
     socket.on('connect', () => {
+      if (finished) return;
       connected = true;
       socket.write(JSON.stringify({ kind: 'agentInfo' }) + '\n');
     });
     socket.on('data', chunk => {
+      // Destruction is asynchronous: late events must never restart the handshake.
+      if (finished) return;
       buffered += chunk;
       if (buffered.length > 8192) { finish(new Error('Unexpected native agent lifecycle response')); return; }
       let end: number;
@@ -116,8 +107,16 @@ function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
       }
     });
     socket.on('error', error => {
-      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) finish();
-      else finish(error);
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes(code)) {
+        // On Linux, connecting to a regular file at the socket path also gives
+        // ECONNREFUSED. A non-socket file is a corrupt/stale state that must be
+        // rejected rather than silently ignored.
+        try {
+          if (!statSync(agent.socketPath).isSocket()) { finish(error); return; }
+        } catch { /* File not found or not stat-able: treat as harmless. */ }
+        finish();
+      } else finish(error);
     });
     socket.on('close', () => finish(accepted ? undefined : new Error('Native agent closed without confirming shutdown')));
   });

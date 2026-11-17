@@ -4,25 +4,6 @@ import type { AppStateStore } from "../../infrastructure/app-state-store/index.j
 import { createBootstrapService } from "../bootstrap-service.js";
 
 describe("BootstrapService", () => {
-  it("includes the remote lottery status in bootstrap for logged-out clients", async () => {
-    const lotteryStatus = {
-      shouldShow: true,
-      startAt: 1790121600000,
-      endAt: 1790812800000,
-      serverNow: 1790456789000,
-      landingUrl: "https://memmy.cn/activity/mid-autumn"
-    };
-    const service = createBootstrapService(createUnauthenticatedOptions({
-      async getLotteryStatus() {
-        return lotteryStatus;
-      }
-    }));
-
-    await expect(service.getBootstrap()).resolves.toMatchObject({
-      lotteryStatus
-    });
-  });
-
   it("refreshes token usage from cloud for authenticated account sessions", async () => {
     const calls: unknown[] = [];
     const cloudTokenUsage = {
@@ -522,3 +503,11 @@ function memoryModels() {
     embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" as const }
   };
 }
+
+it("uses the current memory user on each bootstrap health warmup", async () => {
+  let userId="first";const calls:unknown[]=[];
+  const service=createBootstrapService({...createUnauthenticatedOptions({}),getMemoryUserId:()=>userId,timeZone:"+02:00",
+    memoryClient:{health:async(context:unknown)=>{calls.push(context);return{ok:true};}} as never});
+  await service.getBootstrap();userId="second";await service.getBootstrap();
+  expect(calls).toEqual([{userId:"first",timeZone:"+02:00"},{userId:"second",timeZone:"+02:00"}]);
+});

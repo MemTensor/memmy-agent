@@ -990,6 +990,14 @@ Function MemmyInstallLaunchProxy
   File /oname=MemmyWindowsDataMigration.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsDataMigration.ps1"
   File /oname=MemmyWindowsRuntimeOwnership.ps1 "${BUILD_RESOURCES_DIR}\MemmyWindowsRuntimeOwnership.ps1"
 
+  ; Keep the installation path as data. Embedding it in PowerShell source would
+  ; interpret legal path characters such as $, backticks, and apostrophes.
+  FileOpen $1 "$0\MemmyLauncher.path" w
+  FileWriteByte $1 "255"
+  FileWriteByte $1 "254"
+  FileWriteUTF16LE $1 "$INSTDIR\${PRODUCT_FILENAME}.exe"
+  FileClose $1
+
   ; Windows 11 24H2 can ship without the optional VBScript engine, so the launch proxy
   ; must be a PowerShell script. It is written as UTF-16LE with a BOM because Windows
   ; PowerShell 5 otherwise decodes a BOM-less script with the active system code page.
@@ -997,13 +1005,13 @@ Function MemmyInstallLaunchProxy
   FileWriteByte $1 "255"
   FileWriteByte $1 "254"
   FileWriteUTF16LE $1 "$$ErrorActionPreference = 'SilentlyContinue'$\r$\n"
-  FileWriteUTF16LE $1 "$$appExe = $\"$INSTDIR\${PRODUCT_FILENAME}.exe$\"$\r$\n"
+  FileWriteUTF16LE $1 "$$appExe = [IO.File]::ReadAllText((Join-Path $$PSScriptRoot 'MemmyLauncher.path'), [Text.Encoding]::Unicode)$\r$\n"
   FileWriteUTF16LE $1 "$$userDataRoot = Join-Path $$env:APPDATA 'Memmy'$\r$\n"
-  FileWriteUTF16LE $1 "$$legacyUserDataRoot = $\"$INSTDIR\data\Memmy$\"$\r$\n"
+  FileWriteUTF16LE $1 "$$legacyUserDataRoot = Join-Path (Split-Path -Parent $$appExe) 'data\Memmy'$\r$\n"
   FileWriteUTF16LE $1 "$$powerShellPath = Join-Path $$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'$\r$\n"
-  FileWriteUTF16LE $1 "$$promptPath = $\"$0\MemmyUpdatePrompt.ps1$\"$\r$\n"
-  FileWriteUTF16LE $1 "$$recoveryPath = $\"$0\MemmyWindowsUpgradeRecovery.ps1$\"$\r$\n"
-  FileWriteUTF16LE $1 "$$migrationRecoveryPath = $\"$0\MemmyWindowsDataMigration.ps1$\"$\r$\n"
+  FileWriteUTF16LE $1 "$$promptPath = Join-Path $$PSScriptRoot 'MemmyUpdatePrompt.ps1'$\r$\n"
+  FileWriteUTF16LE $1 "$$recoveryPath = Join-Path $$PSScriptRoot 'MemmyWindowsUpgradeRecovery.ps1'$\r$\n"
+  FileWriteUTF16LE $1 "$$migrationRecoveryPath = Join-Path $$PSScriptRoot 'MemmyWindowsDataMigration.ps1'$\r$\n"
   FileWriteUTF16LE $1 "$$migrationStatePath = Join-Path $$env:LOCALAPPDATA 'Memmy\data-migration\state.json'$\r$\n"
   FileWriteUTF16LE $1 "$$migrationLogPath = Join-Path $$env:LOCALAPPDATA 'Memmy\upgrade-logs\data-migration.log'$\r$\n"
   FileWriteUTF16LE $1 "$$upgradeLogPath = Join-Path $$env:LOCALAPPDATA 'Memmy\upgrade-logs\windows-upgrade.log'$\r$\n"

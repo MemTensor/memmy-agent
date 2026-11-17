@@ -658,7 +658,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       return;
     }
     const credentials = editorCredentials;
-    if (!credentials || (!credentials.apiKey && !credentials.hasExistingApiKey)) {
+    if (!credentials || !editorHasUsableKey) {
       setEditorTest({ status: "error", message: t(credentials?.requiresApiKey
         ? "apiKey.credentialsChanged" : "settings.modelWorkspace.testKeyRequired") });
       return;
@@ -820,10 +820,18 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
       editorExistingConnection.apiKeyMasked
     )
   } : null) : null;
-  const editorHasUsableKey = Boolean(editorCredentials?.apiKey || editorCredentials?.hasExistingApiKey);
+  // A saved independent endpoint may deliberately use no API key. Its identity
+  // must still match before either testing it or reusing that authentication.
+  const editorHasIndependentCredentials = Boolean(
+    editorExistingConnection?.inheritProviderDefaults === false
+    && editorCredentials?.endpointId === editorExistingConnection.endpointId
+  );
+  const editorHasUsableKey = Boolean(
+    editorCredentials?.apiKey || editorCredentials?.hasExistingApiKey || editorHasIndependentCredentials
+  );
   const editorDetailsChanged = Boolean(editorExistingConnection && editorCredentials && (
     editorCredentials.apiKey
-    || !editorCredentials.hasExistingApiKey
+    || (!editorCredentials.hasExistingApiKey && !editorHasIndependentCredentials)
     || editorRegion !== (editorExistingConnection.region ?? "").trim()
     || JSON.stringify(editorModels.map(editorDeclarationKey))
       !== JSON.stringify(editorExistingConnection.modelEntries.map(savedDeclarationKey))
@@ -1277,7 +1285,7 @@ export function ModelWorkspaceSection(props: ModelWorkspaceSectionProps) {
             showPassword={showEditorApiKey}
             onTogglePassword={() => setShowEditorApiKey((show) => !show)}
           />
-          {editorCredentials?.requiresApiKey && (
+          {editorCredentials?.requiresApiKey && !editorHasIndependentCredentials && (
             <p className="text-xs text-status-error" role="alert">{t("apiKey.credentialsChanged")}</p>
           )}
           {editorDetailsChanged && editorHasUsableKey && editorTest.status === "idle" && (

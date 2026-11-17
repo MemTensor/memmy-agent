@@ -108,13 +108,8 @@ describe("onboarding first-report memory writer", () => {
     expect(added?.content).toContain("## assistant\n\nMemmy 初见报告");
     expect(added?.content).toContain("## 接下来可以做\n1. 运行测试。");
     expect(enqueueImportSummaries).toHaveBeenCalledWith(["memory-first-report"]);
-    expect(runWorker).toHaveBeenCalledTimes(2);
-    expect(runWorker).toHaveBeenCalledWith({
-      limit: 4,
-      targetMemoryIds: ["memory-first-report"],
-      priorityCohortOnly: true,
-      timeoutMs: 180_000
-    });
+    expect(runWorker).not.toHaveBeenCalled();
+    expect(getMemoryProcessingStatus).toHaveBeenCalledTimes(3);
     expect(search).toHaveBeenCalledWith({
       requestId: expect.stringMatching(/^first-report-search-log:/),
       adapterId: "agent-source:memmy-onboarding",
@@ -123,7 +118,58 @@ describe("onboarding first-report memory writer", () => {
       layers: ["L1"]
     });
     expect(addMemory.mock.invocationCallOrder[0]).toBeLessThan(enqueueImportSummaries.mock.invocationCallOrder[0] ?? 0);
-    expect(enqueueImportSummaries.mock.invocationCallOrder[0]).toBeLessThan(runWorker.mock.invocationCallOrder[0] ?? 0);
-    expect(runWorker.mock.invocationCallOrder.at(-1) ?? 0).toBeLessThan(search.mock.invocationCallOrder[0] ?? 0);
+    expect(enqueueImportSummaries.mock.invocationCallOrder[0]).toBeLessThan(getMemoryProcessingStatus.mock.invocationCallOrder[0] ?? 0);
+    expect(getMemoryProcessingStatus.mock.invocationCallOrder.at(-1) ?? 0).toBeLessThan(search.mock.invocationCallOrder[0] ?? 0);
   });
+  it.each(["failed", "ready_text_only", "missing"] as const)("does not search or start a worker when the target is %s", async (state) => {
+    const client = pollingClient();
+    client.getMemoryProcessingStatus.mockResolvedValue({
+      items: state === "missing" ? [] : [{
+        memoryId: "memory-first-report", state, attemptCount: 1, manualRetryCount: 0,
+        retryAction: "none", updatedAt: "2026-08-05T10:00:00.000Z"
+      }],
+      serverTime: "2026-08-05T10:00:00.000Z"
+    });
+    const writer = createOnboardingFirstReportMemoryWriter(client);
+    await expect(writer.write(firstReportInput())).rejects.toThrow(state === "missing" ? "processing state is missing" : `was not indexed: ${state}`);
+    expect(client.runWorker).not.toHaveBeenCalled();
+    expect(client.search).not.toHaveBeenCalled();
+  });
+
+  it("times out waiting for shared processing instead of launching a targeted worker", async () => {
+    const client = pollingClient();
+    let clock = 0;
+    client.getMemoryProcessingStatus.mockImplementation(async () => {
+      clock = 180_000;
+      return { items: [{ memoryId: "memory-first-report", state: "summary_pending",
+        attemptCount: 0, manualRetryCount: 0, retryAction: "none",
+        updatedAt: "2026-08-05T10:00:00.000Z" }], serverTime: "2026-08-05T10:00:00.000Z" };
+    });
+    const writer = createOnboardingFirstReportMemoryWriter(client, () => clock);
+    await expect(writer.write(firstReportInput())).rejects.toThrow("First-report memory indexing timed out");
+    expect(client.enqueueImportSummaries).toHaveBeenCalledWith(["memory-first-report"]);
+    expect(client.runWorker).not.toHaveBeenCalled();
+    expect(client.search).not.toHaveBeenCalled();
+  });
+
 });
+
+
+function firstReportInput(): Parameters<ReturnType<typeof createOnboardingFirstReportMemoryWriter>["write"]>[0] {
+  return {
+    locale: "zh-CN", reportMarkdown: "初见报告", projects: [], keywords: [],
+    taskContext: { topic: "", userGoal: "", latestRequest: "", status: "active", currentState: "",
+      agentActions: [], verifiedResults: [], unresolvedItems: [], continuationPoint: "", trajectorySummary: "" },
+    latestConversation: { agentSource: "Codex", conversationId: "test-conversation", workspacePath: null }
+  };
+}
+
+function pollingClient() {
+  return {
+    addMemory: vi.fn(async () => ({ id: "memory-first-report" }) as Awaited<ReturnType<MemoryClient["addMemory"]>>),
+    enqueueImportSummaries: vi.fn(async () => ({ enqueued: 0, memoryIds: ["memory-first-report"], serverTime: "2026-08-05T10:00:00.000Z" })),
+    getMemoryProcessingStatus: vi.fn<MemoryClient["getMemoryProcessingStatus"]>(),
+    runWorker: vi.fn<MemoryClient["runWorker"]>(),
+    search: vi.fn<MemoryClient["search"]>()
+  } satisfies FirstReportMemoryClient;
+}

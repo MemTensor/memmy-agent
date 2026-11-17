@@ -53,11 +53,23 @@ export function createFilesystemLocalDataStore(options: CreateFilesystemLocalDat
     },
 
     clearImportState() {
-      options.db.exec(`
-        DELETE FROM account_ingestion_seen;
-        DELETE FROM account_agent_source_watermarks;
-        UPDATE account_agent_sources SET last_scanned_at = NULL;
-      `);
+      options.db.exec("BEGIN IMMEDIATE");
+      try {
+        options.db.exec(`
+          DELETE FROM account_agent_source_scan_messages;
+          DELETE FROM account_agent_source_scan_source_state;
+          DELETE FROM account_agent_source_scan_results;
+          DELETE FROM account_agent_source_scan_jobs;
+          DELETE FROM account_agent_source_conversation_checkpoints;
+          DELETE FROM account_ingestion_seen;
+          DELETE FROM account_agent_source_watermarks;
+          UPDATE account_agent_sources SET last_scanned_at = NULL;
+        `);
+        options.db.exec("COMMIT");
+      } catch (error) {
+        options.db.exec("ROLLBACK");
+        throw error;
+      }
     }
   };
 }

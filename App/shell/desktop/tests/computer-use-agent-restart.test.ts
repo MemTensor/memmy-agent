@@ -1,4 +1,4 @@
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -282,6 +282,45 @@ describe.skipIf(hostPlatform === 'win32')('Computer Use cleanup for a complete d
     processRows = [row(f, 900_001, socketPath)];
     await expect(stopComputerUseAgentForPermissionRestart(true, f.resources)).rejects.toThrow();
     expect(native.requests).toEqual(['agentInfo']);
+  });
+
+  it.each(['timeout', 'close'] as const)('ignores late socket events after %s and clears the shutdown deadline', async completion => {
+    const f = fixture();
+    processRows = [row(f, 900_001, f.socket('a'.repeat(16)))];
+    const socket = Object.assign(new EventEmitter(), {
+      setEncoding: vi.fn(), write: vi.fn(), destroy: vi.fn(),
+    });
+    vi.spyOn(net, 'createConnection').mockReturnValue(socket as unknown as net.Socket);
+    vi.useFakeTimers();
+    try {
+      const stopping = stopComputerUseAgentForPermissionRestart(true, f.resources);
+      const outcome = completion === 'timeout'
+        ? expect(stopping).rejects.toThrow('Some native Computer Use agents did not complete shutdown')
+        : expect(stopping).resolves.toBeUndefined();
+      socket.emit('connect');
+      if (completion === 'timeout') await vi.advanceTimersByTimeAsync(1_000);
+      else {
+        socket.emit('data', `${JSON.stringify(f.info)}\n`);
+        socket.emit('data', '{"ok":true}\n');
+        socket.emit('close');
+      }
+      await outcome;
+      expect(vi.getTimerCount()).toBe(0);
+      const writes = socket.write.mock.calls.length;
+      expect(() => {
+        socket.emit('connect');
+        socket.emit('data', `${JSON.stringify(f.info)}\n`);
+        socket.emit('data', '{not json}\n');
+        socket.emit('error', new Error('late socket destruction error'));
+        socket.emit('error', new Error('another late socket error'));
+        socket.emit('close');
+      }).not.toThrow();
+      expect(socket.write).toHaveBeenCalledTimes(writes);
+      expect(socket.destroy).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rechecks executable text before signalling and skips changed or unavailable processes', () => {

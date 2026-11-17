@@ -216,9 +216,9 @@ describe("observed Skill editing and legacy approval through the desktop bridge"
     });
   });
 
-  it("does not let scoped credentials edit another History user's Skill within the same tenant", async () => {
+  it("does not let scoped credentials edit another History profile's Skill within the same tenant", async () => {
     const { service, db } = createTestService({ llm: model(), skillLlm: model() });
-    const selected = await candidate(service, { ...namespace, tenantId: "tenant-a", userId: "another-history-user" }, "computer_history");
+    const selected = await candidate(service, { ...namespace, tenantId: "tenant-a", userId: "another-history-user", profileId: "another-profile" }, "computer_history");
     const repos = new Repositories(db.db);
     const before = repos.memories.get(selected.id!)!;
     await withMemoryServer(service, async (baseUrl) => {

@@ -7,10 +7,10 @@ import YAML from "yaml";
 import { expect, it, vi } from "vitest";
 import {
   ensureMemoryService,
+  preparePackagedRuntimeConfig,
   stopManagedChild,
   stopManagedChildrenForDesktopExit,
   type ManagedChild,
-  type PackagedRuntimeConfig,
 } from "../src/main/runtime-services.js";
 
 it("restarts persistent Memory repeatedly after Desktop exits and reopens", async () => {
@@ -41,19 +41,12 @@ it("restarts persistent Memory repeatedly after Desktop exits and reopens", asyn
     },
   };
   await writeFile(configPath, YAML.stringify(config));
-  const runtimeConfig: PackagedRuntimeConfig = {
-    configPath,
-    agentWorkspace: join(root, "workspace"),
-    memoryDatabasePath: databasePath,
-    memoryBaseUrl: baseUrl,
-    memoryToken: "",
-    memoryListenHost: "127.0.0.1",
-    memoryListenPort: port,
-    agentGatewayBaseUrl: "http://127.0.0.1:18980",
-    agentGatewayHealthHost: "127.0.0.1",
-    agentGatewayHealthPort: 18970,
-    agentGatewayBootstrapSecret: "test-secret",
-  };
+  // Use the real Desktop bootstrap: older installations have no Memory token.
+  const runtimeConfig = await preparePackagedRuntimeConfig({ env: { MEMMY_HOME: root } });
+  expect(runtimeConfig.memoryToken).not.toBe("");
+  const savedConfig = YAML.parse(await readFile(configPath, "utf8"));
+  expect(savedConfig.memmyMemory.storage.token).toBe(runtimeConfig.memoryToken);
+  const authHeaders = { authorization: `Bearer ${runtimeConfig.memoryToken}` };
   const entries = { memoryEntry: entry, agentEntry: join(root, "unused-agent.js") };
   const options = {
     appPath: root,
@@ -82,13 +75,15 @@ it("restarts persistent Memory repeatedly after Desktop exits and reopens", asyn
     });
     expect(memory.process.exitCode).toBeNull();
     expect((await fetch(`${baseUrl}/api/v1/health`)).ok).toBe(true);
+    expect((await fetch(`${baseUrl}/api/v1/agent-sources/scan/status`)).status).toBe(401);
+    expect((await fetch(`${baseUrl}/api/v1/agent-sources/scan/status`, { headers: authHeaders })).status).toBe(200);
 
     await ensureMemoryService(entries, runtimeConfig, reopenedDesktopChildren, options, true, vi.fn());
     expect(reopenedDesktopChildren).toEqual([]);
 
     for (const timeZone of ["+00:00", "+08:00", "-04:00"]) {
       await writeFile(configPath, YAML.stringify({
-        ...config,
+        ...savedConfig,
         agents: { defaults: { timezone: timeZone } },
       }));
       const response = await fetch(`${baseUrl}/api/v1/system/restart`, {
@@ -107,6 +102,7 @@ it("restarts persistent Memory repeatedly after Desktop exits and reopens", asyn
         const body = await currentConfig.json() as { config: { timeZone?: string } };
         expect(body.config.timeZone).toBe(timeZone);
         expect(current.pid).toBe(previous.pid);
+        expect((await fetch(`${baseUrl}/api/v1/agent-sources/scan/status`, { headers: authHeaders })).status).toBe(200);
         previous = current;
         return true;
       });
@@ -116,6 +112,7 @@ it("restarts persistent Memory repeatedly after Desktop exits and reopens", asyn
     const exited = new Promise<void>((done) => memory.process.once("exit", () => done()));
     const shutdown = await fetch(`${baseUrl}/api/v1/admin/shutdown`, {
       method: "POST",
+      headers: authHeaders,
     });
     expect(shutdown.ok).toBe(true);
     await exited;

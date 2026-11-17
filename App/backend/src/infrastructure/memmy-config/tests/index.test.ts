@@ -1,9 +1,10 @@
 /** Current runtime config boundary tests. */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { withRuntimeConfigWriteLock } from "@memmy/migrations";
 import {
   createMemmyConfigWriter,
   mapModelProtocol,
@@ -160,6 +161,90 @@ describe("memmy runtime config current contract", () => {
     expect(saved.channels.feishu).toEqual({ enabled: true, appId: "app" });
     expect(saved.tools.mcpServers.existing.futureServerField).toBe("keep");
     expect(saved.tools.mcpServers.composio.url).toBe("http://127.0.0.1:9000");
+  });
+
+  it("runs an asynchronous MCP guard with the actual config path before committing", async () => {
+    const target = file({ futureSection: { keepMe: true }, tools: { mcpServers: { existing: { command: "keep" } } } });
+    const original = readFileSync(target, "utf8");
+    const guardedPaths: string[] = [];
+    await patchMcpServerConfigInMemmyConfig("composio", { type: "streamableHttp", url: "http://127.0.0.1:9000" }, target, {
+      beforeCommit: async (configPath) => {
+        await Promise.resolve();
+        guardedPaths.push(configPath);
+        expect(readFileSync(target, "utf8")).toBe(original);
+      }
+    });
+
+    expect(guardedPaths).toEqual([target]);
+    expect(YAML.parse(readFileSync(target, "utf8"))).toMatchObject({
+      futureSection: { keepMe: true },
+      tools: { mcpServers: { existing: { command: "keep" }, composio: { type: "streamableHttp", url: "http://127.0.0.1:9000" } } }
+    });
+    expect(readdirSync(dirname(target))).toEqual(["config.yaml"]);
+  });
+
+  it("preserves existing configuration and releases temporary files and the lock when an MCP guard rejects", async () => {
+    const target = file({ futureSection: { keepMe: true }, tools: { mcpServers: { existing: { command: "keep" } } } });
+    const original = readFileSync(target, "utf8");
+    const rejection = new Error("Backend closed before MCP configuration commit");
+    const guardedPaths: string[] = [];
+    const writer = createMemmyConfigWriter({ configPath: target });
+
+    await expect(writer.patchMcpServerConfig("composio", { type: "streamableHttp", url: "http://127.0.0.1:9000" }, {
+      beforeCommit: (configPath) => {
+        guardedPaths.push(configPath);
+        throw rejection;
+      }
+    })).rejects.toMatchObject({ code: "migration_io_failed", cause: rejection });
+
+    expect(guardedPaths).toEqual([target]);
+    expect(readFileSync(target, "utf8")).toBe(original);
+    expect(readdirSync(dirname(target))).toEqual(["config.yaml"]);
+    await expect(withRuntimeConfigWriteLock(target, async () => "released")).resolves.toBe("released");
+  });
+
+  it("rejects a stale MCP write after waiting for the runtime config lock", async () => {
+    const target = file({ futureSection: { keepMe: true }, tools: { mcpServers: { existing: { command: "keep" } } } });
+    const original = readFileSync(target, "utf8");
+    let releaseLock: () => void = () => undefined;
+    const mayReleaseLock = new Promise<void>((resolve) => { releaseLock = resolve; });
+    let lockAcquired: () => void = () => undefined;
+    const acquired = new Promise<void>((resolve) => { lockAcquired = resolve; });
+    const holdingLock = withRuntimeConfigWriteLock(target, async () => {
+      lockAcquired();
+      await mayReleaseLock;
+    });
+    await acquired;
+
+    let active = true;
+    let settled = false;
+    const guardedPaths: string[] = [];
+    const rejection = new Error("Backend closed while the MCP write waited for its lock");
+    const outcome = createMemmyConfigWriter({ configPath: target }).patchMcpServerConfig("composio", {
+      type: "streamableHttp", url: "http://127.0.0.1:9000", headers: { Authorization: "old-backend-token" }
+    }, {
+      beforeCommit: (configPath) => {
+        guardedPaths.push(configPath);
+        if (!active) throw rejection;
+      }
+    }).then(() => { settled = true; return null; }, (error: unknown) => { settled = true; return error; });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(settled).toBe(false);
+      expect(guardedPaths).toEqual([]);
+      expect(readFileSync(target, "utf8")).toBe(original);
+    } finally {
+      active = false;
+      releaseLock();
+      await holdingLock;
+      await outcome;
+    }
+
+    expect(await outcome).toMatchObject({ code: "migration_io_failed", cause: rejection });
+    expect(guardedPaths).toEqual([target]);
+    expect(readFileSync(target, "utf8")).toBe(original);
+    expect(readdirSync(dirname(target))).toEqual(["config.yaml"]);
+    await expect(withRuntimeConfigWriteLock(target, async () => "released")).resolves.toBe("released");
   });
 
   it("writes the resolved UI language instead of clearing system", async () => {

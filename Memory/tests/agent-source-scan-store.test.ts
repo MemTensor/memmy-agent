@@ -185,3 +185,19 @@ describe("standalone durable scan store retry", () => {
     again.close();
   });
 });
+
+
+it.each([null, "full", "incremental", "initial_subset"] as const)("retains request mode %s independently of source progress and attempts", async mode => {
+  directory = mkdtempSync(join(tmpdir(), "memmy-request-mode-"));
+  const path = join(directory, "job.sqlite");
+  const job = { jobId: "job", sourceId: "all", mode: "full", phase: "stage", createdAt: "2026-10-22", updatedAt: "2026-10-22" };
+  let store = await openMemoryAgentSourceScanStore(path, job);
+  expect(store.requestedMode()).toBeUndefined();
+  store.saveRequestedMode(mode);
+  store.saveMeta({ ...job, mode: "initial_subset", phase: "prepare" });
+  store.beginAttempt("retry");
+  store.close();
+  store = await openMemoryAgentSourceScanStore(path, job);
+  expect(store.requestedMode()).toBe(mode);
+  store.close();
+});

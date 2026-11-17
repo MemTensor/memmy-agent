@@ -212,6 +212,7 @@ describe("Windows updater identity and exact version checks", () => {
     const installBody = main.slice(installStart, installEnd);
     expect(installBody.indexOf("await validateWindowsDownloadedUpdate(")).toBeLessThan(installBody.indexOf("spawn(windowsUpdatePowerShellExecutable()"));
     expect(installBody.indexOf("await validateWindowsDownloadedUpdate(")).toBeLessThan(installBody.indexOf("scheduleQuitForManualUpdateInstall()"));
+    expect(installBody.indexOf("await waitForWindowsUpdateLauncher(helper)")).toBeLessThan(installBody.indexOf("scheduleQuitForManualUpdateInstall()"));
     const scriptBody = main.slice(installEnd, main.indexOf("function shouldQuitForManualUpdateInstall(", installEnd));
     expect(scriptBody.indexOf("Assert-MemmyUpdateInstaller $Installer")).toBeLessThan(scriptBody.indexOf("Start-Process -FilePath $Installer"));
     expect(scriptBody).toContain("Test-MemmyExactUpdateVersion $actual $MemmyVerifiedUpdateVersion");

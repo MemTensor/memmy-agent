@@ -34,7 +34,7 @@ export interface OnboardingFirstReportMemoryWriter {
 export function createOnboardingFirstReportMemoryWriter(
   memoryClient: Pick<
     MemoryClient,
-    "addMemory" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "runWorker" | "search"
+    "addMemory" | "enqueueImportSummaries" | "getMemoryProcessingStatus" | "search"
   >,
   now: () => number = Date.now
 ): OnboardingFirstReportMemoryWriter {
@@ -150,7 +150,7 @@ function renderList(title: string, values: readonly string[], emptyLabel: string
 }
 
 async function processFirstReportMemory(
-  memoryClient: Pick<MemoryClient, "getMemoryProcessingStatus" | "runWorker">,
+  memoryClient: Pick<MemoryClient, "getMemoryProcessingStatus">,
   memoryId: string,
   now: () => number
 ): Promise<void> {
@@ -167,15 +167,9 @@ async function processFirstReportMemory(
       throw new Error(`First-report memory was not indexed: ${processing.state}`);
     }
 
-    const run = await memoryClient.runWorker({
-      limit: 4,
-      targetMemoryIds: [memoryId],
-      priorityCohortOnly: true,
-      timeoutMs: FIRST_REPORT_PROCESSING_TIMEOUT_MS
-    });
-    if (run.leased === 0 && run.embeddingRetries.leased === 0) {
-      await delay(100);
-    }
+    // The enqueue request already wakes the shared scheduler. First reports
+    // retain their interactive policy without a separate targeted worker.
+    await delay(100);
   }
   throw new Error(`First-report memory indexing timed out: ${memoryId}`);
 }

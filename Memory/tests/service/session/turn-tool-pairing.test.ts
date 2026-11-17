@@ -168,15 +168,15 @@ describe("complete turn tool pairing", () => {
     ]);
   });
 
-  it("persists paired input, output and status in L1 without treating successful text as an error", () => {
+  it("persists paired input, output and status in L1 without treating successful text as an error", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({ namespace: { source: "codex", profileId: "default", userId: "tool-pairing" } });
-    const completed = service.completeTurn("turn-preserve-tools", {
+    const completed = (await service.completeTurn("turn-preserve-tools", {
       sessionId: session.sessionId,
       query: "Read the source file and verify the test result.", answer: "The source file was read and the test result was checked.",
       toolCalls: calls,
       toolResults: [{ id: "call-b", output: "B", status: "failed", success: false, error: "read failed" }, { id: "call-a", output: "A", status: "completed", success: true }]
-    });
+    }));
     const row = db.db.prepare("SELECT properties_json FROM memories WHERE id = ?").get(completed.l1MemoryId) as { properties_json: string };
     const persisted = JSON.parse(row.properties_json).internal_info.trace.tool_calls;
     expect(persisted).toMatchObject([

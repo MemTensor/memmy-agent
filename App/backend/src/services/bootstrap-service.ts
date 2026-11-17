@@ -5,7 +5,6 @@ import {
   type AppSettingsDto,
   type HealthStatus,
   type LegalAgreementUrls,
-  type LotteryStatus,
   type OnboardingStateDto,
   type PromotionFlags,
   type TokenUsageDto
@@ -26,6 +25,8 @@ export interface CreateBootstrapServiceOptions {
   memoryClient: MemoryClient;
   cloudClient: CloudClient;
   bootstrapScenario?: BootstrapScenario;
+  getMemoryUserId?: () => string;
+  timeZone?: string;
   scanPreferencesStore?: Pick<ScanPreferencesStore, "getScanPreferences">;
 }
 
@@ -35,13 +36,12 @@ export function createBootstrapService(options: CreateBootstrapServiceOptions): 
       const bootstrap = options.appStateStore.repositories.bootstrap;
       const appSettings = bootstrap.getAppSettings();
       const onboarding = await reconcileImprovementProgram(options, appSettings, bootstrap.getOnboardingState());
-      const [memoryHealth, cloudHealth, tokenUsage, legal, promotions, lotteryStatus] = await Promise.all([
-        getMemoryHealth(options.memoryClient),
+      const [memoryHealth, cloudHealth, tokenUsage, legal, promotions] = await Promise.all([
+        getMemoryHealth(options.memoryClient, options.getMemoryUserId?.(), options.timeZone),
         getCloudHealth(options.cloudClient),
         refreshTokenUsage(options),
         getLegalUrls(options.cloudClient),
-        getPromotions(options.cloudClient),
-        getLotteryStatus(options.cloudClient)
+        getPromotions(options.cloudClient)
       ]);
 
       return AppBootstrapResponseSchema.parse({
@@ -64,8 +64,7 @@ export function createBootstrapService(options: CreateBootstrapServiceOptions): 
           cloud: cloudHealth.status
         },
         ...(legal ? { legal } : {}),
-        promotions,
-        ...(lotteryStatus ? { lotteryStatus } : {})
+        promotions
       });
     }
   };
@@ -169,17 +168,9 @@ async function getPromotions(cloudClient: CloudClient): Promise<PromotionFlags> 
   }
 }
 
-async function getLotteryStatus(cloudClient: CloudClient): Promise<LotteryStatus | undefined> {
+async function getMemoryHealth(memoryClient: MemoryClient, userId?: string, timeZone?: string): Promise<HealthStatus> {
   try {
-    return await cloudClient.getLotteryStatus();
-  } catch {
-    return undefined;
-  }
-}
-
-async function getMemoryHealth(memoryClient: MemoryClient): Promise<HealthStatus> {
-  try {
-    const health = await memoryClient.health();
+    const health = await memoryClient.health(userId ? { userId, ...(timeZone ? {timeZone} : {}) } : undefined);
     return health.ok ? "ok" : "unavailable";
   } catch (error) {
     return "unavailable";

@@ -11,7 +11,7 @@ import {
   createBuiltinOnboardingInsightSamplers,
   createSourceRegistryOnboardingConversationWindowReader
 } from "../adapters/outbound/agent-source/onboarding-insight-samplers.js";
-import type { SourceRegistry } from "../adapters/outbound/agent-source/source-registry.js";
+import type { SourceRegistry } from "@memmy/agent-source-readers/adapters/source-registry";
 import { createHttpMemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/http-memmy-agent-admin-client.js";
 import type { MemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/index.js";
 import type { SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
@@ -72,7 +72,16 @@ import {
   createSkillDistributionService,
   type SkillDistributionService
 } from "./skill-distribution-service.js";
+import { readCollabAgentAccess } from "./collab-agent-access.js";
 import { createTurnService, type TurnService } from "./turn-service.js";
+import {
+  createProjectInstructionsService,
+  type ProjectInstructionsService
+} from "./project-instructions-service.js";
+import {
+  createCollabInstructionsService,
+  type CollabInstructionsService
+} from "./collab-instructions-service.js";
 import { createPluginService, type PluginRuntimeHost, type PluginService } from "./plugin-service.js";
 import { createPluginLocalArtifactService } from "./plugin-local-artifact-service.js";
 import { createPluginModelInferenceService } from "./plugin-model-inference-service.js";
@@ -109,8 +118,14 @@ export interface BackendServices {
   asrStream: AsrStreamService;
   /** Token quota. */
   tokenQuota: TokenQuotaService;
+  /** 本机项目的项目指令：按文件夹归属，只属于这台电脑。 */
+  projectInstructions: ProjectInstructionsService;
+  /** 协作项目指令的本机缓存：按云端项目 id 归属，只读于任务注入。 */
+  collabInstructions: CollabInstructionsService;
   /** Third-party plugins. */
   plugins: PluginService;
+  /** 给其他 Agent 写技能的入口：协作项目的 `memmy-project` 由授权状态决定装与不装。 */
+  skillDistribution: SkillDistributionService;
   pluginSkillContent?: PluginSkillContentService;
 }
 
@@ -121,6 +136,7 @@ export interface CreateBackendServicesOptions {
   cloudClient: CloudClient;
   permissionManager: PermissionManager;
   bootstrapScenario?: BootstrapScenario;
+  timeZone?: string;
   sourceRegistry?: SourceRegistry;
   ingestionService?: IngestionService;
   skillDistributionService?: SkillDistributionService;
@@ -279,7 +295,9 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   const skillDistributionService =
     options.skillDistributionService ??
     createSkillDistributionService({
-      targetRegistry: skillTargetRegistry
+      targetRegistry: skillTargetRegistry,
+      // 协作项目单独授权：没授权时启动也不写 `memmy-project`，关掉的 Agent 同样跳过。
+      projectSkillPermission: () => readCollabAgentAccess()
     });
   const resolveAnalyticsUserId = () => {
     const session = accountSessionRepository.get();
@@ -320,7 +338,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       getUserMode: resolveAnalyticsUserMode,
     }),
     memoryAddAnalytics,
-    scanStoreDirectory: join(dirname(options.appStateStore.databasePath), "agent-source-scans"),
   });
   const toolConnectionAnalytics = createToolConnectionAnalytics({
     getUserId: resolveAnalyticsUserId,
@@ -332,6 +349,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     agentAdapterRegistry: options.agentAdapterRegistry,
     bootstrap: createBootstrapService({
       ...options,
+      getMemoryUserId: resolveMemoryUserId,
       scanPreferencesStore: options.scanPreferencesStore
     }),
     appConfig: createAppConfigService({
@@ -415,6 +433,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       memoryClient: options.memoryClient
     }),
     memoryDetail: createMemoryDetailService({
+      getUserId: resolveMemoryUserId,
       memoryClient: options.memoryClient
     }),
     panel: createPanelService({
@@ -432,8 +451,18 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession
     }),
+    projectInstructions: createProjectInstructionsService({
+      // 与 Memmy 任务、其他 Agent 的钩子读同一份文件：配置目录下的 project-instructions.json。
+      memmyConfigPath: options.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml")
+    }),
+    collabInstructions: createCollabInstructionsService({
+      // 与协作项目的注入钩子读同一份文件：配置目录下的 collab-project-instructions.json。
+      // 它与上面的本机项目指令文件互不读写，只靠装配处各自接好。
+      memmyConfigPath: options.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml")
+    }),
     plugins,
-    pluginSkillContent
+    pluginSkillContent,
+    skillDistribution: skillDistributionService
   };
 }
 
@@ -463,7 +492,7 @@ function resolveAgentDataRoot(env: NodeJS.ProcessEnv): string {
 export { createBootstrapService };
 export type { BootstrapScenario, BootstrapService };
 
-function createCatalogAgentTaskModelResolver(
+export function createCatalogAgentTaskModelResolver(
   appStateStore: AppStateStore,
   memmyConfigWriter: MemmyConfigWriter
 ): OnboardingInsightAgentTaskModelResolver {

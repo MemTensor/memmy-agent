@@ -15,7 +15,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createOpencodeSkillTarget as backend } from "../App/backend/src/adapters/outbound/skill-writer/opencode/target.ts";
 import { createOpencodeSkillTarget as memory } from "../Memory/src/agent-source/integration/opencode/target.ts";
 import { readOpencodeDatabase } from "../Memory/src/agent-source/adapters/opencode/db-reader.ts";
-import { selectSourceTurn, buildSourceTurnRequest } from "../AgentSourceCore/src/source-turn.ts";
+import { selectSourceTurn, buildSourceTurnRequest } from "../Memory/AgentSourceCore/src/source-turn.ts";
 import { createMemoryServiceFixture } from "../Memory/tests/fixtures/memory-service-fixture.ts";
 import { createMemoryHttpServer } from "../Memory/src/index.ts";
 import { Repositories } from "../Memory/src/storage/repositories.ts";
@@ -148,7 +148,7 @@ async function harness(name, factory) {
         const scanned = await scanTurn(nativePath, body.sourceTurn.conversationId, body.sourceTurn.turnId);
         const turn = scanned.turn;
         assert(turn, "Scan-first must read the actual persisted native turn: " + scanned.reason);
-        scanFirstResults.push(service.completeSourceTurn({ ...buildSourceTurnRequest(turn, "agent_source_scan"), namespace: body.namespace }));
+        scanFirstResults.push(await service.completeSourceTurn({ ...buildSourceTurnRequest(turn, "agent_source_scan"), namespace: body.namespace }));
       }
       const response = await fetch(memoryEndpoint + req.url, { method: req.method, headers: { ...req.headers, host: new URL(memoryEndpoint).host }, body: raw || undefined });
       const text = await response.text(); call.response = { code: response.status, body: JSON.parse(text) };
@@ -252,7 +252,7 @@ async function harness(name, factory) {
     async scan(session, turnId) {
       const turn = await h.scanned(session, turnId); check(Boolean(turn), name + " scanner finds completed turn");
       if (!turn) return;
-      const result = service.completeSourceTurn({ ...buildSourceTurnRequest(turn, "agent_source_scan"), namespace: { source: "opencode", profileId: turn.profileId, userId: "local-user" } });
+      const result = await service.completeSourceTurn({ ...buildSourceTurnRequest(turn, "agent_source_scan"), namespace: { source: "opencode", profileId: turn.profileId, userId: "local-user" } });
       check(result.status === "existing", name + " history scan deduplicates actual live storage: " + result.status + "/" + (result.reason || ""));
     },
     async close() {
