@@ -9,13 +9,13 @@ import type { ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollabAgentAccessView } from "../../api/collab-client.js";
-import { resetLaunchAuthorizationRuntime } from "../../app/collab-launch-authorization.js";
 import {
   getCollabProjectsSnapshot,
   requestCollabAccessPrompt,
   resetCollabProjectsStore
 } from "../../app/collab-projects-store.js";
 import {
+  DEMO_GUIDE_COPY_FALLBACK,
   dispatchDemoGuide,
   resetDemoGuideStore,
   setDemoGuideStateForTest,
@@ -121,11 +121,14 @@ function activeDemo(): DemoGuideState {
     localProjectId: "local-1",
     memberUserId: "9001",
     memberName: "小饭团",
+    copy: DEMO_GUIDE_COPY_FALLBACK,
     error: null,
     done: { task: false, ask: false, help: false },
     skipped: { task: false, ask: false, help: false },
+    askSeen: false,
     askDelivered: false,
     askTurnEnded: false,
+    scan: { status: "idle", count: 0 },
     prefill: null,
     endReason: null,
     cloudEnded: false
@@ -140,7 +143,6 @@ describe("agent access prompt while the demo guide runs", () => {
     vi.clearAllMocks();
     resetCollabProjectsStore();
     resetDemoGuideStore();
-    resetLaunchAuthorizationRuntime();
     window.localStorage.clear();
     mocks.listProjects.mockResolvedValue([project]);
     mocks.knowledge.mockResolvedValue({ bases: [], maxBases: 10, canManage: false });
@@ -160,7 +162,6 @@ describe("agent access prompt while the demo guide runs", () => {
     container.remove();
     resetCollabProjectsStore();
     resetDemoGuideStore();
-    resetLaunchAuthorizationRuntime();
     window.localStorage.clear();
   });
 

@@ -109,8 +109,10 @@ export function CollabAssistHost(props: {
 }) {
   const { t } = useTranslation();
   const notifications = useOptionalNotificationCenter();
-  /** 新手引导进行中：授权弹窗是亮区，遮罩让给引导。 */
-  const demoGuideActive = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState).status === "active";
+  /** 新手引导的当前状态：授权弹窗是亮区，遮罩让给引导；退回上一屏时也要把弹窗收起来。 */
+  const demoGuide = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState);
+  const demoGuideActive = demoGuide.status === "active";
+  const demoMemberUserId = demoGuide.memberUserId;
   const { collab, enabled } = props;
   /** 上层每次渲染都会给新的函数：放在 ref 里，轮询不必因此重启。 */
   const openTaskRef = useRef(props.onOpenTask);
@@ -235,6 +237,25 @@ export function CollabAssistHost(props: {
     setInbox([]);
     setDialogRequest(null);
   }, [collab, enabled]);
+
+  /**
+   * 引导退回上一屏时的两件事：收掉演示成员的授权弹窗、并把「已经弹过」的记录清掉。
+   *
+   * 退回后请求仍然在收件箱里（不替人拒绝，拒绝是另一个决定）。不收弹窗的话蒙版已经去了别的屏，
+   * 弹窗还堵在那里；不清记录的话，人重新开启接收、重新走到这一屏时弹窗再也不会出来。
+   */
+  useEffect(() => {
+    if (!demoGuideActive || !demoMemberUserId) return;
+    if (demoGuide.phase === "help-waiting") {
+      for (const item of inbox) {
+        if (item.requester.userId === demoMemberUserId) prompted.current.delete(item.id);
+      }
+      return;
+    }
+    if (demoGuide.phase !== "help-dialog") {
+      setDialogRequest((current) => (current && current.requester.userId === demoMemberUserId ? null : current));
+    }
+  }, [demoGuideActive, demoGuide.phase, demoMemberUserId, inbox]);
 
   // 新手引导开启「接收协助请求」之后要立刻看到请求：把这次立即刷新交给引导调用，不等下一轮轮询。
   useEffect(() => {

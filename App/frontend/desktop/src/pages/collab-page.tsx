@@ -48,11 +48,6 @@ import {
   subscribeDemoGuideInvite
 } from "../app/collab-demo-guide-invite.js";
 import { requestAssistInboxRefresh } from "../app/collab-assist-refresh.js";
-import {
-  getLaunchAuthorizationState,
-  retryLaunchAuthorization,
-  subscribeLaunchAuthorization
-} from "../app/collab-launch-authorization.js";
 import type { MemmyAgentProject } from "../api/memmy-agent-client.js";
 import { openAgentTaskInChat } from "../app/open-agent-task.js";
 import { Memmy } from "../components/mascot/memmy.js";
@@ -97,6 +92,7 @@ import { READER_PANEL_WIDTH_STORAGE_KEY, useReaderPanelWidth } from "./collab-re
 import { CollabAssistProjectSettings } from "./collab-assist-settings.js";
 import { InfoHint } from "./collab-info-hint.js";
 import { assistAgentName, assistIsOpen, assistStatusKey } from "./collab-assist-view.js";
+import { withoutDemoGuideHint } from "../lib/demo-guide-hint.js";
 
 export { memberColor };
 
@@ -384,7 +380,7 @@ function sessionSignature(session: CollabProjectSession): string {
 
 /**
  * 云端每次返回都是新对象，直接写回会让看板白重画一次。内容一致时返回值告诉调用方「不用写」。
- * 只比较画面上与复制链接真正读到的字段，够用且比整串 JSON 便宜。
+ * 只比较画面上真正用到的字段，够用且比整串 JSON 便宜。
  */
 function sameSessionPage(current: CollabSessionPage | null, next: CollabSessionPage): boolean {
   if (!current || current.total !== next.total) return false;
@@ -546,15 +542,6 @@ const CollabBoard = memo(function CollabBoard(props: {
    */
   const [agentAccess, setAgentAccess] = useState<CollabAgentAccessView | null>(null);
   const [accessOpen, setAccessOpen] = useState(false);
-  /**
-   * 大卡上的「新建项目」会在后台发起授权：进行中、或已经下发过（哪怕个别 Agent 没装上），看板都不再问一次。
-   * 这里订阅的是模块里的状态，大卡卸载之后它还在继续。
-   */
-  const launchAuthorization = useSyncExternalStore(
-    subscribeLaunchAuthorization,
-    getLaunchAuthorizationState,
-    getLaunchAuthorizationState
-  );
   /** 开启共享回到看板时手动触发一次状态重读。 */
   const [accessCheckKey, setAccessCheckKey] = useState(0);
   /** 同一次进入看板只主动问一次，弹窗关掉后靠设置或点「关联任务」再授权。 */
@@ -686,6 +673,8 @@ const CollabBoard = memo(function CollabBoard(props: {
    */
   const demoOwnsProject = demoGuide.status !== "ended" && projectId !== null && demoGuide.localProjectId === projectId;
   const demoMemberName = demoGuide.memberName;
+  /** 现在是导览「关联会话」那一站：弹窗要打开，未授权时先展示授权说明。 */
+  const demoPickPhase = demoActive && demoGuide.phase === "tour-associate-pick";
 
   /**
    * 这次要不要把授权询问让一让：设置与选择任务的弹窗开着，或者选择任务的请求还没被看板处理完。
@@ -725,31 +714,17 @@ const CollabBoard = memo(function CollabBoard(props: {
     void refreshAgentAccess();
   }, [refreshAgentAccess, sharedId, accessCheckKey]);
 
-  /** 后台授权有结果时重读一次：它决定「关联任务」是列任务还是给授权说明。 */
-  useEffect(() => {
-    if (launchAuthorization.inFlight) return;
-    if (!launchAuthorization.granted && launchAuthorization.failure === null) return;
-    void refreshAgentAccess();
-  }, [launchAuthorization, refreshAgentAccess]);
-
-  /**
-   * 后台授权已经发起：进行中视为已授权，下发之后（无论个别成败）也不再问，装失败的由下面的提示条负责重试。
-   * 大卡自己已经拿到过一次授权，再弹这个询问只会让人以为刚才那一下没生效。
-   */
-  const launchAuthorizationSettled = launchAuthorization.inFlight
-    || launchAuthorization.granted
-    || launchAuthorization.failure !== null;
-
   /**
    * 两个询问时机：刚开启共享后回到看板（创建者），以及加入他人项目的人第一次打开这个项目的看板。
    * 只要还没授权、也没在这里问过，就弹一次；选「暂不安装」之后不再弹。
    * 设置与选择任务的弹窗开着时先不问：刚开启共享往往跟着这两个弹窗，叠在一起会让人看不清先后。
+   *
+   * 授权本身只在两处发生：看板这一下，以及引导「关联会话」那一站的就地授权（先在那里授权过的，这里就不会再问）。
    */
   useEffect(() => {
     // 演示期间一律不问：演示结束后按「完成 / 邀请弹窗关闭 / 退出引导」的时机再弹。
     if (demoOwnsProject) return;
     if (!agentAccess || agentAccess.granted || agentAccess.askedInProject) return;
-    if (launchAuthorizationSettled) return;
     if (accessAskedRef.current) return;
     if (accessPromptHeld) return;
     const joined = shared !== null && shared.role !== "owner";
@@ -757,7 +732,7 @@ const CollabBoard = memo(function CollabBoard(props: {
     accessAskedRef.current = true;
     askAccessAfterShareRef.current = false;
     setAccessOpen(true);
-  }, [agentAccess, launchAuthorizationSettled, shared, accessPromptHeld, demoOwnsProject]);
+  }, [agentAccess, shared, accessPromptHeld, demoOwnsProject]);
 
   /** 关掉授权弹窗：选了「暂不安装」也记下已询问，之后只从设置里授权。 */
   const closeAccessDialog = useCallback((granted: boolean) => {
@@ -785,6 +760,26 @@ const CollabBoard = memo(function CollabBoard(props: {
       return false;
     }
   }, [collab]);
+
+  /**
+   * 引导「关联会话」那一站的授权：由看板就地发起，与弹窗里那个「授权并查看」是同一套。
+   *
+   * 授权完成就通知引导开始扫；没成则退回门帘并报原因，卡片上给「再试一次」与「跳过这一站」。
+   * `granting` 就是「正在跑」：跑完之前不会再发一次。
+   */
+  const demoGranting = demoPickPhase && demoGuide.scan.status === "granting";
+  const demoGrantRunRef = useRef(false);
+  useEffect(() => {
+    if (!demoGranting || demoGrantRunRef.current) return;
+    demoGrantRunRef.current = true;
+    void (async () => {
+      const granted = await grantAccessInPlace();
+      dispatchDemoGuide(granted
+        ? { type: "grant-settled" }
+        : { type: "grant-failed", reason: t("collab.demo.scan.grantFailed") });
+      demoGrantRunRef.current = false;
+    })();
+  }, [demoGranting, grantAccessInPlace, t]);
 
   // 宽看板默认展开配置；窄到放不下时先收起。用户点过收起或展开之后，以他的选择为准。
   useLayoutEffect(() => {
@@ -1156,8 +1151,94 @@ const CollabBoard = memo(function CollabBoard(props: {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
 
+  /**
+   * 看板导览讲到「协助」时把 tab 切过去，讲到其他几站再切回「任务」。
+   *
+   * 亮区亮的是 tab 那一行，下面的内容必须跟着一同：讲协助却还停在任务列表，那排 tab 就只是装饰。
+   * 那一步还没有任何协助记录，切过去是空态——空态自己会说明这块是干什么的。
+   */
+  useEffect(() => {
+    if (!demoActive) return;
+    if (demoGuide.phase === "tour-tabs") {
+      switchBoardTab("assists");
+      return;
+    }
+    if (demoGuide.phase === "tour-board" || demoGuide.phase === "tour-associate" || demoGuide.phase === "tour-associate-pick") {
+      switchBoardTab("tasks");
+    }
+  }, [demoActive, demoGuide.phase, boardTab]);
+
+  /**
+   * 引导退回上一屏：设置弹窗要跟着关。
+   *
+   * `settings-open` 那一屏讲的是「去项目设置开一下」——那一屏本来就不该有弹窗。
+   * 从第三步退回来时弹窗是演示自己打开的，不关的话人看见蒙版说「点齿轮」，齿轮却在弹窗后面。
+   */
+  useEffect(() => {
+    if (demoActive && demoGuide.phase === "settings-open" && settingsOpen) setSettingsOpen(false);
+  }, [demoActive, demoGuide.phase, settingsOpen]);
+
+  /**
+   * 导览讲到「关联会话」时，真的把关联弹窗打开。
+   *
+   * 演示期间人点不了这个弹窗（蒙版遮住整张弹窗）：这里只是把能力摆出来，不勾选、不保存。
+   * 关联会话是整条引导里唯一需要授权的地方：还没授权时弹窗只给授权说明（门帘），
+   * 卡片的「授权并查看」就地授权，装完这里再真的扫一遍本机记录。
+   */
+  const demoPickLocked = demoPickPhase && agentAccess !== null && !agentAccess.granted;
+  useEffect(() => {
+    // 只在还没开始时推一次：正在装、装完在扫、扫完与装失败（还带着原因）都不回退。
+    if (!demoPickLocked) return;
+    if (demoGuide.scan.status !== "idle" && demoGuide.scan.status !== "scanning") return;
+    dispatchDemoGuide({ type: "scan-locked" });
+  }, [demoPickLocked, demoGuide.scan.status]);
+  /**
+   * 弹窗是不是引导打开的那一次。
+   *
+   * 引导离开这一步（下一步、上一步、跳过、退出、心跳超时）就把它关掉；用户自己点的弹窗不受影响。
+   * 没授权时也照开：门帘就是这一站要给人看的东西。
+   */
+  const demoPickShownRef = useRef(false);
+  useEffect(() => {
+    const wanted = demoPickPhase;
+    if (wanted) {
+      demoPickShownRef.current = true;
+      setPickOpen(true);
+      return;
+    }
+    if (!demoPickShownRef.current) return;
+    demoPickShownRef.current = false;
+    setPickOpen(false);
+  }, [demoPickPhase]);
+
   const sessions = page?.sessions ?? null;
   const filtering = Boolean(query) || member !== "all";
+
+  /**
+   * 引导第一步的只读面板要跟着屏开与关。
+   *
+   * 点开成员的任务才进 `reader`；退到 `task-row` 时面板必须关掉，否则它盖住那一行，
+   * 蒙版亮的却是被盖住的位置。从输入框（`compose`）退回 `reader` 时面板要重新打开：
+   * 它不在，`reader-panel` 锚点就没有，蒙版什么也亮不出来（看起来就是引导没了）。
+   */
+  const demoMemberSession = demoActive && demoMemberName && sessions
+    ? sessions.find((session) => !session.mine && (session.memberName || "") === demoMemberName) ?? null
+    : null;
+  /** 已经为哪一条开过一次读面板：读失败时不至于每次重画都再请求一次。 */
+  const demoReaderAttemptRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!demoActive) return;
+    if (demoGuide.phase === "reader") {
+      if (!demoMemberSession || reading !== null || readingId !== null) return;
+      if (demoReaderAttemptRef.current === demoMemberSession.id) return;
+      demoReaderAttemptRef.current = demoMemberSession.id;
+      void openSession(demoMemberSession);
+      return;
+    }
+    // 离开这一屏：下次回来重新读一次，面板开着就关掉。
+    demoReaderAttemptRef.current = null;
+    if (reading !== null) setReading(null);
+  }, [demoActive, demoGuide.phase, demoMemberSession, reading, readingId]);
 
   /**
    * 筛过之后一条也没有：用一张说明卡片讲清当前为什么是空的。
@@ -1318,15 +1399,6 @@ const CollabBoard = memo(function CollabBoard(props: {
       return;
     }
     void openSession(session);
-  }
-
-  async function copyLink(session: CollabProjectSession) {
-    try {
-      await navigator.clipboard.writeText(session.shareText);
-      showToast(t("collab.session.linkCopied"));
-    } catch {
-      showToast(t("collab.session.copyFailed"));
-    }
   }
 
   /**
@@ -1545,23 +1617,6 @@ const CollabBoard = memo(function CollabBoard(props: {
                     <span>{notice}</span>
                   </div>
                 ) : null}
-                {/* 大卡打开项目时在后台做的授权有 Agent 没装上：留一条可重试的提示，成功后自己消失。 */}
-                {launchAuthorization.failure !== null ? (
-                  <div className={styles.cloudNotice} role="alert">
-                    <span>
-                      {launchAuthorization.failure.count === null
-                        ? t("collab.notice.agentAccessSome")
-                        : t("collab.notice.agentAccessPartial", { count: String(launchAuthorization.failure.count) })}
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => collab && retryLaunchAuthorization(collab)}
-                    >
-                      {t("collab.retry")}
-                    </Button>
-                  </div>
-                ) : null}
                 {/* 只有已共享的项目才依赖云端；本地项目不提示云端异常，等开启共享时再报错。 */}
                 {shared !== null && snapshot.error !== null ? (
                   <div className={styles.cloudNotice} role="status">
@@ -1576,53 +1631,60 @@ const CollabBoard = memo(function CollabBoard(props: {
                     {shared ? <Cloud size={22} /> : <Folder size={22} />}
                   </span>
                   <h1 className={styles.boardName}>{project.name}</h1>
-                  <span className={styles.boardScope}>
+                  {/* 新手引导「成员已加入」那一屏的亮区：套住成员数量（含项目名与图标），告诉人小饭团已经在里面。 */}
+                  <span className={styles.boardScope} data-demo-guide="board-members">
                     {shared
                       ? t("collab.members", { count: String(shared.memberCount) })
                       : t("collab.board.localOnly")}
                   </span>
                   <span className={styles.grow} />
-                  {shared ? (
+                  {/* 头部操作整块给足热区：按钮彼此只隔 6px，鼠标从「邀请」移到设置不会落到空处 */}
+                  <span className={styles.boardActions}>
+                    {shared ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className={styles.boardAction}
+                        onClick={() => setMembersOpen(true)}
+                        // 有待审核的申请时把数量写进无障碍名称，按钮上也带一个角标。
+                        aria-label={pendingRequests > 0 ? t("collab.members.pending", { count: String(pendingRequests) }) : undefined}
+                        title={pendingRequests > 0 ? t("collab.members.pending", { count: String(pendingRequests) }) : undefined}
+                      >
+                        <UserPlus size={15} aria-hidden="true" />
+                        {t("collab.members.invite")}
+                        {pendingRequests > 0 ? (
+                          <span className={styles.requestBadge} aria-hidden="true">{pendingRequests}</span>
+                        ) : null}
+                      </Button>
+                    ) : null}
+                    {/* 收起与展开不同时出现：展开时入口在面板标题栏，收起后才回到这里，与 WorkBuddy 一致 */}
+                    {configOpen ? null : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className={`${styles.boardAction} ${styles.boardIconAction}`}
+                        aria-label={t("collab.config.expand")}
+                        title={t("collab.config.expand")}
+                        onClick={() => chooseConfig(true)}
+                      >
+                        <PanelRight size={15} aria-hidden="true" />
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() => setMembersOpen(true)}
-                      // 有待审核的申请时把数量写进无障碍名称，按钮上也带一个角标。
-                      aria-label={pendingRequests > 0 ? t("collab.members.pending", { count: String(pendingRequests) }) : undefined}
-                      title={pendingRequests > 0 ? t("collab.members.pending", { count: String(pendingRequests) }) : undefined}
+                      className={`${styles.boardAction} ${styles.boardIconAction}`}
+                      aria-label={t("collab.settings.open")}
+                      title={t("collab.settings.open")}
+                      data-demo-guide="board-settings"
+                      onClick={() => {
+                        setSettingsOpen(true);
+                        if (demoActive) dispatchDemoGuide({ type: "settings-opened" });
+                      }}
                     >
-                      <UserPlus size={15} aria-hidden="true" />
-                      {t("collab.members.invite")}
-                      {pendingRequests > 0 ? (
-                        <span className={styles.requestBadge} aria-hidden="true">{pendingRequests}</span>
-                      ) : null}
+                      <Settings size={15} aria-hidden="true" />
                     </Button>
-                  ) : null}
-                  {/* 收起与展开不同时出现：展开时入口在面板标题栏，收起后才回到这里，与 WorkBuddy 一致 */}
-                  {configOpen ? null : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      aria-label={t("collab.config.expand")}
-                      title={t("collab.config.expand")}
-                      onClick={() => chooseConfig(true)}
-                    >
-                      <PanelRight size={15} aria-hidden="true" />
-                    </Button>
-                  )}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    aria-label={t("collab.settings.open")}
-                    title={t("collab.settings.open")}
-                    data-demo-guide="board-settings"
-                    onClick={() => {
-                      setSettingsOpen(true);
-                      if (demoActive) dispatchDemoGuide({ type: "settings-opened" });
-                    }}
-                  >
-                    <Settings size={15} aria-hidden="true" />
-                  </Button>
+                  </span>
                 </header>
 
                 {shared ? (
@@ -2020,8 +2082,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                                 {menuOpen ? (
                                   <>
                                     {/*
-                                     * The row itself opens the session reader. Every click that belongs to the menu has to
-                                     * stop here, or copying a link also opens the session behind the toast.
+                                     * The row itself opens the session reader, so every click that belongs to the menu
+                                     * has to stop here, or a menu choice also opens the session behind it.
                                      */}
                                     <button
                                       type="button"
@@ -2036,9 +2098,6 @@ const CollabBoard = memo(function CollabBoard(props: {
                                       {/* 任一行都可用，包括他人的只读任务：只读限制作用于正文，不影响在自己这边开新任务 */}
                                       <button type="button" role="menuitem" className={styles.menuItem} onClick={() => { setOpenMenuId(null); void continueSession(session); }}>
                                         {t("collab.session.continue")}
-                                      </button>
-                                      <button type="button" role="menuitem" className={styles.menuItem} onClick={() => { setOpenMenuId(null); void copyLink(session); }}>
-                                        {t("collab.session.copyLink")}
                                       </button>
                                       {session.mine ? (
                                         <>
@@ -2244,6 +2303,9 @@ const CollabBoard = memo(function CollabBoard(props: {
           accessAgents={agentAccess?.agents}
           onGrantAccess={grantAccessInPlace}
           onClose={() => setPickOpen(false)}
+          // 引导讲解这一步时弹窗只做展示：真实扫描、不给勾选、不给保存，也没有关闭按钮。
+          demoGuide={demoActive && demoGuide.phase === "tour-associate-pick"}
+          onDemoScanSettled={(count) => dispatchDemoGuide({ type: "scan-settled", count })}
           onLinked={(result) => {
             // The selection is already saved; the upload continues in the background and the board shows it.
             setPickOpen(false);
@@ -2282,12 +2344,11 @@ const CollabBoard = memo(function CollabBoard(props: {
         loading={readingId !== null}
         resolveAgentName={resolveAgentName}
         onClose={() => setReading(null)}
-        onCopy={(session) => void copyLink(session)}
         onContinue={(session) => {
           if (demoActive) {
             dispatchDemoGuide({
               type: "task-continued",
-              prefill: t("collab.demo.prefill.task", { name: demoMemberName })
+              prefill: t("collab.demo.prefill.task", { name: demoMemberName, next: demoGuide.copy.taskNext })
             });
           }
           void continueSession(session);
@@ -3222,7 +3283,6 @@ function SessionReaderPanel(props: {
   /** 已关联的 Agent 用本机的名字；内置 Agent 用产品名。 */
   resolveAgentName: (sourceId: string) => string;
   onClose: () => void;
-  onCopy: (session: CollabProjectSession) => void;
   /** 在项目下开一条新任务接着这条做：与任务行「…」菜单里的「继续任务」同一个动作。 */
   onContinue: (session: CollabProjectSession) => void;
 }) {
@@ -3312,15 +3372,6 @@ function SessionReaderPanel(props: {
             <button
               type="button"
               className={styles.readerAction}
-              aria-label={t("collab.session.copyLink")}
-              title={t("collab.session.copyLink")}
-              onClick={() => props.onCopy(data.session)}
-            >
-              <Link2 size={15} aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              className={styles.readerAction}
               aria-label={t("common.close")}
               title={t("common.close")}
               onClick={props.onClose}
@@ -3390,9 +3441,10 @@ export function visibleQuestion(text: string): string {
   const queries = [...text.matchAll(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/giu)]
     .map((match) => match[1]?.trim() ?? "")
     .filter((query) => query.length > 0);
-  return withoutInterruptionMarkers(
+  // 新手引导第二步那句话后面跟着给 Agent 的执行提示（命令行与参数）：成员看到的副本里不该有它。
+  return withoutDemoGuideHint(withoutInterruptionMarkers(
     withoutSkillDump(withoutCursorTaskFollowup(stripHostEnvelope(queries.length > 0 ? queries.join("\n\n") : text)))
-  );
+  ));
 }
 
 /**
@@ -3444,6 +3496,15 @@ export function AssociateSessionsModal(props: {
   accessAgents?: ReadonlyArray<{ sourceId: string; name: string; enabled: boolean; available: boolean }>;
   /** 在弹窗内就地授权：成功返回 true，列表随即在当前弹窗里出现。 */
   onGrantAccess?: () => Promise<boolean>;
+  /**
+   * 新手引导的展示模式：真实扫一遍本机历史会话，但一个也不能勾、也不保存。
+   *
+   * 引导要讲的是「之后可以在这里选」，所以弹窗照原样摊开给人看：蒙版会盖住整张弹窗，
+   * 里面的按钮与勾选框一律不接操作；关闭按钮与 Esc 也收起，避免把人从引导里带出去。
+   */
+  demoGuide?: boolean;
+  /** 展示模式的扫描结束（成功或失败都报）：引导据此才放行「下一步」。 */
+  onDemoScanSettled?: (count: number) => void;
 }) {
   const { t } = useTranslation();
   const appState = useOptionalAppState();
@@ -3463,6 +3524,37 @@ export function AssociateSessionsModal(props: {
   const { collab, open, project } = props;
   /** 「在其他 Agent 中使用协作项目」是否已授权：未传按已授权处理，只有涉及授权的页面会传它。 */
   const accessGranted = props.accessGranted ?? true;
+  /** 展示模式：只扫不选，互动全部收起。 */
+  const demoGuide = props.demoGuide === true;
+  /** 回调由看板每次渲染现给，放进 ref 只为了不让它重启扫描。 */
+  const demoSettledRef = useRef(props.onDemoScanSettled);
+  demoSettledRef.current = props.onDemoScanSettled;
+  useEffect(() => {
+    if (!open || !demoGuide) return undefined;
+    // 还没授权时只给授权说明（门帘），不去读本机记录：读也读不到，反而会把「0 个会话」报给引导。
+    // 授权完成后 `accessGranted` 变真，这一段重跑，真的把这台电脑上各个 Agent 的会话读一遍。
+    if (!accessGranted) return undefined;
+    // 这次是真的扫描：不等上次缓存，直接把这台电脑上各个 Agent 的会话读一遍。
+    let cancelled = false;
+    setSessions(null);
+    setError(null);
+    collab.listLocalSessions({ limit: MAX_LOCAL_SESSIONS, fresh: true })
+      .then((listing) => {
+        if (cancelled) return;
+        setSessions(listing.sessions);
+        demoSettledRef.current?.(listing.sessions.length);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        // 扫不出来也算有了结果：卡片会说「暂时没有可以关联的会话」，人不会被卡在这儿。
+        setSessions([]);
+        setError(messageOf(cause));
+        demoSettledRef.current?.(0);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accessGranted, collab, demoGuide, open]);
   /** 授权说明里列出的 Agent：只列可用的，关掉的单独用一句话说明。 */
   const gateAgents = (props.accessAgents ?? []).filter((agent) => agent.available && agent.enabled);
   const gateDisabledNames = (props.accessAgents ?? []).filter((agent) => agent.available && !agent.enabled).map((agent) => agent.name);
@@ -3488,6 +3580,8 @@ export function AssociateSessionsModal(props: {
     setQuery("");
     setExpanded(new Set());
     setError(null);
+    // 展示模式自己扫一遍（见上面的 demoGuide effect）：这里不再读缓存，否则两份结果会来回盖。
+    if (demoGuide) return;
     // 未授权时一个本机记录也不读：弹窗里只有授权说明，授权后这一段会重新跑。
     if (!accessGranted) return;
     // The last scan shows at once; when it is older, the newer list replaces it a few seconds later.
@@ -3510,7 +3604,7 @@ export function AssociateSessionsModal(props: {
     return () => {
       cancelled = true;
     };
-  }, [accessGranted, collab, open, project.id]);
+  }, [accessGranted, collab, demoGuide, open, project.id]);
 
   /** 就地授权：授权成功后同一个弹窗直接列出任务，不用先关掉再点一次。 */
   async function grantAccess() {
@@ -3662,12 +3756,23 @@ export function AssociateSessionsModal(props: {
       open={props.open}
       title={t("collab.pick.title")}
       subtitle={t("collab.pick.subtitle", { project: project.name })}
-      onClose={busy || confirmUnlinkGroup ? undefined : props.onClose}
+      onClose={busy || confirmUnlinkGroup || demoGuide ? undefined : props.onClose}
       closeLabel={t("common.close")}
       closeContent={<X size={16} aria-hidden="true" />}
-      className={styles.pickModal}
-      backdropClassName={styles.backdrop}
-      footer={(
+      // 展示模式把弹窗收窄一点：说明卡才贴得到它左边，不压住刚扫出来的会话列表。
+      className={demoGuide ? `${styles.pickModal} ${styles.pickModalDemo}` : styles.pickModal}
+      backdropClassName={demoGuide ? `${styles.backdrop} ${styles.backdropYield}` : styles.backdrop}
+      demoGuideAnchor={demoGuide ? "associate-pick" : undefined}
+      footer={demoGuide ? (
+        // 展示模式的底部没有按钮：只说清现在在做什么、什么也不会被改动。
+        <span>
+          {!accessGranted
+            ? t("collab.pick.demoLocked")
+            : sessions === null && !error
+              ? t("collab.pick.demoScanning")
+              : t("collab.pick.demoNote")}
+        </span>
+      ) : (
         <>
           {error ? <span className={styles.error} role="alert">{error}</span> : selectedCount > SESSIONS_PER_MEMBER_LIMIT ? (
             <span className={styles.pickLimit} role="status">
@@ -3692,7 +3797,7 @@ export function AssociateSessionsModal(props: {
     >
       {!accessGranted ? (
         /* 未授权：同一个弹窗只给授权说明，不列出任何本机记录，也不给「保存」。 */
-        <div className={styles.pickBody}>
+        <div className={styles.pickBody} inert={demoGuide ? true : undefined}>
           <div className={styles.gate}>
             <Memmy pose="shield" size={72} className={styles.gateMascot} />
             <h3 className={styles.gateTitle}>{t("collab.pick.gate")}</h3>
@@ -3705,7 +3810,7 @@ export function AssociateSessionsModal(props: {
           </div>
         </div>
       ) : (
-      <div className={styles.pickBody}>
+      <div className={styles.pickBody} inert={demoGuide ? true : undefined}>
         <div className={styles.agentColumn}>
         <nav className={styles.agentList} aria-label="Agent">
           {agents.map((agent) => {

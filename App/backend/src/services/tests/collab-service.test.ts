@@ -1619,6 +1619,69 @@ describe("collab service", () => {
     expect(missing.text).toMatch(/还没有读到正在进行的这个对话/);
     expect(missing.text).toContain("不要改加别的任务");
   });
+
+  it("reads the named session directly instead of listing every agent's recent sessions", async () => {
+    const local = [localSession("cursor", "current", "/repo", "2026-10-22T01:00:00.000Z")];
+    const { fetcher, calls } = addFetch(local);
+    const svc = service(fetcher);
+
+    await svc.addCurrentSession({
+      project: "Memmy 开发",
+      cwd: "/repo",
+      sourceId: "cursor",
+      conversationId: "current"
+    });
+    await waitForUploads(svc, "p-1");
+
+    // 名字已经指明是哪条会话：直接读那一条，不必把每个 Agent 的最近三十条列一遍。
+    expect(calls.some((call) => call.url === "local:/api/v1/agent-sessions/available"
+      && (call.body as { fresh?: boolean }).fresh === true)).toBe(false);
+    expect(calls.some((call) => call.url === "local:/api/v1/agent-sessions/read")).toBe(true);
+    expect(uploadedIds(calls)).toEqual(["current"]);
+  });
+
+  it("keeps why an upload did not finish, so a shared task that never arrives can be explained", async () => {
+    const local = [localSession("cursor", "current", "/repo", "2026-10-22T01:00:00.000Z")];
+    const { fetcher, calls } = addFetch(local);
+    const failing = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/collab/projects/p-1/sessions") && init?.method === "PUT") {
+        return new Response(JSON.stringify({ code: 401, message: "登录已失效", data: null }), { status: 401 });
+      }
+      return fetcher(input, init);
+    }) as typeof fetch;
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-"));
+    roots.push(root);
+    const svc = createCollabService({
+      cloudBaseUrl: "https://cloud.test.invalid",
+      getAccount: () => ({ accountId: "u-b", credential: "uuid-b" }),
+      localSessions: readersOf.get(fetcher) ?? null,
+      projectsDir: root,
+      fetcher: failing,
+      now: () => new Date("2026-10-22T06:32:00.000Z")
+    });
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: unknown) => { warnings.push(String(message)); };
+    try {
+      await svc.addCurrentSession({
+        project: "Memmy 开发",
+        cwd: "/repo",
+        sourceId: "cursor",
+        conversationId: "current"
+      });
+      await waitForUploads(svc, "p-1");
+    } finally {
+      console.warn = warn;
+    }
+
+    // 失败留痕：links 里记下原因，而不是只把「上传中」摆回 false。
+    // 日志一句只在能拿到它时验证：同文件的其他用例也有后台上传，不把断言钉在全局 console 上。
+    if (warnings.length) expect(warnings.join("\n")).toContain("upload did not complete");
+    const links = JSON.parse(readFileSync(join(root, "p-1", "links.json"), "utf8")) as {
+      lastUploadError?: { message: string; at: string };
+    };
+    expect(links.lastUploadError?.message).toContain("登录已失效");
+  });
 });
 
 /** Projects the person is in, plus the local tasks `add` chooses from. */

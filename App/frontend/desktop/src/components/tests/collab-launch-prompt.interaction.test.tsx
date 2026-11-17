@@ -2,14 +2,13 @@
 /**
  * The one-time project-collaboration announcement.
  *
- * The card only opens the new-project dialog with sharing already on. A computer that has not authorized yet gets one
- * extra thing: a question mark beside the button explaining what that click authorizes. Nothing about the installs is
- * shown here — the authorization runs in the background and the board reports what did not finish.
+ * The card only opens the new-project dialog with sharing already on. It authorizes nothing: the only thing that needs
+ * the "use shared projects in other agents" authorization is linking sessions, and the walkthrough asks for it at that
+ * very step, so the card keeps one button and no explanation of an install it no longer starts.
  */
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CollabAgentAccessView, CollabAgentInstallResult, CollabClient } from "../../api/collab-client.js";
 import {
   claimCollabLaunchPrompt,
   COLLAB_LAUNCH_PROMPT_STORAGE_KEY,
@@ -18,13 +17,10 @@ import {
   resetCollabLaunchPromptRuntime,
   setCollabLaunchPromptOpen
 } from "../../app/collab-launch-prompt-state.js";
-import {
-  getLaunchAuthorizationState,
-  resetLaunchAuthorizationRuntime
-} from "../../app/collab-launch-authorization.js";
 import { getCollabProjectsSnapshot, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { CollabLaunchDialog } from "../collab-launch-dialog.js";
+import { COLLAB_LAUNCH_CAPTIONS } from "../collab-launch-motion.js";
 import { CollabLaunchPromptHost } from "../collab-launch-prompt-host.js";
 import { GithubStarPromptHost } from "../github-star-prompt-host.js";
 
@@ -95,29 +91,6 @@ function createProjectRequested(): { createPending: boolean; createShareDefault:
   return { createPending: snapshot.createPending, createShareDefault: snapshot.createShareDefault };
 }
 
-const AGENTS: CollabAgentAccessView["agents"] = [
-  { sourceId: "claude_code", name: "Claude Code", available: true, enabled: true, installed: false, added: false },
-  { sourceId: "codex", name: "Codex", available: true, enabled: true, installed: false, added: false }
-];
-
-function installResults(ok: (sourceId: string) => boolean = () => true): CollabAgentInstallResult[] {
-  return AGENTS.map((agent) => ({ sourceId: agent.sourceId, name: agent.name, ok: ok(agent.sourceId) }));
-}
-
-/** A client that only answers the calls this card makes. */
-function fakeCollab(options: {
-  granted?: boolean;
-  access?: () => Promise<CollabAgentAccessView>;
-  grant?: () => Promise<{ view: CollabAgentAccessView; results: CollabAgentInstallResult[] }>;
-} = {}): CollabClient {
-  const view: CollabAgentAccessView = { granted: options.granted ?? false, askedInProject: false, agents: AGENTS };
-  return {
-    getAgentAccess: async () => options.access?.() ?? view,
-    setAgentAccess: async () => options.grant?.() ?? { view: { ...view, granted: true }, results: installResults() },
-    installAgentAccess: async () => ({ view: { ...view, granted: true }, results: installResults() })
-  } as unknown as CollabClient;
-}
-
 describe("collab launch prompt", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -127,7 +100,6 @@ describe("collab launch prompt", () => {
     resetStorage("sessionStorage");
     resetCollabLaunchPromptRuntime();
     resetCollabProjectsStore();
-    resetLaunchAuthorizationRuntime();
     mocks.guidanceDone = true;
     mocks.state.startup.status = "ready";
     mocks.state.navigation.currentPath = "/main";
@@ -146,7 +118,6 @@ describe("collab launch prompt", () => {
     setCollabLaunchPromptOpen(false);
     resetCollabLaunchPromptRuntime();
     resetCollabProjectsStore();
-    resetLaunchAuthorizationRuntime();
     document.body.replaceChildren();
   });
 
@@ -156,7 +127,9 @@ describe("collab launch prompt", () => {
 
   const dialog = () => document.querySelector<HTMLElement>(".collab-launch-dialog");
   const title = () => document.querySelector("#collab-launch-title")?.textContent?.trim();
-  const subtitle = () => document.querySelector(".collab-launch-copy h3")?.textContent?.trim();
+  const stage = () => document.querySelector<HTMLElement>(".collab-launch-stage");
+  const caption = () => document.querySelector(".collab-launch-caption__main")?.textContent?.trim();
+  const captionSub = () => document.querySelector(".collab-launch-caption__sub")?.textContent?.trim();
   const primary = () => document.querySelector<HTMLButtonElement>(".collab-launch-primary");
   const click = async (element: Element | null) => act(async () => {
     (element as HTMLElement).click();
@@ -169,22 +142,38 @@ describe("collab launch prompt", () => {
     expect(window.localStorage.getItem(COLLAB_LAUNCH_PROMPT_STORAGE_KEY)).toBe("1");
   });
 
-  it("shows one page with the example and no paging controls", async () => {
+  it("shows one page with the moving stage and the first caption", async () => {
     await renderHost();
 
+    // 标题只剩读屏用的一份，卡面上直接是画面。
     expect(title()).toBe("项目协作");
-    expect(subtitle()).toBe("把团队工作放进同一个项目");
+    expect(stage()).not.toBeNull();
+    // 画面本身对辅助技术隐藏：舞台里只有画面，进度条是例外。
+    expect(stage()?.querySelector(".collab-launch-world")?.getAttribute("aria-hidden")).toBe("true");
+    expect(caption()).toBe("人与各自的 Agent，组成独当一面的超级个体");
+    expect(captionSub()).toBe("思考与执行的完整脉络，都沉淀在各自的原始会话里");
+    // 只有一页：没有翻页、进度点，也没有旧版右侧示例。
     expect(document.querySelector(".collab-launch-count")).toBeNull();
     expect(document.querySelector(".collab-launch-dots")).toBeNull();
     expect(document.querySelector(".collab-launch-prev")).toBeNull();
-    expect(document.querySelector(".collab-launch-chat__user")?.textContent?.trim()).toBe("这个项目最近大家做到哪了？");
-    expect(document.querySelector(".collab-launch-chat__lead")?.textContent?.trim()).toBe("已读取项目中的最新进展：");
-    expect(document.querySelectorAll(".collab-launch-chat__agent li")).toHaveLength(3);
-    expect(document.querySelector(".collab-launch-visual__caption")?.textContent?.trim())
-      .toBe("团队做了什么，你的 Agent 都知道");
+    expect(document.querySelector(".collab-launch-visual")).toBeNull();
+    // 原型里用来对照文案的切换条不进产品。
+    expect(document.querySelector(".copy-switch")).toBeNull();
+    expect(document.querySelector("[data-copy-switch]")).toBeNull();
     // 卡面不再有授权结果、重试、错误行与脚注。
     expect(document.querySelector("#collab-launch-footnote")).toBeNull();
     expect(document.querySelector(".collab-launch-status")).toBeNull();
+  });
+
+  it("keeps the picture hidden while the five progress pieces stay reachable", async () => {
+    await renderHost();
+
+    const progress = document.querySelector<HTMLElement>(".collab-launch-progress");
+    expect(progress).not.toBeNull();
+    expect(document.querySelectorAll(".collab-launch-progress__segment")).toHaveLength(5);
+    // 五段可点，所以不在舞台的 aria-hidden 里；画面本身仍然不报给辅助技术。
+    expect(progress?.closest("[aria-hidden='true']")).toBeNull();
+    expect(progress?.querySelectorAll("button")).toHaveLength(5);
   });
 
   it("says which language the card is written in, for the browser's own text layout", async () => {
@@ -196,16 +185,15 @@ describe("collab launch prompt", () => {
     await renderHost(<CollabLaunchPromptHost />, "en-US");
 
     expect(title()).toBe("Shared projects");
-    expect(subtitle()).toBe("Put the team's work in one project");
     expect(primary()?.textContent?.trim()).toBe("New project");
-    expect(document.querySelector(".collab-launch-visual__caption")?.textContent?.trim())
-      .toBe("What the team has done, your agent already knows");
+    expect(caption()).toBe("A person and their own agents make a super individual");
+    expect(captionSub())
+      .toBe("The full trail of thought and execution stays in each person's own sessions");
   });
 
-  it("only offers the project when no client is available, and opens the new-project dialog with sharing on", async () => {
+  it("opens the new-project dialog with sharing on, and authorizes nothing on the way", async () => {
     await renderHost();
 
-    // No providers in this environment: the card cannot authorize, so it goes straight to the project.
     expect(primary()?.textContent?.trim()).toBe("新建项目");
 
     await click(primary());
@@ -312,7 +300,6 @@ describe("collab launch card", () => {
   beforeEach(() => {
     close.mockClear();
     createProject.mockClear();
-    resetLaunchAuthorizationRuntime();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -320,14 +307,13 @@ describe("collab launch card", () => {
 
   afterEach(() => {
     act(() => root.unmount());
-    resetLaunchAuthorizationRuntime();
     document.body.replaceChildren();
   });
 
-  const render = async (collab: CollabClient | null, language = "zh-CN") => act(async () => {
+  const render = async (language = "zh-CN") => act(async () => {
     root.render(
       <I18nProvider language={language}>
-        <CollabLaunchDialog collab={collab} onClose={close} onCreateProject={createProject} />
+        <CollabLaunchDialog onClose={close} onCreateProject={createProject} />
       </I18nProvider>
     );
   });
@@ -339,9 +325,9 @@ describe("collab launch card", () => {
   };
 
   const dialog = () => document.querySelector<HTMLElement>(".collab-launch-dialog");
+  const caption = () => document.querySelector(".collab-launch-caption__main")?.textContent?.trim();
+  const captionSub = () => document.querySelector(".collab-launch-caption__sub")?.textContent?.trim();
   const primary = () => document.querySelector<HTMLButtonElement>(".collab-launch-primary");
-  const help = () => document.querySelector<HTMLButtonElement>(".collab-launch-help");
-  const popover = () => document.querySelector<HTMLElement>(".collab-launch-popover");
   const click = async (element: Element | null) => {
     await act(async () => {
       (element as HTMLElement).click();
@@ -355,147 +341,82 @@ describe("collab launch card", () => {
   };
 
   it("marks the card with the language it is written in, so Chinese can justify and English can break words", async () => {
-    await render(fakeCollab(), "en-US");
+    await render("en-US");
     await flush();
     expect(dialog()?.getAttribute("lang")).toBe("en");
 
     await act(async () => root.unmount());
     root = createRoot(container);
-    await render(fakeCollab());
+    await render();
     await flush();
     expect(dialog()?.getAttribute("lang")).toBe("zh-CN");
   });
 
-  it("offers one button and a question mark on a computer that has not authorized yet", async () => {
-    await render(fakeCollab());
+  it("offers a single button and nothing that authorizes", async () => {
+    await render();
     await flush();
 
+    // 授权只在引导的「关联会话」那一站发生：大卡上不再有问号，也没有任何后台授权。
     expect(primary()?.textContent?.trim()).toBe("新建项目");
-    expect(help()).not.toBeNull();
-    expect(help()?.getAttribute("aria-label")).toBe("授权说明");
-    expect(help()?.getAttribute("aria-expanded")).toBe("false");
-    expect(popover()).toBeNull();
+    expect(document.querySelector(".collab-launch-help")).toBeNull();
+    expect(document.querySelector(".collab-launch-popover")).toBeNull();
+
+    await click(primary());
+    expect(createProject).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the question mark while the authorization cannot be read", async () => {
-    await render(fakeCollab({ access: () => Promise.reject(new Error("offline")) }));
+  it("plays one act again from its progress piece, without closing the card", async () => {
+    await render();
     await flush();
 
-    expect(help()).not.toBeNull();
-  });
+    // 卡面上不再有「重播」按钮，重看靠左下角的五段进度。
+    expect(document.querySelector(".collab-launch-replay")).toBeNull();
+    const pieces = Array.from(document.querySelectorAll<HTMLButtonElement>(".collab-launch-progress__segment"));
+    expect(pieces).toHaveLength(5);
+    expect(pieces[0]?.getAttribute("aria-label")).toBe("从第 1 段重新播放：人与各自的 Agent，组成独当一面的超级个体");
+    expect(pieces[4]?.getAttribute("aria-label")).toBe("从第 5 段重新播放：Agent 时代超级个体的协作方式");
 
-  it("explains the authorization in a popover that one Escape closes before the card", async () => {
-    await render(fakeCollab());
-    await flush();
+    // 第四段是成员协助。
+    await click(pieces[3] ?? null);
 
-    await click(help());
-
-    expect(popover()).not.toBeNull();
-    expect(help()?.getAttribute("aria-expanded")).toBe("true");
-    expect(popover()?.textContent).toContain("点「新建项目」即授权 Memmy：");
-    expect(popover()?.textContent).toContain("读取本机 Agent 的任务记录");
-    expect(popover()?.textContent).toContain("在这些 Agent 中安装协作组件");
-    expect(popover()?.textContent).toContain("只有加入项目的任务会共享给成员，可在设置中撤销。");
-
-    await escape();
-    expect(popover()).toBeNull();
-    expect(help()?.getAttribute("aria-expanded")).toBe("false");
-    // 浮层先关，大卡还在。
+    // 跳到第四幕的第一帧，字幕跟着换。
+    expect(caption()).toBe("需要跨端配合时，直接请成员的 Agent 协助执行");
+    expect(captionSub()).toBe("本人只需确认授权，任务即可在对方本机完成并传回结果");
     expect(dialog()).not.toBeNull();
     expect(close).not.toHaveBeenCalled();
-
-    await escape();
-    expect(close).toHaveBeenCalledTimes(1);
+    expect(createProject).not.toHaveBeenCalled();
   });
 
-  it("toggles the popover from the question mark and keeps it open while it is used", async () => {
-    await render(fakeCollab());
-    await flush();
+  it("drops the second line on the scene that has no subcaption", async () => {
+    // 第三段只有主句。
+    expect(COLLAB_LAUNCH_CAPTIONS[2]).toEqual({ main: "collabLaunch.scene3Main", sub: null });
 
-    await click(help());
-    expect(popover()).not.toBeNull();
+    const frames: FrameRequestCallback[] = [];
+    const requestFrame = vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const cancelFrame = vi.spyOn(globalThis, "cancelAnimationFrame").mockImplementation(() => undefined);
+    try {
+      await render();
+      await flush();
+      expect(caption()).toBe("人与各自的 Agent，组成独当一面的超级个体");
 
-    await click(popover());
-    expect(popover()).not.toBeNull();
+      // 每帧最多推进 0.1 秒，走一百帧落在第三段。
+      const start = performance.now();
+      for (let index = 0; index < 100; index += 1) {
+        const callback = frames.shift();
+        await act(async () => {
+          callback?.(start + index * 1000);
+        });
+      }
 
-    await click(help());
-    expect(popover()).toBeNull();
-  });
-
-  it("closes the popover on a click outside it", async () => {
-    await render(fakeCollab());
-    await flush();
-
-    await click(help());
-    expect(popover()).not.toBeNull();
-
-    await click(dialog()?.querySelector("h2") ?? null);
-    expect(popover()).toBeNull();
-    expect(dialog()).not.toBeNull();
-    expect(close).not.toHaveBeenCalled();
-  });
-
-  it("uses the English help copy in English", async () => {
-    await render(fakeCollab(), "en-US");
-    await flush();
-
-    expect(help()?.getAttribute("aria-label")).toBe("About authorization");
-    await click(help());
-    expect(popover()?.textContent).toContain("New project lets Memmy:");
-    expect(popover()?.textContent).toContain("Read tasks from agents on this computer");
-    expect(popover()?.textContent).toContain("Only tasks added to a project are shared. Revoke in Settings.");
-  });
-
-  it("leaves the question mark out once this computer authorized", async () => {
-    await render(fakeCollab({ granted: true }));
-    await flush();
-
-    expect(help()).toBeNull();
-    expect(primary()?.textContent?.trim()).toBe("新建项目");
-  });
-
-  it("opens the new-project dialog and authorizes in the background in one click", async () => {
-    const setAgentAccess = vi.fn(async () => ({
-      view: { granted: true, askedInProject: false, agents: AGENTS },
-      results: installResults()
-    }));
-    await render({ ...fakeCollab(), setAgentAccess } as unknown as CollabClient);
-    await flush();
-
-    await click(primary());
-
-    expect(createProject).toHaveBeenCalledTimes(1);
-    expect(setAgentAccess).toHaveBeenCalledTimes(1);
-    expect(setAgentAccess).toHaveBeenCalledWith(true);
-    // 大卡关掉之后这次授权还在继续，结果交给看板。
-    expect(getLaunchAuthorizationState()).toEqual({ inFlight: false, granted: true, failure: null });
-  });
-
-  it("does not authorize again on a computer that already did, nor without a client", async () => {
-    const setAgentAccess = vi.fn();
-    await render({ ...fakeCollab({ granted: true }), setAgentAccess } as unknown as CollabClient);
-    await flush();
-
-    await click(primary());
-    expect(createProject).toHaveBeenCalledTimes(1);
-    expect(setAgentAccess).not.toHaveBeenCalled();
-
-    await act(async () => root.unmount());
-    root = createRoot(container);
-    createProject.mockClear();
-    await render(null);
-    await click(primary());
-    expect(createProject).toHaveBeenCalledTimes(1);
-  });
-
-  it("closes without authorizing on Escape, the backdrop and the close button", async () => {
-    const setAgentAccess = vi.fn();
-    const collab = { ...fakeCollab(), setAgentAccess } as unknown as CollabClient;
-
-    await render(collab);
-    await escape();
-    expect(close).toHaveBeenCalledTimes(1);
-    expect(setAgentAccess).not.toHaveBeenCalled();
-    expect(getLaunchAuthorizationState().inFlight).toBe(false);
+      expect(caption()).toBe("即使换用公共 Agent，前序过程仍要靠人手动搬运");
+      expect(captionSub()).toBeUndefined();
+      expect(document.querySelector(".collab-launch-caption__sub")).toBeNull();
+    } finally {
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+    }
   });
 });

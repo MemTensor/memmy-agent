@@ -2,7 +2,7 @@
 
 /**
  * The board's row menu. A row opens the session reader when clicked, and the menu lives inside that row, so
- * every menu click has to stay inside the menu: copying a link shows only the toast, never the reader.
+ * every menu click has to stay inside the menu and never opens the reader behind it.
  */
 import { act } from "react";
 import type { ReactNode } from "react";
@@ -147,20 +147,14 @@ describe("collab session row menu", () => {
       .find((entry) => entry.textContent?.trim() === label);
   }
 
-  it("copies the link and only shows the toast", async () => {
+  it("offers continue and delete, without copying a link", async () => {
     await openMenu();
-    const copy = menuItem("复制链接");
-    expect(copy, "菜单应提供「复制链接」").toBeTruthy();
-
-    await act(async () => copy!.click());
-    await flush();
-
-    expect(mocks.writeText).toHaveBeenCalledWith(session.shareText);
-    expect(document.body.textContent).toContain("链接已复制");
+    expect(menuItem("继续任务"), "菜单应提供「继续任务」").toBeTruthy();
+    expect(menuItem("删除"), "菜单应提供「删除」").toBeTruthy();
+    // 链接只在 Agent 里被当成任务引用使用，看板不再提供复制入口（2026-11-16 用户要求）。
+    expect(menuItem("复制链接"), "菜单不应再提供「复制链接」").toBeUndefined();
+    expect(mocks.writeText).not.toHaveBeenCalled();
     expect(mocks.readSessionDetail).not.toHaveBeenCalled();
-    // 复制不该把读取面板一起打开：面板是浮在看板上的那块，而不是弹窗。
-    expect(document.querySelector("[data-collab-reader]")).toBeNull();
-    expect(menuItem("复制链接")).toBeUndefined();
   });
 
   it("opens the reader when the row itself is clicked", async () => {
@@ -276,7 +270,7 @@ describe("collab session row menu", () => {
     await act(async () => backdrop!.click());
     await flush();
 
-    expect(menuItem("复制链接")).toBeUndefined();
+    expect(menuItem("继续任务")).toBeUndefined();
     expect(mocks.readSessionDetail).not.toHaveBeenCalled();
   });
 });

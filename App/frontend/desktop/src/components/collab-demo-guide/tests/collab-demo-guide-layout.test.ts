@@ -2,6 +2,7 @@
  * 引导蒙版的几何：遮罩的四块、亮区里除控件外要挡住的部分、说明卡贴哪一边，以及窄窗口下不溢出。
  */
 import { describe, expect, it } from "vitest";
+import type { DemoGuidePhase } from "../../../app/collab-demo-guide-store.js";
 import {
   blockerRects,
   cardPlacement,
@@ -11,6 +12,7 @@ import {
   padRect,
   rectVisible,
   rectsIntersect,
+  type DemoGuideTarget,
   type Rect
 } from "../collab-demo-guide-layout.js";
 
@@ -122,13 +124,68 @@ describe("demo guide layout", () => {
   });
 
   it("names the anchor and the control for each phase", () => {
-    // 建项目之前：新建弹窗里的「创建项目」是唯一亮起、也唯一可点的地方。
-    expect(demoGuideTarget("create-project")).toEqual({ region: "create-project-submit", stroke: "create-project-submit", blockRest: false });
+    // 建项目之前：只有最后一屏的「创建项目」可点，前面几屏只介绍。
+    expect(demoGuideTarget("create-project")).toMatchObject({ region: "create-project-submit", stroke: "create-project-submit", blockRest: false });
     expect(demoGuideTarget("task-row")).toEqual({ region: "board-task-row", stroke: "board-task-row", blockRest: false });
     expect(demoGuideTarget("reader").stroke).toBe("reader-continue");
     expect(demoGuideTarget("compose").stroke).toBe("composer-send");
     expect(demoGuideTarget("help-dialog").stroke).toBe("assist-allow");
     expect(demoGuideTarget("settings-assist").stroke).toBe("settings-assist-switch");
+  });
+
+  it("does not let the settings intro screens be clicked", () => {
+    // 建项目之前的介绍屏只讲不看：整块亮区都不接点击，连描边那个控件自己也不行。
+    const hole = { left: 100, top: 100, width: 300, height: 200 };
+    const stroke = { left: 130, top: 110, width: 80, height: 30 };
+    for (const phase of ["intro", "name", "folder", "collab", "join-entry"] as const) {
+      const target = demoGuideTarget(phase);
+      expect(target.blockRest, phase).toBe(true);
+      // 描边传空：亮区整块挡上，开关、输入框、按钮都点不到（`intro` 本来就没描边）。
+      const clickable = target.blockStroke || target.stroke === null ? null : stroke;
+      expect(blockerRects(hole, clickable, target.blockRest), phase).toEqual([hole]);
+    }
+    // 有描边的那几屏还要额外说清：描边自己也不接点击。
+    for (const phase of ["name", "folder", "collab", "join-entry"] as const) {
+      expect(demoGuideTarget(phase).blockStroke, phase).toBe(true);
+    }
+    // 「创建项目」那一屏反过来：要人点真的按钮，不能挡。
+    const submit = demoGuideTarget("create-project");
+    expect(blockerRects(hole, submit.blockStroke || submit.stroke === null ? null : stroke, submit.blockRest)).toEqual([]);
+  });
+
+  it("gives each phase the radius, padding and card side the spec asks for", () => {
+    // 第六版第四节那张表，逐行照拄：锚点、圆角、内边距、说明卡优先贴哪边。
+    const table: Array<[DemoGuidePhase, { region: string; stroke: string | null; blockRest: boolean; blockStroke?: boolean; radius: number; padding: number; prefer?: DemoGuideTarget["prefer"]; clean?: boolean }]> = [
+      ["intro", { region: "create-dialog", stroke: null, blockRest: true, radius: 18, padding: 8, prefer: "right", clean: true }],
+      ["name", { region: "create-name", stroke: "create-name", blockRest: true, blockStroke: true, radius: 13, padding: 6, prefer: "bottom" }],
+      ["folder", { region: "create-folder", stroke: "create-folder", blockRest: true, blockStroke: true, radius: 14, padding: 6, prefer: "bottom" }],
+      ["collab", { region: "create-collab", stroke: "create-collab", blockRest: true, blockStroke: true, radius: 13, padding: 6, prefer: "top" }],
+      ["join-entry", { region: "create-join", stroke: "create-join", blockRest: true, blockStroke: true, radius: 10, padding: 6, prefer: "top" }],
+      ["create-project", { region: "create-project-submit", stroke: "create-project-submit", blockRest: false, radius: 10, padding: 7, prefer: "right" }],
+      ["joined", { region: "board-members", stroke: null, blockRest: false, radius: 10, padding: 7, prefer: "right" }],
+      ["tour-board", { region: "board-list", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" }],
+      ["tour-tabs", { region: "board-tabs", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" }],
+      ["tour-associate", { region: "board-associate", stroke: null, blockRest: true, radius: 10, padding: 6, prefer: "bottom" }],
+      ["tour-associate-pick", { region: "associate-pick", stroke: null, blockRest: true, radius: 16, padding: 6, prefer: "left" }],
+      ["tour-new-task", { region: "sidebar-new-task", stroke: null, blockRest: true, radius: 9, padding: 5, prefer: "bottom" }]
+    ];
+    for (const [phase, expected] of table) {
+      expect(demoGuideTarget(phase), phase).toEqual(expected);
+    }
+    // 体验三步与改造前一样：不写圆角与内边距，走默认的 12 / 6，也不指定卡片贴哪边。
+    for (const phase of ["task-row", "reader", "compose", "reply-done", "ask-compose", "settings-open", "help-dialog", "complete"] as const) {
+      const target = demoGuideTarget(phase);
+      expect(target.radius).toBeUndefined();
+      expect(target.padding).toBeUndefined();
+      expect(target.prefer).toBeUndefined();
+      expect(target.clean).toBeUndefined();
+    }
+  });
+
+  it("does not blow up on a phase nobody registered", () => {
+    // 只保证不抛错：界面在阶段表有缺口时也只是不画蒙版。
+    expect(() => demoGuideTarget("not-a-phase" as DemoGuidePhase)).not.toThrow();
+    expect(demoGuideTarget("not-a-phase" as DemoGuidePhase)).toBeUndefined();
   });
 
   it("pads the hole without running past the window edge", () => {

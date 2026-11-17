@@ -14,14 +14,23 @@ import board from "../../collab-page.module.css";
 /**
  * 预览里的步骤：卡片上的名字与 {@link DemoGuidePhase} 一一对应。
  *
- * 前两个是建项目之前的弹窗与加入提示窗，`t-*` 是四步看板导览（纯介绍），`1-*`「2-*」`3-*` 是体验段三步。
+ * `0-*` 是建项目之前的那一段（新建弹窗上的六屏，加上加入项目之后看板上的成员亮区），`t-*` 是五步看板导览
+ * （纯介绍），`1-*`「2-*」`3-*` 是体验段三步。
  */
 export const DEMO_GUIDE_PREVIEW_STEPS = {
+  "0-intro": "intro",
+  "0-name": "name",
+  "0-folder": "folder",
+  "0-collab": "collab",
+  "0-join-entry": "join-entry",
   "0-create-project": "create-project",
   "0-joined": "joined",
   "t-board": "tour-board",
   "t-tabs": "tour-tabs",
   "t-associate": "tour-associate",
+  "t-associate-pick": "tour-associate-pick",
+  // 同一站、还没授权：弹窗是授权说明，「下一步」换成「授权并查看」。
+  "t-associate-lock": "tour-associate-pick",
   "t-new-task": "tour-new-task",
   "1-task-row": "task-row",
   "1-reader": "reader",
@@ -44,12 +53,24 @@ export type DemoGuidePreviewStep = keyof typeof DEMO_GUIDE_PREVIEW_STEPS | "comp
 
 const MEMBER = "小饭团";
 
+/**
+ * 建项目之前的那些阶段：还没有云端项目，也还不知道演示成员是谁，卡片这时用中性叫法。
+ * 前五个在新建弹窗上，`create-project` 停在弹窗的「创建项目」按钮上。
+ */
+const PRE_PROJECT_PHASES: readonly DemoGuidePhase[] = [
+  "intro",
+  "name",
+  "folder",
+  "collab",
+  "join-entry",
+  "create-project"
+];
+
 function stateFor(step: DemoGuidePreviewStep): DemoGuideState {
   const phase = step === "complete" || step === "error"
     ? (step === "complete" ? "complete" : "reply-waiting")
     : DEMO_GUIDE_PREVIEW_STEPS[step];
-  // 建项目之前还没有云端项目，也还不知道演示成员是谁：卡片这时用中性叫法。
-  const beforeProject = phase === "create-project";
+  const beforeProject = PRE_PROJECT_PHASES.includes(phase);
   // 第三步的这几个阶段意味着前两步都走过了：完成弹窗与卡片都按它列条目。
   const lateStep = step === "3-gear" || step === "3-settings" || step === "3-waiting" || step === "3-dialog" || step === "3-running" || step === "3-done";
   return {
@@ -66,8 +87,13 @@ function stateFor(step: DemoGuidePreviewStep): DemoGuideState {
       help: step === "complete" || step === "3-done"
     },
     skipped: { task: false, ask: false, help: false },
+    askSeen: false,
     askDelivered: step === "2-done",
     askTurnEnded: false,
+    // 「关联会话」那一屏：预览里直接摆扫完的样子（列表 + 计数），主按钮可用；`t-associate-lock` 摆未授权的样子。
+    scan: phase === "tour-associate-pick"
+      ? (step === "t-associate-lock" ? { status: "locked", count: 0 } : { status: "done", count: 12 })
+      : { status: "idle", count: 0 },
     prefill: null,
     endReason: step === "complete" ? "finished" : null,
     cloudEnded: false
@@ -120,7 +146,7 @@ function PreviewSidebar() {
 }
 
 /** 看板的一列：标题、任务行、右侧项目配置，与真实看板同一套类名与外观。 */
-function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; withSidebar?: boolean }) {
+function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; withSidebar?: boolean; withMembersAnchor?: boolean }) {
   return (
     <div
       className={board.page}
@@ -136,7 +162,7 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; wi
           <header className={board.boardHeader}>
             <span className={board.boardIcon} aria-hidden="true">☁</span>
             <h1 className={board.boardName}>项目协作体验</h1>
-            <span className={board.boardScope}>2 位成员</span>
+            <span className={board.boardScope} {...(props.withMembersAnchor ? { "data-demo-guide": "board-members" } : {})}>2 位成员</span>
             <span className={board.grow} />
             <button type="button" className="button button-ghost button-sm">
               <UserPlus size={15} aria-hidden="true" />邀请
@@ -208,6 +234,9 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; wi
 /**
  * 新建项目弹窗：体验入口的样子——名称已填好、协作开关已打开，底部「创建项目」是蒙版唯一亮起的控件。
  * 弹窗交出自己的暗底（见 DEMO_GUIDE_YIELD_BACKDROP），否则蒙版下面会叠两层灰。
+ *
+ * 建项目之前的六个阶段都摆这个弹窗：`intro` 框整个弹窗，其余四个框到名称、文件夹、协作开关与左下角的
+ * 「加入项目」，`create-project` 框底部按钮。锚点与真实弹窗的 `data-demo-guide` 一一对应。
  */
 function CreateProjectSurface() {
   const field: CSSProperties = {
@@ -226,26 +255,37 @@ function CreateProjectSurface() {
       data-demo-guide-yield-backdrop=""
       style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}
     >
-      <div className={board.simpleCreateModal} style={{ width: 520, background: "#fff", borderRadius: 16, padding: "20px 22px 16px" }}>
+      <div
+        className={board.simpleCreateModal}
+        data-demo-guide="create-dialog"
+        style={{ width: 520, background: "#fff", borderRadius: 16, padding: "20px 22px 16px" }}
+      >
         <b style={{ fontSize: 15 }}>新建项目</b>
-        <div style={{ marginTop: 16, ...field }}>
+        <div data-demo-guide="create-name" style={{ marginTop: 16, ...field }}>
           <span style={{ color: "rgba(16,26,25,.4)" }} aria-hidden="true">▣</span>
           <span style={{ flex: 1 }}>项目协作体验</span>
         </div>
         <div className={board.simpleSectionLabel}>文件夹</div>
-        <div className={board.simpleFolderBox}>
+        <div className={board.simpleFolderBox} data-demo-guide="create-folder">
           <div className={board.simpleFolderEmpty}>
             <span>还没有选文件夹，创建时会为你新建一个</span>
           </div>
         </div>
-        <div style={{ ...field, marginTop: 12, background: "color-mix(in srgb, #5cbfae 7%, #fff)", borderColor: "color-mix(in srgb, #5cbfae 55%, rgba(16,26,25,.14))" }}>
+        <div
+          data-demo-guide="create-collab"
+          style={{ ...field, marginTop: 12, background: "color-mix(in srgb, #5cbfae 7%, #fff)", borderColor: "color-mix(in srgb, #5cbfae 55%, rgba(16,26,25,.14))" }}
+        >
           <span style={{ color: "#2f8f7f" }} aria-hidden="true">◉</span>
-          <span style={{ flex: 1 }}>与成员共享</span>
-          <button type="button" role="switch" aria-checked="true" aria-label="与成员共享" className={board.settingsSwitchOn} />
+          <span style={{ flex: 1 }}>开启项目协作</span>
+          <button type="button" role="switch" aria-checked="true" aria-label="开启项目协作" className={board.settingsSwitchOn} />
         </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
-          <button type="button" className="button button-ghost">取消</button>
-          <button type="button" className="button button-primary" data-demo-guide="create-project-submit">创建项目</button>
+        {/* 左下是「加入项目」，右下是取消与创建：与真实弹窗的页脚一致。 */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 20 }}>
+          <button type="button" className="button button-secondary button-sm" data-demo-guide="create-join">加入项目</button>
+          <span style={{ display: "flex", gap: 8 }}>
+            <button type="button" className="button button-ghost">取消</button>
+            <button type="button" className="button button-primary" data-demo-guide="create-project-submit">创建项目</button>
+          </span>
         </div>
       </div>
     </div>
@@ -367,9 +407,80 @@ function SettingsSurface() {
   );
 }
 
-/** 协助授权弹窗：谁请求、做什么、由谁执行与允许方式。 */
-function AssistDialogSurface() {
+/**
+ * 关联会话弹窗：标题、Agent 列与扫出来的会话列表，底部一行写明只做展示。
+ *
+ * 真实组件还连本机接口真扫；预览只摆布局与亮区锚点，名字与真实弹窗的 `data-demo-guide` 一致。
+ */
+function AssociatePickSurface({ locked = false }: { locked?: boolean }) {
+  const rows = [
+    { title: "把分享会的议程拆成待办", meta: "10:24" },
+    { title: "核对上次分享会的签到表", meta: "昨天" },
+    { title: "给看板加上成员筛选", meta: "周一" }
+  ];
   return (
+    <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <section
+        data-demo-guide="associate-pick"
+        style={{ width: 560, background: "#fff", borderRadius: 16, boxShadow: "0 18px 44px rgba(16,26,25,.18)", overflow: "hidden" }}
+      >
+        <header style={{ padding: "16px 18px 10px" }}>
+          <h2 style={{ margin: 0, fontSize: 15 }}>管理其他 Agent 的任务</h2>
+          <p style={{ margin: "4px 0 0", fontSize: 12, lineHeight: 1.6, color: "rgba(16,26,25,.55)" }}>
+            所选任务将同步至「项目协作体验」，对项目成员可见；取消关联不会删除本地任务。
+          </p>
+        </header>
+        {locked ? (
+          <div style={{ padding: "18px 18px 22px", textAlign: "center" }}>
+            <p style={{ margin: 0, fontSize: 13.5, fontWeight: 600 }}>允许 Memmy 读取本机 Agent 的任务？</p>
+            <p style={{ margin: "6px 0 0", fontSize: 12.5, lineHeight: 1.7, color: "rgba(16,26,25,.55)" }}>
+              读取这台电脑上 Claude Code、Cursor 等 Agent 的任务，供你关联到项目；只共享你选中的任务。
+            </p>
+          </div>
+        ) : (
+        <div style={{ display: "flex", gap: 12, padding: "4px 18px 12px" }}>
+          <nav style={{ width: 148, display: "flex", flexDirection: "column", gap: 2 }} aria-label="Agent">
+            {["Claude Code", "Cursor"].map((agent, index) => (
+              <div
+                key={agent}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  padding: "7px 8px",
+                  borderRadius: 8,
+                  fontSize: 12.5,
+                  background: index === 0 ? "rgba(92,191,174,.12)" : "transparent"
+                }}
+              >
+                {agent}
+              </div>
+            ))}
+          </nav>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ height: 32, borderRadius: 8, border: "1px solid rgba(16,26,25,.1)", display: "flex", alignItems: "center", padding: "0 10px", fontSize: 12, color: "rgba(16,26,25,.45)", marginBottom: 8 }}>
+              搜索 Claude Code 的会话
+            </div>
+            {rows.map((row) => (
+              <div key={row.title} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0", fontSize: 12.5 }}>
+                <span style={{ width: 14, height: 14, borderRadius: 4, border: "1px solid rgba(16,26,25,.22)" }} aria-hidden="true" />
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.title}</span>
+                <span style={{ fontSize: 11.5, color: "rgba(16,26,25,.45)" }}>{row.meta}</span>
+              </div>
+            ))}
+            <p style={{ margin: "8px 0 0", fontSize: 11.5, color: "rgba(16,26,25,.45)" }}>{`共 ${rows.length} 个会话`}</p>
+          </div>
+        </div>
+        )}
+        <footer style={{ padding: "10px 18px 14px", fontSize: 11.5, color: "rgba(16,26,25,.45)", borderTop: "1px solid rgba(16,26,25,.06)" }}>
+          {locked ? "授权后才能读取这台电脑上的会话。" : "这里只做展示，不会改动任何任务。"}
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+/** 协助授权弹窗：谁请求、做什么、由谁执行与允许方式。 */
+function AssistDialogSurface() {  return (
     <div style={{ position: "absolute", inset: 0, background: "rgba(16,26,25,.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div
         data-demo-guide="assist-dialog"
@@ -496,16 +607,20 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
 
   const phase = state.phase;
   const chat = phase === "compose" || phase === "reply-waiting" || phase === "reply-done" || phase === "ask-compose" || phase === "ask-waiting" || phase === "ask-done";
-  // 看板导览的四步：只摆看板（最后一步多一条侧栏，那个「＋」才是亮区），不换页。
+  // 看板导览的五步：只摆看板（「关联会话」多一张弹窗，最后一步多一条侧栏），不换页。
   const tour = demoGuideIsTourPhase(phase);
   let surface: ReactNode;
-  if (phase === "create-project") surface = <CreateProjectSurface />;
+  // 建项目之前的六个阶段全在新建弹窗上，只换亮区。
+  if (PRE_PROJECT_PHASES.includes(phase)) surface = <CreateProjectSurface />;
+  // 加入之后人已经在看板上：亮区只套住头部的成员徽章，没有独立的提示窗。
+  else if (phase === "joined") surface = <BoardSurface withSettings withAssistRow={false} withMembersAnchor />;
   else if (chat) surface = <ChatSurface phase={phase} />;
   else if (tour) {
     surface = (
       <>
         <BoardSurface withSettings withAssistRow={false} withSidebar={phase === "tour-new-task"} />
         {phase === "tour-new-task" ? <PreviewSidebar /> : null}
+        {phase === "tour-associate-pick" ? <AssociatePickSurface locked={props.step === "t-associate-lock"} /> : null}
       </>
     );
   }
@@ -524,13 +639,14 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
         {surface}
         <CollabDemoGuideOverlay
           state={state}
-          onJoined={() => undefined}
           onNext={() => undefined}
           onSkip={() => undefined}
           onExit={() => undefined}
           onRetry={() => undefined}
           onCloseComplete={() => undefined}
           onInvite={() => undefined}
+          // 「加入项目」不在弹窗里时，界面自己报一下，状态机跳过那一屏。
+          onSkipJoinEntry={() => undefined}
         />
       </div>
     </I18nProvider>

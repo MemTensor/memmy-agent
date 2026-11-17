@@ -36,6 +36,7 @@ import {
   requestCreateProject,
   selectCollabProject,
   sharedProjectFor,
+  shouldDemoOnNewProject,
   showCollabNotice,
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
@@ -44,6 +45,8 @@ import {
   demoGuideBoundLocalProject,
   dismissDemoGuideBeforeProject,
   getDemoGuideState,
+  isDemoGuideActive,
+  readDemoGuideDone,
   startDemoGuide,
   startDemoGuideBeforeProject,
   subscribeDemoGuide
@@ -576,6 +579,12 @@ export function AppFrame(props: AppFrameProps) {
     if (collabSnapshot.createDemo) startDemoGuideBeforeProject();
     consumeCreateProjectRequest();
   }, [createPending, collabSnapshot.createShareDefault, collabSnapshot.createDemo]);
+  // 引导在新建弹窗上被退出（本机从此不再自动演示）：弹窗回到普通新建，
+  // 免得同一次弹窗里再点「创建项目」时还带着 `demo`，让云端又重新开一场演示。
+  useEffect(() => {
+    if (demoGuideActive || !readDemoGuideDone()) return;
+    setCreateProjectDemo(false);
+  }, [demoGuideActive]);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [taskContextMenu, setTaskContextMenu] = useState<TaskContextMenuState | null>(null);
@@ -1059,9 +1068,17 @@ export function AppFrame(props: AppFrameProps) {
   /**
    * Opens the new-project dialog over the current page. Creating must not first switch the window to a board:
    * the background the person sees would change before they have decided anything.
+   *
+   * 侧栏第一次新建也走新手引导：四条规则都在 store 里判（协作可用、名下没有在线项目、云端给出
+   * `demoEligible`、没有别的演示在进行）。这是演示时才默认开共享，普通新建仍然默认关。
    */
   function newProject() {
     handleFirstSidebarInteraction();
+    // 第一次新建就走引导时，弹窗要默认开共享（与路径 A 一致）；普通新建仍然默认关。
+    if (shouldDemoOnNewProject({ collabEnabled, demoGuideActive: isDemoGuideActive() })) {
+      requestCreateProject({ share: true, demo: true });
+      return;
+    }
     requestCreateProject();
   }
 
@@ -2170,7 +2187,9 @@ export function AppFrame(props: AppFrameProps) {
               projectId: project.id,
               localProjectId: null,
               memberUserId: project.demo.memberUserId,
-              memberName: project.demo.memberName
+              memberName: project.demo.memberName,
+              // 剧本内容随项目的 demo 字段下来：界面上的话跟着云端剧本走，不在这边另写一份。
+              copy: project.demo.copy
             });
           } else {
             // 云端说这次不演示（开关关了、名单外、已经体验过）：静默收起，不报错也不提示。
