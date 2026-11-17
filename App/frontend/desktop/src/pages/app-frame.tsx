@@ -77,7 +77,6 @@ import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { CollabCreateProjectDialog } from "./collab-create-project-dialog.js";
 import { CollabJoinProjectDialog } from "./collab-join-project-dialog.js";
-import { CollabAssistHost } from "./collab-assist-host.js";
 import { CollabJoinRequestHost } from "./collab-join-request-host.js";
 import { CollabDemoGuideHost } from "../components/collab-demo-guide/collab-demo-guide-host.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
@@ -2140,17 +2139,6 @@ export function AppFrame(props: AppFrameProps) {
         confirmVariant="danger"
         onCancel={() => setDeleteConfirmTask(null)}
         onConfirm={() => void confirmDeleteArchivedTask()}
-      />
-      {/* 成员协助：轮询收件箱、发通知、弹出授权；只在账号模式下工作。由 Memmy 执行的协助是项目里的一条任务，直接打开它；其余在项目看板上展开。 */}
-      <CollabAssistHost
-        collab={collabClient}
-        enabled={collabEnabled && Boolean(state.account.userId)}
-        // 正开着看板时，那个项目的待处理请求已经显示在看板上，不再计入右下角角标。
-        boardProjectId={boardProjectId}
-        onOpenTask={(conversationId) => {
-          void openAgentTaskInChat({ memmyAgent: clients?.memmyAgent, dispatch, task: { sessionKey: `websocket:${conversationId}` } });
-        }}
-        onOpenBoard={openProjectBoard}
       />
       {/* 有人申请加入我的项目：邀请方这边直接弹窗，不必等在项目成员里看到。 */}
       <CollabJoinRequestHost

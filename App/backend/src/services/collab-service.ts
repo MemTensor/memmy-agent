@@ -192,13 +192,6 @@ export interface CollabProject {
   localProjectId: string | null;
   /** 项目指令全文；成员只读。未设定时为空串。 */
   instructions: string;
-  /** 本人在这个项目里是否接收协助请求；旧云端不返回时为 false。 */
-  acceptAssist: boolean;
-  /**
-   * 开启了接收协助请求的成员（含本人）。只有项目列表带这一项，单个项目的接口不带，此时为空数组。
-   * 发起方的 Agent 据此知道在哪个项目里请谁。
-   */
-  assistReceivers: Array<{ userId: string; name: string; mine: boolean }>;
   /**
    * 新手引导的演示：只有演示进行中的项目带它。云端给 null / 不返回时按普通项目处理，
    * 桌面端不自己判断「是不是演示项目」，也不认任何写死的账号或昵称。
@@ -353,8 +346,6 @@ export interface CollabMember {
   /** The signed-in person, labelled「（你）」. */
   mine: boolean;
   joinedAt: string | null;
-  /** 这位成员是否在这个项目里接收协助请求；旧云端不返回时为 false。 */
-  acceptAssist: boolean;
   /** 演示成员那一行为 true：成员列表据此显示「官方」标记，不认 userId 或昵称。 */
   demo: boolean;
 }
@@ -2821,17 +2812,6 @@ interface MemmySessionRecords {
 }
 
 /**
- * 成员协助的结果送回发起方任务时是一条以 {@code <memmy_assist_result} 开头的消息，内容来自执行方的电脑，
- * 只有协助双方看得到。发起方把这条任务共享到项目时，这一轮的提问只留下面这句说明，不把结果带给全体成员；
- * 发起方 Agent 收到后的分析是发起方自己的内容，照常共享。
- */
-export const ASSIST_RESULT_PLACEHOLDER = "（这里是一次成员协助的结果，只有协助双方看得到）";
-
-export function isAssistResult(content: string): boolean {
-  return /^\s*<memmy_assist_result\b/u.test(content);
-}
-
-/**
  * 一个 Memmy 任务文件的会话 id：`key` 里带着时用它，否则按文件名推（`websocket_xxx.jsonl` → `xxx`）。
  * 取末段必须用 `basename`：Windows 上这个路径是全反斜杠的，按 `/` 切分会把整串路径当成文件名。
  * `platform` 只为让测试能在 macOS 上验证 Windows 的取法，实际调用都用本机平台。
@@ -2886,9 +2866,8 @@ async function readSessionRecords(path: string): Promise<MemmySessionRecords | n
     const role = text(raw.role);
     if (role === "user") {
       if (current) turns.push(current);
-      // 协助结果送回发起方任务的那条消息：内容来自执行方的电脑，只有协助双方看得到。这条任务共享到项目时只留一句说明。
-      const question = isAssistResult(text(raw.content)) ? ASSIST_RESULT_PLACEHOLDER : text(raw.content);
-      if (!isAssistResult(text(raw.content))) lastQuestion = question;
+      const question = text(raw.content);
+      lastQuestion = question;
       current = { question, reply: "", steps: [], startedAt: timestamp };
       continue;
     }
@@ -3048,12 +3027,7 @@ function toProject(raw: unknown): CollabProject {
     localProjectId: null,
     // A cloud from before instructions existed omits the field; the board then shows the empty state.
     instructions: text(project.instructions).trim(),
-    acceptAssist: project.acceptAssist === true,
-    demo: toDemo(project.demo),
-    assistReceivers: list(project.assistReceivers).map((raw) => {
-      const member = record(raw);
-      return { userId: text(member.userId), name: text(member.name), mine: member.mine === true };
-    }).filter((member) => member.userId)
+    demo: toDemo(project.demo)
   };
 }
 
@@ -3093,7 +3067,6 @@ function toMember(raw: unknown): CollabMember {
     role: toRole(member.role),
     mine: member.mine === true,
     joinedAt: nullableText(member.joinedAt),
-    acceptAssist: member.acceptAssist === true,
     demo: member.demo === true
   };
 }
@@ -3198,11 +3171,6 @@ function summarizeSteps(steps: readonly string[]): string {
 const LOCAL_CODE_BY_CLOUD_CODE: Readonly<Record<number, ApiErrorCode>> = Object.freeze({
   /** 云端 ErrorCode.COLLAB_QUOTA：每人可创建的在线项目数量达到上限。 */
   41004: "collab_quota_exceeded",
-  /**
-   * 云端 ErrorCode.COLLAB_ASSIST_NOT_RECEIVING：对方没有在这个项目里开启接收协助请求。
-   * 消息原样保留（「李四还没有在「某项目」中开启接收协助请求」），命令行与界面直接给人看。
-   */
-  41005: "collab_assist_not_receiving"
 });
 
 function errorCode(status: number): ApiErrorCode {

@@ -82,16 +82,14 @@ describe("the demo guide preview", () => {
 
   it("covers the tour steps on the board, ending on the sidebar new-task button", async () => {
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-board"]).toBe("tour-board");
-    expect(DEMO_GUIDE_PREVIEW_STEPS["t-tabs"]).toBe("tour-tabs");
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-associate"]).toBe("tour-associate");
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-associate-pick"]).toBe("tour-associate-pick");
     expect(DEMO_GUIDE_PREVIEW_STEPS["t-new-task"]).toBe("tour-new-task");
 
-    // 每一步的锚点都在预览页上：任务列表那一片、tab 那一行、工具条右侧的关联任务、关联会话弹窗、侧栏的「＋」。
+    // 每一步的锚点都在预览页上：任务列表那一片、工具条右侧的关联任务、关联会话弹窗、侧栏的「＋」。
     // 「项目名与成员」那一步已经删掉，也没有 board-header 这个锚点。
     for (const [step, anchor] of [
       ["t-board", "board-list"],
-      ["t-tabs", "board-tabs"],
       ["t-associate", "board-associate"],
       ["t-associate-pick", "associate-pick"],
       ["t-new-task", "sidebar-new-task"]
@@ -101,8 +99,8 @@ describe("the demo guide preview", () => {
       // 导览段不描边：没有任何「这里可以点」的控件。
       expect(document.querySelector("[data-demo-stroke]")).toBeNull();
     }
-    // 五站；「关联会话」那一站另有一张未授权的样子，是同一站的第二个预览。
-    expect(new Set(Object.values(DEMO_GUIDE_PREVIEW_STEPS).filter((phase) => phase.startsWith("tour-")))).toHaveLength(5);
+    // 四站；「关联会话」那一站另有一张未授权的样子，是同一站的两个预览。
+    expect(new Set(Object.values(DEMO_GUIDE_PREVIEW_STEPS).filter((phase) => phase.startsWith("tour-")))).toHaveLength(4);
     // 「关联会话」真的摆出了扫到的会话与计数（卡片上的计数在真实客户端里渲染，预览只验弹窗本身）。
     await render("t-associate-pick");
     expect(document.body.textContent).toContain("共 3 个会话");
@@ -116,23 +114,22 @@ describe("the demo guide preview", () => {
     expect(document.querySelector("[data-demo-guide='board-header']")).toBeNull();
   });
 
-  it("shows the task page itself once the assist is allowed", async () => {
-    expect(DEMO_GUIDE_PREVIEW_STEPS["3-running"]).toBe("help-running");
-    expect(DEMO_GUIDE_PREVIEW_STEPS["3-done"]).toBe("help-done");
-    await render("3-running");
-    // 站在那条任务里：协助 chip 写明是谁的请求、仅这一次、执行中。
-    expect(document.querySelector("[data-collab-assist-chip]")?.textContent).toBe("小饭团的 Memmy 请求");
-    expect(document.querySelector("[data-collab-assist-chip]")?.getAttribute("data-state")).toBe("running");
-    expect(document.body.textContent).toContain("执行中");
-    // 亮区锚点在这个任务页上（看板的「协助」行不是目标）。
-    expect(document.querySelector("[data-demo-guide='assist-task']")).toBeTruthy();
-    expect(document.querySelector("[data-demo-guide='assist-row']")).toBeNull();
+  it("shows the task page for the one hands-on step", async () => {
+    expect(DEMO_GUIDE_PREVIEW_STEPS["1-compose"]).toBe("compose");
+    expect(DEMO_GUIDE_PREVIEW_STEPS["1-done"]).toBe("reply-done");
+    await render("1-compose");
+    // 站在那条任务里：输入框与其发送按钮都在，亮区锚点是输入框，输入框里已经写好了那句话。
+    expect(document.querySelector("[data-demo-guide='composer']")).toBeTruthy();
+    expect(document.querySelector("[data-demo-guide='composer-send']")).toBeTruthy();
+    expect(document.querySelector("[data-demo-guide='composer']")?.textContent).toContain("写一段分享会的通知");
 
-    await render("3-done");
-    // 跑完之后：协助 chip 到已完成，底部一行写明结果发给了谁，卡片给出「完成」。
-    expect(document.querySelector("[data-collab-assist-chip]")?.getAttribute("data-state")).toBe("stopped");
-    expect(document.querySelector("[data-collab-assist-dock]")?.textContent).toContain("结果已发给小饭团");
-    expect(document.body.textContent).toContain("完成");
+    await render("1-waiting");
+    // 等回复那一屏：同一页，对话区写着还在读成员的任务。
+    expect(document.querySelector("[data-demo-guide='conversation']")?.textContent).toContain("正在读取小饭团的任务");
+
+    await render("1-done");
+    // 结果写回之后仍是这一页：对话区摆着写好的通知（卡片上的「完成」由蒙版量出位置后才画，预览里不量位置）。
+    expect(document.querySelector("[data-demo-guide='conversation']")?.textContent).toContain("分享会通知已写好");
   });
 
   it("still draws every other step", async () => {

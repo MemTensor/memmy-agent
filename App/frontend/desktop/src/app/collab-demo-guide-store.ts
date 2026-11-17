@@ -11,15 +11,15 @@ import type { CollabClient } from "../api/collab-client.js";
 /** 引导的每个子状态。
  *
  * 分三段：先是「建项目之前」的新建弹窗六屏，再是「看板导览」（`tour-*`，纯介绍，不让人操作），
- * 最后是「动手体验」（三步，各自有若干子状态）。
- * 体验段的「1 / 3」由 {@link demoGuideStepNumberOf} 给出，另外两段没有进度可讲。
+ * 最后是「动手体验」（一步，接续成员的任务）。
+ * 体验段的「1 / 1」由 {@link demoGuideStepNumberOf} 给出，另外两段没有进度可讲。
  */
 export type DemoGuidePhase =
   // 建项目之前的那一段：新建弹窗刚打开，一路在弹窗上走完六屏，还没有云端项目。
   | DemoGuideBeforeProjectPhase
   // 演示刚开始：看板蒙版套住成员徽章，点「继续」才进看板导览。
   | "joined"
-  // 看板导览的五步：任务列表、协助这一个 tab、工具条上的关联任务、关联会话窗口、侧栏新建任务。
+  // 看板导览的四步：任务列表、工具条上的关联任务、关联会话窗口、侧栏新建任务。
   // 全程停在同一个看板上，只亮给人看，不点任何东西，只留「下一步」与「跳过引导」。
   | DemoGuideTourPhase
   | "task-row"
@@ -27,16 +27,6 @@ export type DemoGuidePhase =
   | "compose"
   | "reply-waiting"
   | "reply-done"
-  | "ask-compose"
-  | "ask-waiting"
-  | "ask-done"
-  | "settings-open"
-  | "settings-assist"
-  | "help-waiting"
-  | "help-dialog"
-  | "help-running"
-  | "help-done"
-  | "help-rejected"
   | "complete";
 
 /**
@@ -83,8 +73,6 @@ export function demoGuideNextBeforeProjectPhase(phase: DemoGuideBeforeProjectPha
 export const DEMO_GUIDE_TOUR_PHASES = [
   /** 任务列表：你和成员的任务都在这里。 */
   "tour-board",
-  /** 「协助」这一个 tab：记录你和成员互相请对方做的事。 */
-  "tour-tabs",
   /** 工具条右侧的「关联任务」：把别的 Agent 里做过的工作带进来。 */
   "tour-associate",
   /**
@@ -124,12 +112,10 @@ export function demoGuideNextTourPhase(phase: DemoGuidePhase): DemoGuidePhase | 
 /**
  * 每一屏的「上一步」退到哪一屏。
  *
- * 回退按屏走，不按步走：卡片上的「上一步」与「下一步」一一对应，退回去的就是刚才那一屏，
- * 不会一下从「等小饭团回结果」跳回「第一步已完成」。
+ * 回退按屏走，不按步走：卡片上的「上一步」与「下一步」一一对应，退回去的就是刚才那一屏。
  *
  * 不在这张表里的屏没有上一步：第一屏（`intro`）、项目已经建好的提示窗（`joined`）、
- * 导览的第一屏（`tour-board`），以及所有「事情已经办成」的屏——第一步拿到回复、第二步拿到结果、
- * 第三步已经在本机跑起来或已经跑完。这些位置能做的只有等待或跳过，
+ * 导览的第一屏（`tour-board`），以及「事情已经办成」的屏——拿到回复之后只能往下走或跳过，
  * 给一个返回按钮会让人以为能撤回已经发生的事。
  */
 const DEMO_GUIDE_BACK_TARGET: Partial<Record<DemoGuidePhase, DemoGuidePhase>> = {
@@ -138,54 +124,35 @@ const DEMO_GUIDE_BACK_TARGET: Partial<Record<DemoGuidePhase, DemoGuidePhase>> = 
   collab: "folder",
   "join-entry": "collab",
   "create-project": "join-entry",
-  "tour-tabs": "tour-board",
-  "tour-associate": "tour-tabs",
+  "tour-associate": "tour-board",
   "tour-associate-pick": "tour-associate",
   "tour-new-task": "tour-associate-pick",
   "task-row": "tour-new-task",
   reader: "task-row",
   compose: "reader",
-  "reply-waiting": "compose",
-  "ask-compose": "reply-done",
-  "ask-waiting": "ask-compose",
-  "settings-open": "ask-done",
-  "settings-assist": "settings-open",
-  // 第三步退回去一律落在 `settings-open`（「去项目设置」那一屏），不落在 `settings-assist`：
-  // 退回 `settings-assist` 意味着设置弹窗得重新打开、开关保持原样，一个刚退回来的人看到弹窗还开着会更迷。
-  // 退到 `settings-open` 时弹窗关掉、开关关回去，他重点一下齿轮就是干净地重来一遍。
-  "help-waiting": "settings-open",
-  "help-dialog": "settings-open"
+  "reply-waiting": "compose"
 };
 
 /**
  * 这一屏点「上一步」退到哪一屏；没有上一步时返回 null（卡片上不出现那个按钮）。
  *
- * 前一屏如果标着「这一步已经做完」，而实际是跳过的，就继续往前退到这一步真正的入口：
- * 跳过第二步的人停在 `settings-open`，退回去该看见「请小饭团协助」的输入框，而不是一张
- * 「第二步已完成」的卡片——他根本没做过。
+ * 跳过过某一步的人退回去时不该看见「这一步已经做完」的卡片——他根本没做过，所以跳过第一步时
+ * 直接收场（见 `skip`），不会停在任何「已完成」的屏上。
  */
-export function demoGuideBackTarget(state: Pick<DemoGuideState, "phase" | "skipped">): DemoGuidePhase | null {
-  if (state.phase === "settings-open" && state.skipped.ask) return "ask-compose";
-  if (state.phase === "ask-compose" && state.skipped.task) return "task-row";
+export function demoGuideBackTarget(state: Pick<DemoGuideState, "phase">): DemoGuidePhase | null {
   return DEMO_GUIDE_BACK_TARGET[state.phase] ?? null;
 }
 
 /**
  * 哪些屏是在那条任务里（对话页）走的；其余的都在项目看板上。
  *
- * 第一、二步的输入与结果都在任务里：从看板过来时要先把对话页拉回来，
+ * 体验第一步的输入与结果都在任务里：从看板过来时要先把对话页拉回来，
  * 退回去时也一样——停在看板上而亮区锚点（输入框、对话）根本不在页面上，蒙版就什么也亮不出来。
  */
 const DEMO_GUIDE_TASK_PAGE_PHASES: DemoGuidePhase[] = [
   "compose",
   "reply-waiting",
-  "reply-done",
-  "ask-compose",
-  "ask-waiting",
-  "ask-done",
-  // 第三步的执行过程与结果都在那条 Memmy 任务里；人若是留在看板上，亮区会退回协助条（布局里的 fallback）。
-  "help-running",
-  "help-done"
+  "reply-done"
 ];
 
 /** 这一屏是在那条任务里，还是在项目看板上。 */
@@ -208,16 +175,6 @@ const DEMO_GUIDE_PHASE_ORDER: DemoGuidePhase[] = [
   "compose",
   "reply-waiting",
   "reply-done",
-  "ask-compose",
-  "ask-waiting",
-  "ask-done",
-  "settings-open",
-  "settings-assist",
-  "help-waiting",
-  "help-dialog",
-  "help-running",
-  "help-done",
-  "help-rejected",
   "complete"
 ];
 
@@ -242,10 +199,7 @@ export function demoGuideWentBack(previous: DemoGuidePhase, next: DemoGuidePhase
  * 被撤回的请求回的）不能落在新的一屏上，否则人刚退回来就看到一句「这一步没有完成」。
  */
 export function demoGuideAcceptsFailure(phase: DemoGuidePhase): boolean {
-  return phase === "reply-waiting"
-    || phase === "ask-waiting"
-    || phase === "help-waiting"
-    || phase === "help-running";
+  return phase === "reply-waiting";
 }
 
 /** 引导的对外状态：进行中、完成弹窗、已结束。 */
@@ -286,23 +240,9 @@ export interface DemoGuideState {
   /** 某一步出错时的原因（已本地化），卡片据此显示「这一步没有完成」。 */
   error: string | null;
   /** 用户实际走过的步骤：完成弹窗只列这些。 */
-  done: { task: boolean; ask: boolean; help: boolean };
-  /** 三步里跳过过哪几步，用来判断「都跳过」。 */
-  skipped: { task: boolean; ask: boolean; help: boolean };
-  /**
-   * 第二步那条协助请求是否已经在云端出现了。
-   *
-   * 发送之后不代表请求就建出来了：Agent 要先调接口。请求出现之前不能说「已发出」，
-   * 否则人会觉得对方正在执行，其实连请求都还没建。
-   */
-  askSeen: boolean;
-  /** 第二步的请求是否已经有结果回到了对话。 */
-  askDelivered: boolean;
-  /**
-   * 第二步这一轮 Agent 已经结束。没有结果回来时，只有它说明「这句话已经执行完了」，
-   * 才允许判「协助请求没有发出去」：Agent 还在跑就不判失败。
-   */
-  askTurnEnded: boolean;
+  done: { task: boolean };
+  /** 这一步有没有被跳过，用来判断整轮是不是都没做。 */
+  skipped: { task: boolean };
   /** 「关联会话」这一步的扫描进度：没扫出结果之前不给「下一步」。 */
   scan: DemoGuideScan;
   /** 输入框要预填的那句话；`nonce` 变一次填一次，填过的再读不会重复填。 */
@@ -318,7 +258,7 @@ export type DemoGuideEndReason = "finished" | "exited" | "skipped" | "left";
 /**
  * 剧本里会出现在界面上的几句，由云端随 `demo` 一并下发。
  *
- * 三步实际做什么只有云端知道；从前客户端各写一份，云端改剧本时这边不知道，同一屏里就会同时出现
+ * 剧本里实际做什么只有云端知道；从前客户端各写一份，云端改剧本时这边不知道，同一屏里就会同时出现
  * 「项目协作上手清单」和「分享会通知」两套内容。
  */
 export interface DemoGuideCopy {
@@ -326,10 +266,12 @@ export interface DemoGuideCopy {
   taskTitle: string;
   /** 第一步要接着做的那件事。 */
   taskNext: string;
-  /** 第二步请演示成员做的事，接在「请某某」后面。 */
+  /**
+   * 剧本里「请演示成员做什么」那一句。
+   *
+   * 请成员协助的那一步已从引导里移除，这个字段只为与云端下发的剧本保持一致而保留，界面上不再用到。
+   */
   askSentence: string;
-  /** 第三步演示成员请你电脑上的 Agent 做的事，接在「他请你电脑上的 Agent」后面。 */
-  helpSentence: string;
 }
 
 /**
@@ -340,8 +282,7 @@ export interface DemoGuideCopy {
 export const DEMO_GUIDE_COPY_FALLBACK: DemoGuideCopy = {
   taskTitle: "下周五的团队分享会",
   taskNext: "写一段分享会的通知",
-  askSentence: "查一下上次分享会一共来了多少人",
-  helpSentence: "确认这台电脑的系统版本"
+  askSentence: "查一下上次分享会一共来了多少人"
 };
 
 export interface DemoGuideStart {
@@ -366,18 +307,15 @@ export type DemoGuideEvent =
   | { type: "task-continued"; prefill?: string }
   | { type: "composer-sent" }
   | { type: "agent-settled" }
-  | { type: "assist-delivered" }
-  /** 第二步那条请求出现了（可能晚于「没有发出去」那句）：把错误收起来。 */
-  | { type: "assist-seen" }
-  | { type: "next"; prefill?: string }
+  | { type: "next" }
   /**
    * 退回上一屏。
    *
    * 与 `next` 对称，退的是「刚才那一屏」，不是「上一步」。退回去要重新发的那句话由界面传进来
-   * （第一步、第二步各自的预填），其余屏不带。
+   * （第一步的预填），其余屏不带。
    */
   | { type: "back"; prefill?: string }
-  | { type: "skip"; prefill?: string }
+  | { type: "skip" }
   /** 关联会话窗口扫完了：`count` 是可以关联的会话数。 */
   | { type: "scan-settled"; count: number }
   /** 这一步还没授权：弹窗退回授权说明，「下一步」换成「授权并查看」。 */
@@ -395,11 +333,6 @@ export type DemoGuideEvent =
    * 授权装不上时人要能只放过这一站、继续往下看，所以单给一条只走一格的事件。
    */
   | { type: "pass" }
-  | { type: "settings-opened" }
-  | { type: "receiving-on" }
-  | { type: "help-request-seen" }
-  | { type: "help-decided"; allow: boolean }
-  | { type: "help-finished" }
   | { type: "fail"; reason: string }
   | { type: "retry" }
   | { type: "cloud-ended" }
@@ -415,11 +348,8 @@ const IDLE: DemoGuideState = {
   memberName: "",
   copy: DEMO_GUIDE_COPY_FALLBACK,
   error: null,
-  done: { task: false, ask: false, help: false },
-  skipped: { task: false, ask: false, help: false },
-  askSeen: false,
-  askDelivered: false,
-  askTurnEnded: false,
+  done: { task: false },
+  skipped: { task: false },
   scan: { status: "idle", count: 0 },
   prefill: null,
   endReason: null,
@@ -427,11 +357,11 @@ const IDLE: DemoGuideState = {
 };
 
 /**
- * 一个子状态属于体验段的第几步：卡片上的「1 / 3」按它算。
+ * 一个子状态属于体验段的第几步：卡片上的「1 / 1」按它算。
  *
  * 建项目之前、加入提示窗与看板导览都还没有进度可讲，返回 null：卡片上不出现进度条，改用一个「介绍」标签。
  */
-export function demoGuideStepNumberOf(phase: DemoGuidePhase): 1 | 2 | 3 | null {
+export function demoGuideStepNumberOf(phase: DemoGuidePhase): 1 | null {
   // 建项目之前的六屏都还没有进度可讲。
   if (demoGuideIsBeforeProjectPhase(phase)) return null;
   // 加入那一屏与看板导览都还不是一步：前者讲完就得进导览，后者讲完才进第一步。
@@ -439,32 +369,13 @@ export function demoGuideStepNumberOf(phase: DemoGuidePhase): 1 | 2 | 3 | null {
   if (phase === "task-row" || phase === "reader" || phase === "compose" || phase === "reply-waiting" || phase === "reply-done") {
     return 1;
   }
-  if (phase === "ask-compose" || phase === "ask-waiting" || phase === "ask-done") return 2;
-  return 3;
+  return null;
 }
 
-/** 心跳上报的步骤：云端只接受 `1`、`2`、`3` 与 `finish`，与体验段的三步一一对应。 */
-export function demoGuideHeartbeatStep(phase: DemoGuidePhase): "1" | "2" | "3" | "finish" {
+/** 心跳上报的步骤：引导只有一个体验步骤，始终报 `1`，完成时报 `finish`。 */
+export function demoGuideHeartbeatStep(phase: DemoGuidePhase): "1" | "finish" {
   if (phase === "complete") return "finish";
-  const step = demoGuideStepNumberOf(phase);
-  // 还没有进入体验段（建项目之前、加入提示窗、看板导览）：都算在第一步之前。
-  if (step === null) return "1";
-  return String(step) as "1" | "2" | "3";
-}
-
-/**
- * 第二步发送时要不要把执行提示一起交给 Agent：只有引导正等这一步的发送、并且输入框里还是引导写好的那句话
- * （用户没改过）时才算。改过就不追加，用户自己说的话原样发出去。
- */
-export function demoGuideSendsAssistHint(input: {
-  status: DemoGuideStatus;
-  phase: DemoGuidePhase;
-  typed: string;
-  sentence: string;
-}): boolean {
-  if (input.status !== "active" || input.phase !== "ask-compose") return false;
-  const sentence = input.sentence.trim();
-  return sentence.length > 0 && input.typed.trim() === sentence;
+  return "1";
 }
 
 /** 引导的纯状态机：所有推进条件都在这里，界面只负责发事件与画卡片。 */
@@ -508,26 +419,10 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
     case "composer-sent":
       if (state.status !== "active") return state;
       if (state.phase === "compose") return { ...state, phase: "reply-waiting" };
-      if (state.phase === "ask-compose") {
-        return { ...state, phase: "ask-waiting", askSeen: false, askDelivered: false, askTurnEnded: false };
-      }
       return state;
-    case "assist-delivered":
-      // 结果回来了就是这一步成了：之前那句「没有完成」随之收起。
-      return state.status === "active" && state.phase === "ask-waiting"
-        ? { ...state, askDelivered: true, error: null }
-        : state;
-    case "assist-seen":
-      // 请求出现了（先一步出现、或 CLI 慢一步晚到）：记下它已经在云端，卡片才能说「已发出」；
-      // 之前若报过「没有发出去」，那句也一并收起，人不用卡在失败卡片上。
-      // 轮询每拍都会读到同一条请求：已经记过又没有错误时不换状态对象，订阅方不必跟着重画。
-      if (state.status !== "active" || state.phase !== "ask-waiting") return state;
-      if (state.askSeen && state.error === null) return state;
-      return { ...state, askSeen: true, error: null };
     case "agent-settled":
       if (state.status !== "active") return state;
-      // 第二步的结果回来之后 Agent 还要再回一句：那时才给「下一步」。
-      // 走过一次就抹掉「这一步是跳过的」：跳过之后又从上一屏退回来重做的，完成弹窗该算他做过。
+      // 走完就抹掉「这一步是跳过的」：跳过之后又从上一屏退回来重做的，完成弹窗该算他做过。
       if (state.phase === "reply-waiting") {
         return {
           ...state,
@@ -535,20 +430,6 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
           done: { ...state.done, task: true },
           skipped: { ...state.skipped, task: false }
         };
-      }
-      if (state.phase === "ask-waiting" && state.askDelivered) {
-        // 这一步完成就把那句话从状态里拿掉：之后即使任务页重新挂载，也不会再把旧的那句填回输入框。
-        return {
-          ...state,
-          phase: "ask-done",
-          done: { ...state.done, ask: true },
-          skipped: { ...state.skipped, ask: false },
-          prefill: null
-        };
-      }
-      // 结果还没回来但这一轮已经跑完：从这一刻起才有资格判「没发出去」。
-      if (state.phase === "ask-waiting" && !state.askTurnEnded) {
-        return { ...state, askTurnEnded: true };
       }
       return state;
     case "next":
@@ -574,14 +455,8 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
             : state.scan
         };
       }
-      // 第一步做完直接请成员协助：那句话跟着填上；换一句时 nonce 要接着往上走，输入框才知道该重新填一次。
-      if (state.phase === "reply-done") {
-        return { ...state, phase: "ask-compose", prefill: nextPrefill(state, event.prefill), error: null };
-      }
-      if (state.phase === "ask-done") return { ...state, phase: "settings-open", error: null };
-      if (state.phase === "help-done" || state.phase === "help-rejected") {
-        return finishOrSkip(state, { help: state.phase === "help-done" });
-      }
+      // 体验第一步做完就是引导的最后一屏：拿到回复之后点「完成」就收场。
+      if (state.phase === "reply-done") return finishOrSkip(state, {});
       return state;
     case "back": {
       if (state.status !== "active") return state;
@@ -590,7 +465,7 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       if (!target) return state;
       // 退回去的那一屏要人再发一次那句话的，把预填带上（nonce 接着往上走，输入框才会重新填）；
       // 其余屏不带，退回去就只展示。
-      const refill = target === "compose" || target === "ask-compose" ? event.prefill : undefined;
+      const refill = target === "compose" ? event.prefill : undefined;
       return {
         ...state,
         phase: target,
@@ -610,30 +485,9 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       // 建项目之前没有可跳过的步骤：不建项目就没有后面的演示；加入那一屏也不是一步。
       if (demoGuideIsBeforeProjectPhase(state.phase) || state.phase === "joined") return state;
       // 看板导览是纯介绍，没有「跳过这一步」：点跳过引导就是整轮不看，直接收场（小饭团随之离开）。
-      if (demoGuideIsTourPhase(state.phase)) return finishOrSkip(state, { help: false, allSkipped: true });
-      const step = demoGuideStepNumberOf(state.phase);
-      if (step === 1) {
-        return {
-          ...state,
-          phase: "ask-compose",
-          prefill: nextPrefill(state, event.prefill),
-          error: null,
-          done: { ...state.done, task: false },
-          skipped: { ...state.skipped, task: true }
-        };
-      }
-      if (step === 2) {
-        return {
-          ...state,
-          phase: "settings-open",
-          prefill: null,
-          error: null,
-          done: { ...state.done, ask: false },
-          skipped: { ...state.skipped, ask: true }
-        };
-      }
-      // 第三步跳过：授权弹窗那一步跳过等同于拒绝，其余直接收场。
-      return finishOrSkip(state, { help: false });
+      if (demoGuideIsTourPhase(state.phase)) return finishOrSkip(state, { allSkipped: true });
+      // 跳过唯一的体验步骤：整轮都没做，直接收场，不再摆一张完成弹窗。
+      return finishOrSkip({ ...state, skipped: { ...state.skipped, task: true } }, {});
     }
     case "scan-settled":
       // 扫完了：卡片把计数换成结果，「下一步」也就可用了。失败时界面按 0 报，说明这里没有可关联的会话。
@@ -666,29 +520,6 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
       const next = demoGuideNextTourPhase(state.phase);
       return next ? { ...state, phase: next, scan: { status: "idle", count: 0 }, error: null } : state;
     }
-    case "settings-opened":
-      return state.status === "active" && state.phase === "settings-open" ? { ...state, phase: "settings-assist" } : state;
-    case "receiving-on":
-      return state.status === "active" && (state.phase === "settings-assist" || state.phase === "settings-open")
-        ? { ...state, phase: "help-waiting", error: null }
-        : state;
-    case "help-request-seen":
-      return state.status === "active" && state.phase === "help-waiting" ? { ...state, phase: "help-dialog" } : state;
-    case "help-decided":
-      if (state.status !== "active" || state.phase !== "help-dialog") return state;
-      return event.allow
-        ? { ...state, phase: "help-running", error: null }
-        : { ...state, phase: "help-rejected", error: null };
-    case "help-finished":
-      return state.status === "active" && state.phase === "help-running"
-        ? {
-          ...state,
-          phase: "help-done",
-          error: null,
-          done: { ...state.done, help: true },
-          skipped: { ...state.skipped, help: false }
-        }
-        : state;
     case "fail":
       // 同一个原因已经说过就不再重复：轮询每拍都会读到同一个失败结果。
       // 不在等结果的屏（刚退回上一屏）一律不接：那时报错的是已经作废的那一轮。
@@ -708,19 +539,13 @@ export function demoGuideReducer(state: DemoGuideState, event: DemoGuideEvent): 
 }
 
 /**
- * 第三步之后：有点〔完成〕的就是收尾弹窗；三步全都跳过时直接结束，不出现完成弹窗。
+ * 体验段结束：点了〔完成〕的就是收尾弹窗；这一步是跳过的就直接结束，不出现完成弹窗。
  * `allSkipped` 用在导览段点「跳过引导」：整轮都没看，直接收场。
  */
-function finishOrSkip(state: DemoGuideState, done: { help: boolean; allSkipped?: boolean }): DemoGuideState {
-  const next: DemoGuideState = {
-    ...state,
-    done: { ...state.done, help: done.help && state.done.help ? true : done.help },
-    skipped: { ...state.skipped, help: state.skipped.help || !done.help }
-  };
-  const allSkipped = done.allSkipped
-    || (next.skipped.task && next.skipped.ask && next.skipped.help);
-  if (allSkipped) return { ...next, status: "ended", phase: "complete", endReason: "skipped", prefill: null };
-  return { ...next, status: "complete", phase: "complete", endReason: "finished", prefill: null, error: null };
+function finishOrSkip(state: DemoGuideState, done: { allSkipped?: boolean }): DemoGuideState {
+  const allSkipped = done.allSkipped || state.skipped.task;
+  if (allSkipped) return { ...state, status: "ended", phase: "complete", endReason: "skipped", prefill: null };
+  return { ...state, status: "complete", phase: "complete", endReason: "finished", prefill: null, error: null };
 }
 
 /**
@@ -865,7 +690,6 @@ export function dispatchDemoGuide(event: DemoGuideEvent): void {
   if (next !== before && next.status === "active" && next.phase !== before.phase) {
     // 步骤一变立即补一次心跳，并把「云端说已结束」这条兜底接上。
     void sendHeartbeat();
-    if (next.phase === "settings-open" || next.phase === "help-waiting" || next.phase === "help-dialog") startHeartbeat();
     if (next.status === "active" && next.phase === "complete") stopHeartbeat();
   }
   // 完成弹窗一出现就叫云端结束演示，不等用户点按钮。

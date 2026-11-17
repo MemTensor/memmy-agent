@@ -11,10 +11,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
-import { CollabAssistTaskChip, CollabAssistTaskDock, useAssistTask } from "./collab-assist-task.js";
 import { collabEnabledFor } from "../app/collab-mode.js";
 import {
-  demoGuideSendsAssistHint,
   demoGuideWentBack,
   dispatchDemoGuide,
   getDemoGuideState,
@@ -749,28 +747,6 @@ export function thinkingPayloadForSend(
   return { thinkingEnabled, thinkingLevel };
 }
 
-/**
- * 新手引导第二步的发送内容：输入框里还是引导写好的那句话时，把执行提示追加到发给 Agent 的内容里，
- * 同时交出气泡该显示的那一句。用户改过句子就不追加，原样发出去。
- */
-export function composeDemoGuideAssistSend(input: {
-  status: DemoGuideStatus;
-  phase: DemoGuidePhase;
-  typed: string;
-  sentence: string;
-  hint: string;
-  content: string;
-}): { content: string; displayContent: string | null } {
-  const append = demoGuideSendsAssistHint({
-    status: input.status,
-    phase: input.phase,
-    typed: input.typed,
-    sentence: input.sentence
-  }) && input.hint.trim().length > 0;
-  if (!append) return { content: input.content, displayContent: null };
-  return { content: `${input.content}\n\n${input.hint}`, displayContent: input.typed.trim() };
-}
-
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
   const text = input.content.trim();
   const trimmedDisplayContent = input.displayContent?.trim();
@@ -1127,15 +1103,6 @@ export function HomePage() {
   const [mentionDismissed, setMentionDismissed] = useState(false);
   const collabClient = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
   const collabProjects = useSyncExternalStore(subscribeCollabProjects, getCollabProjectsSnapshot, getCollabProjectsSnapshot);
-  /**
-   * 成员协助：这条任务是执行方的一次协助（输入框上方的协助 chip、底部确认卡片与「已发给谁」），或者在它里面请成员协助过
-   * （底部请求卡片）。只在账号模式读；普通任务拿到空视图，页面上不多出任何东西。
-   */
-  const assistTask = useAssistTask(
-    collabClient,
-    state.agent.currentChatId,
-    collabEnabledFor(state.bootstrap?.app.userMode) && Boolean(state.account.userId)
-  );
   const mentionQuery = useMemo(
     () => (mentionDismissed ? null : mentionQueryFromInput(composerInput, composerCaret)),
     [composerInput, composerCaret, mentionDismissed]
@@ -1475,50 +1442,24 @@ export function HomePage() {
   }, [demoGuide.prefill]);
 
   /**
-   * 演示一结束（完成 / 退出 / 离开 / 心跳超时），第二步预填的那句话不该留在任何草稿里：
+   * 演示一结束（完成 / 退出 / 离开 / 心跳超时），第一步预填的那句话不该留在任何草稿里：
    * 之后的空白会话会把一句没发生过的请求带出来。只清与那句话完全相同的那一版，人自己写的照旧留着。
    */
-  const demoAskSentenceRef = useRef("");
+  const demoTaskSentenceRef = useRef("");
   const demoEndedHandledRef = useRef(false);
   useEffect(() => {
     if (demoGuide.status === "active") {
-      demoAskSentenceRef.current = t("collab.demo.prefill.ask", { name: demoGuide.memberName, ask: demoGuide.copy.askSentence });
+      demoTaskSentenceRef.current = t("collab.demo.prefill.task", { name: demoGuide.memberName, next: demoGuide.copy.taskNext });
       demoEndedHandledRef.current = false;
       return;
     }
     if (demoGuide.status !== "ended" || demoEndedHandledRef.current) return;
     demoEndedHandledRef.current = true;
-    clearDraftIfUntouched(demoAskSentenceRef.current);
+    clearDraftIfUntouched(demoTaskSentenceRef.current);
   }, [demoGuide.status, demoGuide.memberName, dispatch, t]);
 
-  /** 第二步被跳过时要停住的那一轮 Agent：指向下面的 `stopCurrentTurn`，避免 effect 重建时反复变化。 */
+  /** 第一步骤被跳过时要停住的那一轮 Agent：指向下面的 `stopCurrentTurn`，避免 effect 重建时反复变化。 */
   const stopTurnForDemoRef = useRef<(() => void) | null>(null);
-
-  /**
-   * 第二步（请成员协助）一完成就把那句话清掉，不等到整轮结束：下一步是为成员执行任务，
-   * 输入框里不该还留着上一句。用户自己改过的内容不动。
-   */
-  const demoAskClearedRef = useRef(false);
-  useEffect(() => {
-    if (demoGuide.status !== "active" || demoGuide.phase !== "ask-done") {
-      demoAskClearedRef.current = false;
-      return;
-    }
-    if (demoAskClearedRef.current) return;
-    demoAskClearedRef.current = true;
-    clearDraftIfUntouched(t("collab.demo.prefill.ask", { name: demoGuide.memberName, ask: demoGuide.copy.askSentence }));
-  }, [demoGuide.status, demoGuide.phase, demoGuide.memberName, dispatch, t]);
-
-  /**
-   * 第二步那句话与它对应的执行提示：句子进输入框，提示只在发送时追加给 Agent。
-   * 两者都按当前语言现取，句子与预填时是同一句，所以能据此判断用户改没改过。
-   */
-  const demoAssistSentence = demoGuide.status === "active"
-    ? t("collab.demo.prefill.ask", { name: demoGuide.memberName, ask: demoGuide.copy.askSentence })
-    : "";
-  const demoAssistHint = demoGuide.status === "active"
-    ? t("collab.demo.prefill.askHint", { name: demoGuide.memberName, member: demoGuide.memberUserId ?? "" })
-    : "";
 
   /**
    * 一轮回复从「运行中」变回空闲：引导的等待状态据此推进，不靠定时器猜。
@@ -1538,17 +1479,16 @@ export function HomePage() {
     demoWasRunningRef.current = false;
     const freshError = Boolean(notice) && notice!.id !== demoTurnErrorIdRef.current;
     if (freshError && demoGuide.status === "active") {
-      dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.agent") });
+      dispatchDemoGuide({ type: "fail", reason: t("collab.demo.failed.title") });
       return;
     }
     dispatchDemoGuide({ type: "agent-settled" });
   }, [isCurrentAgentRunning, state.agent.operationErrorNotice, demoGuide.status, t]);
 
   /**
-   * 第二步被跳过，或者人点了「上一步」：那一轮 Agent 还在替这句话干活，必须停下。
+   * 人点了「上一步」：那一轮 Agent 还在替这句话干活，必须停下。
    *
-   * 跳过与退回都只把引导挪到另一屏，不会动 Agent：不停的话请求照样会发出去、内容照样会写进对话，
-   * 人会觉得没听他的。
+   * 退回只把引导挪到另一屏，不会动 Agent：不停的话内容照样会写进对话，人会觉得没听他的。
    *
    * 顺序很要紧：先让界面把这一屏换掉（这一步在上一层已经 dispatch 完了），再停那一轮。
    * 反过来就会先收到「这一轮结束」，那时候引导还停在原来那一屏上，会被当成「这一步做完了」或者「这一步失败了」。
@@ -1561,11 +1501,7 @@ export function HomePage() {
     // 退回上一屏：这一屏可能是「等 Agent 写/等 Agent 发」的那两屏，先停住。
     if (demoGuideWentBack(previous, demoGuide.phase)) {
       stopTurnForDemoRef.current?.();
-      return;
     }
-    const askSkipped = (previous === "ask-compose" || previous === "ask-waiting") && demoGuide.phase === "settings-open";
-    if (!askSkipped) return;
-    stopTurnForDemoRef.current?.();
   }, [demoGuide.phase, demoGuide.status]);
 
   useStalledOutputShimmer(
@@ -2343,15 +2279,6 @@ export function HomePage() {
     const contentWithReferences = submittedMentions.length
       ? `${submittedMentions.map((item) => item.reference).join("\n\n")}\n\n${promptedInput}`
       : promptedInput;
-    // 新手引导第二步：那句要求连同执行提示一起交给 Agent，气泡里仍然只有用户看到的那一句。
-    const demoAssistSend = composeDemoGuideAssistSend({
-      status: demoGuide.status,
-      phase: demoGuide.phase,
-      typed: composerInput,
-      sentence: demoAssistSentence,
-      hint: demoAssistHint,
-      content: contentWithReferences
-    });
     messageSendLocksRef.current.add(sendScopeKey);
     dispatch(agentActions.messageSendLockUpdated(sendScopeKey, clientRequestId));
     dispatch(agentActions.modelSelectionRequestStarted(
@@ -2368,10 +2295,10 @@ export function HomePage() {
         clientRequestId,
         connection,
         ensureChatSubscription,
-        content: demoAssistSend.content,
-        // With references, a command, a rewritten prompt or the guide's hint the wire text differs from what was typed;
+        content: contentWithReferences,
+        // With references, a command or a rewritten prompt the wire text differs from what was typed;
         // show the typed part.
-        displayContent: (features.agentPrompt(input) || selectedComposerCommand || (submittedMentions.length && composerInput.trim()) || demoAssistSend.displayContent !== null) ? composerInput : undefined,
+        displayContent: (features.agentPrompt(input) || selectedComposerCommand || (submittedMentions.length && composerInput.trim())) ? composerInput : undefined,
         language,
         pendingAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
@@ -2422,14 +2349,6 @@ export function HomePage() {
               reason: "new-chat",
               state: state.agent
             });
-          }
-          : undefined,
-        // 新手引导第二步：任务标题只用用户看到的那一句话，不从正文（含执行提示）里取。
-        onMessageSent: demoAssistSend.displayContent !== null && clients?.memmyAgent
-          ? (chatId) => {
-            void clients.memmyAgent
-              .renameSession(clients.memmyAgent.chatIdToSessionKey(chatId), demoAssistSend.displayContent!)
-              .catch(() => undefined);
           }
           : undefined
       });
@@ -3913,7 +3832,6 @@ export function HomePage() {
                     {pendingNativeCard ? <AgentQuestionCard key={pendingNativeCard.requestId} card={pendingNativeCard}
                       onSubmit={(response) => answerQuestion(pendingNativeCard, response)} /> : null}
                   </div>
-                  <CollabAssistTaskDock view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
                   {state.agent.currentChatId && currentGoal ? (
                     <AgentGoalBar
                       chatId={state.agent.currentChatId}
@@ -3923,8 +3841,6 @@ export function HomePage() {
                       onControl={(request) => void controlGoal(request)}
                     />
                   ) : null}
-                  {/* 成员协助的 chip 贴着输入框上方：自己的请求跑在哪个任务里，就跟着那条任务走。 */}
-                  <CollabAssistTaskChip view={assistTask.view} collab={collabClient} onChanged={() => void assistTask.refresh()} />
                   <div
                     className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"
                     data-demo-guide="composer"

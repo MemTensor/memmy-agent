@@ -1,5 +1,4 @@
 import { PluginToolActivity, isPluginToolFailure, useHasCompletedPluginInteraction, usePluginCapabilityLabel } from "./plugin-tool-activity.js";
-import { AssistMessageCard, parseAssistEnvelope } from "./collab-assist-message.js";
 import { AgentTaskPlanBar } from "./agent-task-plan-bar.js";
 /**
  * Agent chat message rendering.
@@ -643,15 +642,6 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
 
   if (message.role === "user") {
     if (readAgentQuestionResponse(message.content)) return null;
-    // 成员协助的请求与结果：Memmy 写进任务的消息，显示成卡片而不是一大段原文。
-    const assistEnvelope = parseAssistEnvelope(message.content);
-    if (assistEnvelope) {
-      return (
-        <div className="agent-user-turn flex min-w-0" data-agent-message-id={message.id || undefined}>
-          <AssistMessageCard envelope={assistEnvelope} />
-        </div>
-      );
-    }
     const hasContent = message.content.trim().length > 0;
     // 新手引导第二步发出去的那句话后面跟着一段给 Agent 的执行提示：发送时必须带着，显示时去掉。
     // 去掉之后再判断一次有没有内容：只剩提示的那条消息不画气泡。

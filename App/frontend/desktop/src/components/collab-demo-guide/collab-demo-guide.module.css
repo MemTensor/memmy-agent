@@ -72,11 +72,12 @@
 }
 
 /*
- * 要人点的那一个控件上的「点这里」：一颗绿色实心圆点、中间一个白点，像被按下的一枚键，
- * 加两圈从圆心扩散出去的波纹。整块不接点击（压在控件边上也不能把它挡掉），只负责把人指过去。
+ * 要人点的那一个控件旁边的「点这里」：一枚绿色箭头，箭尖钉在控件边沿中点、整个箭头在控件外面朝里指，
+ * 加两圈从箭尖扩散出去的波纹。整块不接点击（箭头压在控件边沿也不能把它挡掉），只负责把人指过去。
  *
- * 圆心就是外面那个 span 的定位点（见 `clickHintPlacement`）：圆点用负 margin 把自己移到圆心正中，
- * 呼吸缩放的原点也是圆心，所以动画期间它与波纹圆心始终重合——上一版「箭尖与波纹错开」不会再出现。
+ * 箭尖就是外面那个 span 的定位点（见 `clickHintPlacement`）：SVG 的 48×48 里尖画在正中 (24,24)，
+ * 元素用负 margin 把自己移到尖与定位点重合，缩放原点也是尖端。
+ * 所以**呼吸时只有箭身在胀缩，尖一毫米不动**；这与上一版「箭尖、元素偏移、缩放原点各用一套常数」完全不同。
  */
 .clickHint {
   position: fixed;
@@ -84,7 +85,7 @@
   pointer-events: none;
 }
 
-/* 波纹从圆心往外扩：外圈延时半拍，看起来像连点了两下。 */
+/* 波纹从箭尖往外扩：外圈延时半拍，看起来像连点了两下。 */
 .clickRipple {
   position: absolute;
   left: 0;
@@ -110,41 +111,43 @@
   100% { transform: scale(1.55); opacity: 0; }
 }
 
-/* 绿色实心圆：22px，白描边一圈把它从白底与压暗底上分出来，再带一点投影。 */
-.clickDisc {
+/*
+ * 箭头本体：48×48 的盒子，尖画在正中，所以负 margin 把尖对到定位点。
+ * `--hint-turn` 由组件按「箭头在控件哪一侧」写进来（下方 180°、上 0°、右 90°、左 270°），
+ * 尖在旋转中心上，转哪个方向都不会移位。
+ * 顺序很关键：先旋转到朝向、再缩放；两者都以 50% 50%（=尖端）为原点，尖因此始终钉在控件边沿。
+ */
+.clickArrow {
   position: absolute;
   left: 0;
   top: 0;
-  width: 22px;
-  height: 22px;
-  margin: -11px 0 0 -11px;
-  border-radius: 50%;
-  background: var(--color-action-sky);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-background-paper, #fff) 92%, transparent),
-    0 2px 6px rgba(16, 26, 25, 0.28);
+  width: 48px;
+  height: 48px;
+  margin: -24px 0 0 -24px;
+  transform-origin: 50% 50%;
+  transform: rotate(var(--hint-turn, 0deg)) scale(1);
   animation: clickBreathe 1.9s ease-in-out infinite;
+  filter: drop-shadow(0 2px 5px rgba(16, 26, 25, 0.22));
 }
 
-/* 中间那个白点：7px，正压在圆心上，像按下去的那一下。 */
-.clickPip {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 7px;
-  height: 7px;
-  margin: -3.5px 0 0 -3.5px;
-  border-radius: 50%;
-  background: var(--color-background-paper, #fff);
+/* 填主题色、外面描一圈白：白底控件与压暗底上都分得出来；paint-order 让白边压在填色外面。 */
+.clickArrow path {
+  fill: var(--color-action-sky);
+  stroke: var(--color-background-paper, #fff);
+  stroke-width: 2.4;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  paint-order: stroke;
 }
 
-/* 呼吸：圆点自己慢慢放大再收回，比只画一圈静态描边显眼，也不至于晃眼。原点在圆心，位置不动。 */
+/* 呼吸：箭身沿指向胀缩一点点再收回，比只画一圈静态描边显眼，也不至于晃眼。原点在尖端，尖不动。 */
 @keyframes clickBreathe {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.16); }
+  0%, 100% { transform: rotate(var(--hint-turn, 0deg)) scale(1); }
+  50% { transform: rotate(var(--hint-turn, 0deg)) scale(1.1); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .clickDisc { animation: none; }
+  .clickArrow { animation: none; }
   .clickRipple { animation: none; opacity: 0.45; transform: scale(0.8); }
 }
 

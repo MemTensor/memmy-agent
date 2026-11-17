@@ -2,7 +2,7 @@
 
 /**
  * 项目设置弹窗：参照 Codex 的编辑项目，「文件夹」「协作」两个小标题下各一组，组内一行一项，说明收进问号。
- * 已共享的项目在「协作」组里是「共享给成员的任务 / 接收协助请求」，左下角一个浅红的危险按钮；未共享的本机项目是
+ * 已共享的项目在「协作」组里是「共享给成员的任务」，左下角一个浅红的危险按钮；未共享的本机项目是
  * 「开启项目协作」一行；API Key 模式只写需要登录。右下角始终是「完成」。停止共享与退出项目都要先确认，
  * 因为一个会删掉云端项目、一个会离开项目。
  */
@@ -20,10 +20,6 @@ const mocks = vi.hoisted(() => ({
   bindLocalProject: vi.fn(),
   deleteProject: vi.fn(),
   leaveProject: vi.fn(),
-  assistReceiving: vi.fn(),
-  setAssistReceiving: vi.fn(),
-  assistGrants: vi.fn(),
-  assistAgents: vi.fn(),
   /** 退出项目成功后要把本机与云端记录对齐，这里只看它被调用过。 */
   removeProject: vi.fn(),
   reloadProjects: vi.fn()
@@ -69,10 +65,6 @@ function client(overrides: Partial<CollabClient> = {}): CollabClient {
     bindLocalProject: mocks.bindLocalProject,
     deleteProject: mocks.deleteProject,
     leaveProject: mocks.leaveProject,
-    assistReceiving: mocks.assistReceiving,
-    setAssistReceiving: mocks.setAssistReceiving,
-    assistGrants: mocks.assistGrants,
-    assistAgents: mocks.assistAgents,
     ...overrides
   } as unknown as CollabClient;
 }
@@ -114,10 +106,6 @@ describe("项目设置弹窗", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.listProjectTasks.mockResolvedValue([]);
-    mocks.assistReceiving.mockResolvedValue({ projectId: "cloud-1", enabled: false });
-    mocks.setAssistReceiving.mockResolvedValue({ projectId: "cloud-1", enabled: true });
-    mocks.assistGrants.mockResolvedValue({ grants: [], dailyLimit: 20 });
-    mocks.assistAgents.mockResolvedValue({ agents: [], defaultAgent: "memmy" });
     mocks.reloadProjects.mockResolvedValue(undefined);
     container = document.createElement("div");
     document.body.append(container);
@@ -256,7 +244,7 @@ describe("项目设置弹窗", () => {
     expect(handlers.onFailed).toHaveBeenCalledWith("network down");
   });
 
-  it("未共享的本机项目：只有开启项目协作一个开关，没有协助、引导行与右下角危险按钮", async () => {
+  it("未共享的本机项目：只有开启项目协作一个开关，没有引导行与右下角危险按钮", async () => {
     mocks.createProject.mockResolvedValue({ project: SHARED });
     mocks.bindLocalProject.mockResolvedValue(undefined);
     await render({ shared: null });
@@ -267,8 +255,6 @@ describe("项目设置弹窗", () => {
     await act(async () => document.querySelector<HTMLButtonElement>("button[aria-label='协作说明']")!.click());
     expect(document.querySelector("[role='note']")?.textContent).toBe("开启后可把任务共享给成员，本地文件不会上传。");
     expect(mocks.createProject).not.toHaveBeenCalled();
-    expect(document.body.textContent).not.toContain("接收协助请求");
-    expect(document.body.textContent).not.toContain("限时授权");
     expect(document.body.textContent).not.toContain("引导");
     expect(button("停止共享")).toBeUndefined();
     expect(button("退出项目")).toBeUndefined();
@@ -343,53 +329,4 @@ describe("项目设置弹窗", () => {
     expect(button("重新查看")).toBeUndefined();
   });
 
-  it("限时授权：没有授权时不占位置，有授权时在接收协助请求下面列出成员与换用、结束", async () => {
-    await render();
-    expect(document.body.textContent).toContain("接收协助请求");
-    expect(document.body.textContent).not.toContain("限时授权");
-    expect(document.body.textContent).not.toContain("单次最长 15 分钟");
-
-    // 打开开关后读一次授权：空的时候什么都不多写。
-    await act(async () => switchNamed("接收协助请求")!.click());
-    await flush();
-    expect(mocks.setAssistReceiving).toHaveBeenCalledTimes(1);
-    expect(document.querySelector("[aria-label='限时授权']")).toBeNull();
-    expect(button("结束授权")).toBeUndefined();
-
-    mocks.assistReceiving.mockResolvedValue({ projectId: "cloud-1", enabled: true });
-    mocks.assistGrants.mockResolvedValue({
-      grants: [{
-        projectId: "cloud-1",
-        projectName: PROJECT.name,
-        grantee: { userId: "u-2", name: "孙起", mine: false },
-        agent: "claude_code",
-        active: true,
-        minutes: 60,
-        expiresAt: new Date(Date.now() + 42 * 60_000).toISOString(),
-        createdAt: null,
-        revokedAt: null
-      }],
-      dailyLimit: 20
-    });
-    mocks.assistAgents.mockResolvedValue({
-      agents: [{ sourceId: "claude_code", name: "Claude Code", available: true, group: "used", lastActiveAt: null }],
-      defaultAgent: "claude_code"
-    });
-    await act(async () => root.unmount());
-    root = createRoot(container);
-    await render();
-
-    expect(document.querySelector("[aria-label='限时授权']")).toBeTruthy();
-    expect(document.body.textContent).toContain("孙起");
-    // 首字头像与成员名分两行：头像上是「孙」。
-    expect(document.body.textContent).toContain("孙");
-    expect(document.body.textContent).toContain("· 还剩 42 分钟");
-    const revoke = button("结束授权")!;
-    expect(revoke.tagName).toBe("BUTTON");
-    expect(revoke.closest(".modal-footer")).toBeNull();
-    const select = document.querySelector("select[aria-label='孙起的请求由哪个 Agent 执行']");
-    expect(select).toBeTruthy();
-    // 只剩共享任务那一处「暂无」，限时授权本身已有内容。
-    expect(document.body.textContent?.split("暂无").length).toBe(2);
-  });
 });

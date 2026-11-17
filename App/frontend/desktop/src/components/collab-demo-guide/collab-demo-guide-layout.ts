@@ -31,7 +31,7 @@ export interface DemoGuideTarget {
    * 想往下走只能按卡片上的「下一步」（最后一屏的「创建项目」除外，那一屏要点真实按钮）。
    */
   blockStroke?: boolean;
-  /** 主锚点不在这一页时（比如执行中的协助条在任务页，人却在看板上）改用在的这一个。 */
+  /** 主锚点不在这一页时改用在的那一个。 */
   fallback?: string;
   /**
    * 说明卡往下要留出来的高度：任务页底部那一行「结果已发给谁」与输入框是这一步要看的东西，
@@ -68,8 +68,6 @@ const TARGETS: Record<DemoGuidePhase, DemoGuideTarget> = {
   // 看板导览：纯介绍，只亮区域、不描边、不接点击（`blockRest` 让亮区里也点不动）。
   // 第一站只框任务列表那一片：看板头部与工具条不属于这一步要讲的东西。
   "tour-board": { region: "board-list", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" },
-  // 第二站只讲「协助」：亮区落在 tab 那一行上。
-  "tour-tabs": { region: "board-tabs", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" },
   // 「关联任务」这一步只亮给人看：不描边、点了也不打开弹窗、不写任何数据。
   "tour-associate": { region: "board-associate", stroke: null, blockRest: true, radius: 10, padding: 6, prefer: "bottom" },
   // 「关联会话」：整张弹窗作为亮区，亮区里一个控件都不给点（blockRest 且不描边）；
@@ -77,25 +75,13 @@ const TARGETS: Record<DemoGuidePhase, DemoGuideTarget> = {
   "tour-associate-pick": { region: "associate-pick", stroke: null, blockRest: true, radius: 16, padding: 6, prefer: "left" },
   // 侧栏当前项目右侧的「＋」：亮给它，同样点不动。
   "tour-new-task": { region: "sidebar-new-task", stroke: null, blockRest: true, radius: 9, padding: 5, prefer: "bottom" },
-  // 体验三步：圆角与内边距沿用默认值（12 / 6），与改造前一致。
+  // 体验一步：圆角与内边距沿用默认值（12 / 6），与改造前一致。
   "task-row": { region: "board-task-row", stroke: "board-task-row", blockRest: false },
   // 只读面板可以滚动阅读，但只有头部那个「继续任务」能点。
   reader: { region: "reader-panel", stroke: "reader-continue", blockRest: true },
   compose: { region: "composer", stroke: "composer-send", blockRest: true },
   "reply-waiting": { region: "conversation", stroke: null, blockRest: true },
   "reply-done": { region: "conversation", stroke: null, blockRest: true },
-  "ask-compose": { region: "composer", stroke: "composer-send", blockRest: true },
-  "ask-waiting": { region: "conversation", stroke: null, blockRest: true },
-  "ask-done": { region: "conversation", stroke: null, blockRest: true },
-  "settings-open": { region: "board-settings", stroke: "board-settings", blockRest: false },
-  "settings-assist": { region: "settings-assist", stroke: "settings-assist-switch", blockRest: true },
-  "help-waiting": { region: "board-main", stroke: null, blockRest: true },
-  "help-dialog": { region: "assist-dialog", stroke: "assist-allow", blockRest: true },
-  // 允许之后人站到那条 Memmy 任务里：亮整个任务页，协助条、执行过程与结果都在里面；人若是留在看板上，改亮那条协助。
-  // 底部要留出来：任务页最下面是「结果已发给谁」那一行，正是这一步要看的东西。
-  "help-running": { region: "assist-task", stroke: null, blockRest: false, fallback: "assist-row", cardBottomReserve: 150 },
-  "help-done": { region: "assist-task", stroke: null, blockRest: false, fallback: "assist-row", cardBottomReserve: 150 },
-  "help-rejected": { region: "assist-row", stroke: null, blockRest: true },
   complete: { region: "board-main", stroke: null, blockRest: false }
 };
 
@@ -112,78 +98,108 @@ export const DEMO_GUIDE_HOLE_PADDING = 6;
  * 判据只看亮区里有没有一个真的接点击的控件：`stroke` 有、且不是「只介绍、不让人动手」的 `blockStroke`
  * 与只压暗的 `clean`。看板导览、加入那一屏、等结果这几屏没有任何可点的控件，就不摆。
  */
-export function demoGuideClickTarget(target: DemoGuideTarget): string | null {
-  if (!target.stroke || target.blockStroke === true || target.clean === true) return null;
+export function demoGuideClickTarget(target: DemoGuideTarget | undefined): string | null {
+  // 没注册的阶段（`demoGuideTarget` 返回 undefined）当作「没有可点的控件」：不画箭头就罢了，
+  // 不能因此让蒙版整个崩掉。
+  if (!target?.stroke || target.blockStroke === true || target.clean === true) return null;
   return target.stroke;
 }
 
 /** 呼吸圆点的半径（px）：圆点直径 22，白心 7，外面再一圈 2px 白边。 */
-export const DEMO_GUIDE_HINT_RADIUS = 11;
+/** 箭头的视觉尺寸：尖端到箭尾约 18px，两肩之间约 24px（SVG 画在 48×48 的盒子里，尖在正中）。 */
+export const DEMO_GUIDE_HINT_LENGTH = 18;
+export const DEMO_GUIDE_HINT_SPAN = 24;
 
-/** 圆点落在控件哪里：
+/**
+ * 箭头贴着控件的哪一侧，箭尖就落在那一侧边的中点上，箭头朝控件指过去。
  *
- * - `inside`：整块控件（一整条共享任务行）——圆点放在行里，水平居中、竖向居中；
- * - `bottom` / `top` / `right` / `left`：小控件（按钮、齿轮、开关）——圆心贴在那条边的中点上，整个圆点在控件外面。
+ * 语义是「箭头在本侧、指向控件」，不是「箭头指向本侧」。
  */
-export type DemoGuideHintSide = "inside" | "bottom" | "right" | "left" | "top";
+export type DemoGuideHintSide = "bottom" | "top" | "left" | "right";
 
 export interface ClickHintPlacement {
-  /** 圆点的圆心。内侧屏落在控件里，其余落在控件某条边的中点再沿法线往外让开一个半径。 */
+  /** 箭尖：钉在控件某条边的中点上（不是圆心，也不是控件中心）。 */
   left: number;
   top: number;
   side: DemoGuideHintSide;
 }
 
-/** 宽到这个程度、又足够高的控件算「一大块」（整条任务行）：圆点摆到它里面，不趴在外沿上。 */
-const WIDE_TARGET = 420;
-const TALL_TARGET = 48;
+/** 箭头要占的长度，含一点余量：任何一侧至少要有这么多地方，才把箭头摆到那侧。 */
+const HINT_ROOM = DEMO_GUIDE_HINT_LENGTH + 8;
+
+function clamp(value: number, low: number, high: number): number {
+  return Math.max(low, Math.min(value, high));
+}
 
 /**
- * 呼吸圆点落在哪。
+ * 呼吸箭头落在哪：**箭尖钉在控件某条边的中点上，整个箭头在控件外面，朝控件指过去**。
  *
- * 上一版把箭头挂在控件右下角外侧、且箭尖与缩放原点各用一个常数，人看到的就是「飘在角上、没对上」；
- * 之后又改成一律贴边，结果整条任务行那个圆点跑到行外、压在右边的时间戳与说明卡之间。
- * 现在的规则只有两条，每一条都能一眼验证：
+ * 这里踩过两次坑，规则是这么定下来的：
  *
- * - **一长条控件**（共享任务行）：行里就是一大片空白，圆心放在行内正中。它明显「在这条上」，
- *   又不会压在右侧的时间戳或说明卡上。
- * - **按钮、齿轮、开关这类小控件**：圆心贴在控件某条边的中点上，整个圆点在控件外（所以不遮字、不遮图标）。
- *   先试下沿，下方不够再试上沿、右侧、左侧；四条边都放不下就取最宽的那边并夹回窗口里。
+ * - 最早箭尖取控件右下角外侧，且 SVG 里尖的位置、元素偏移、缩放原点各用一套常数，于是“飘在角上、没对上”；
+ * - 后来改成一律贴边的圆点，但整条任务行的圆点跑到行外，夹在时间戳与说明卡之间，还是看不出在指哪一条。
+ *
+ * 现在只有一条构造：**箭尖 = 某条边的中点，箭头在那一侧**。所以它总是居中地指着这个控件，
+ * 尖与波纹圆心是同一个点，缩放的圆点也在这里——呼吸时只有箭身在杖，尖一毫米不动。
+ *
+ * 选哪一侧：先试下方（最不容易撞上弹窗自己的按钮与说明卡），然后依次试上、右、左；
+ * 四条边都放不下（控件比窗口还大）就取空地最大的那一侧，并整颗夹回窗口里。
  */
 export function clickHintPlacement(rect: Rect, viewport: Viewport): ClickHintPlacement {
-  const radius = DEMO_GUIDE_HINT_RADIUS;
-  if (rect.width >= WIDE_TARGET && rect.height >= TALL_TARGET) {
-    // 整条控件：行内正中。四周再夹一次，控件比窗口还大时也不会被切掉。
-    return {
-      side: "inside",
-      left: Math.max(radius + 2, Math.min(rect.left + rect.width / 2, viewport.width - radius - 2)),
-      top: Math.max(radius + 2, Math.min(rect.top + rect.height / 2, viewport.height - radius - 2))
-    };
-  }
-  const space = {
+  const space: Record<DemoGuideHintSide, number> = {
     bottom: viewport.height - (rect.top + rect.height),
     top: rect.top,
     right: viewport.width - (rect.left + rect.width),
     left: rect.left
   };
-  const fits = (side: Exclude<DemoGuideHintSide, "inside">) => space[side] >= radius * 2 + 8;
-  const order: Array<Exclude<DemoGuideHintSide, "inside">> = ["bottom", "top", "right", "left"];
-  const side = order.find(fits)
+  const order: DemoGuideHintSide[] = ["bottom", "top", "right", "left"];
+  const side = order.find((candidate) => space[candidate] >= HINT_ROOM)
     ?? order.reduce((best, candidate) => (space[candidate] > space[best] ? candidate : best));
-  const gap = radius + 1;
   const point = side === "bottom"
-    ? { left: rect.left + rect.width / 2, top: rect.top + rect.height + gap }
-    : side === "right"
-      ? { left: rect.left + rect.width + gap, top: rect.top + rect.height / 2 }
-      : side === "left"
-        ? { left: rect.left - gap, top: rect.top + rect.height / 2 }
-        : { left: rect.left + rect.width / 2, top: rect.top - gap };
-  // 控件贴到窗口边上时圆点会被切掉：夹回窗口里，宁可与控件重叠一点也要整颗都看得见。
+    ? { left: rect.left + rect.width / 2, top: rect.top + rect.height }
+    : side === "top"
+      ? { left: rect.left + rect.width / 2, top: rect.top }
+      : side === "right"
+        ? { left: rect.left + rect.width, top: rect.top + rect.height / 2 }
+        : { left: rect.left, top: rect.top + rect.height / 2 };
+  // 控件贴到窗口边上时箭头会被切掉：把尖夹回窗口，留出箭身的位置；沿边那一维只留半个肩宽。
+  const halfSpan = DEMO_GUIDE_HINT_SPAN / 2 + 2;
+  const room = DEMO_GUIDE_HINT_LENGTH + 4;
+  const along = side === "bottom" || side === "top"
+    ? { left: clamp(point.left, halfSpan, viewport.width - halfSpan), top: point.top }
+    : { left: point.left, top: clamp(point.top, halfSpan, viewport.height - halfSpan) };
   return {
     side,
-    left: Math.max(radius + 2, Math.min(point.left, viewport.width - radius - 2)),
-    top: Math.max(radius + 2, Math.min(point.top, viewport.height - radius - 2))
+    left: along.left,
+    top: side === "bottom"
+      ? Math.min(along.top, viewport.height - room)
+      : side === "top"
+        ? Math.max(along.top, room)
+        : along.top
   };
+}
+
+/**
+ * 箭头实际占的地方（沿指向 18px、横宽 24px）：说明卡不能压上来，否则就像指着卡片。
+ * 只用干避让，不参与渲染。
+ */
+export function clickHintBounds(placement: ClickHintPlacement): Rect {
+  const span = DEMO_GUIDE_HINT_SPAN;
+  const length = DEMO_GUIDE_HINT_LENGTH + 4;
+  const { left, top, side } = placement;
+  if (side === "bottom") return { left: left - span / 2, top, width: span, height: length };
+  if (side === "top") return { left: left - span / 2, top: top - length, width: span, height: length };
+  if (side === "right") return { left, top: top - span / 2, width: length, height: span };
+  return { left: left - length, top: top - span / 2, width: length, height: span };
+}
+
+/** 两块矩形的并集：说明卡要同时避让「唯一可点的控件」与「指着它的箭头」。 */
+export function unionRect(a: Rect, b: Rect): Rect {
+  const left = Math.min(a.left, b.left);
+  const top = Math.min(a.top, b.top);
+  const right = Math.max(a.left + a.width, b.left + b.width);
+  const bottom = Math.max(a.top + a.height, b.top + b.height);
+  return { left, top, width: right - left, height: bottom - top };
 }
 
 /** 亮区不能压在窗口边缘上：至少留出这点距离，说明卡才放得下。 */
@@ -241,7 +257,7 @@ export interface CardPlacement {
   arrow: { side: "left" | "right" | "top" | "bottom"; offset: number };
 }
 
-/** 常规说明卡宽：单行放得下「1 / 3 · 接续成员的任务」这类短标题，不被压成两行。 */
+/** 常规说明卡宽：单行放得下「1 / 1 · 接续成员的任务」这类短标题，不被压成两行。 */
 export const DEMO_GUIDE_CARD_WIDTH = 340;
 /** 带对话或任务示意的说明卡宽一档：示意图不挤。 */
 export const DEMO_GUIDE_CARD_WIDTH_WIDE = 400;

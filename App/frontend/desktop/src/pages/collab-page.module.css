@@ -144,7 +144,7 @@
 }
 
 /*
- * 「任务」与「协助」两个 tab：看板内容的分区，不是筛选。
+ * 看板内容的分区（现在只有「任务」），不是筛选。
  * 一行文字 + 底部细线，选中项用加深的文字与 2px 强调色下划线，不用胶囊，免得与下面成员筛选的三段胶囊混淆。
  */
 .boardTabs {
@@ -197,20 +197,6 @@
   border-radius: 6px;
   outline: 1.5px solid color-mix(in srgb, var(--collab-accent-deep) 55%, transparent);
   outline-offset: 3px;
-}
-
-/* 「协助」的工具条：左边一句可见范围说明，右边只留刷新与多选，所以不必换行 */
-.assistToolbar {
-  flex-wrap: nowrap;
-}
-
-.assistToolbarHint {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--collab-ter);
-  font-size: 12.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /*
@@ -408,7 +394,7 @@
 }
 
 /*
- * 多选里的删除、协助工具条里的「全部停止」：保留警示色，用文字按钮，避免整块红底压住工具条。
+ * 多选里的删除：保留警示色，用文字按钮，避免整块红底压住工具条。
  * 类名写两遍是为了提高优先级：全局 .button-ghost 在 styles.css 里、加载在这份模块样式之后，
  * 只写一个类会被它的灰色盖掉，按钮看起来就是普通次要按钮。
  */
@@ -681,28 +667,19 @@
   position: relative;
 }
 
-/* 空项目：说明这个标签页收集什么、能做什么 */
+/* 空项目：说明这个标签页收集什么、能做什么。不画边框：主区本身是白底，说明块直接落在页面上，与列表左缘对齐 */
 .guide {
   margin-top: 14px;
-  padding: 24px 26px 20px;
-  border: 1px solid var(--collab-line);
-  border-radius: 14px;
-  background: var(--color-background-paper, #fff);
+  padding: 20px 0 4px;
 }
 
-.guideTitle {
-  display: block;
-  color: var(--collab-ink);
-  font-size: 15px;
-  font-weight: 800;
+/* 没有标题与引导句的空状态：直接从第一条说明开始，不要空出来的段落间距 */
+.guideBare {
+  padding-top: 6px;
 }
 
-.guideLead {
-  margin: 8px 0 0;
-  max-width: 640px;
-  color: var(--collab-muted);
-  font-size: 13px;
-  line-height: 1.75;
+.guideBare .guideList {
+  margin-top: 12px;
 }
 
 .guideList {
@@ -770,6 +747,56 @@
   outline-offset: 1px;
 }
 
+/* 昵称提示：一句提醒，中性浅底、无边框、不抢色，右侧只有一个关闭。它不要求用户做什么操作 */
+.nameTip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 7px 6px 7px 12px;
+  border-radius: 10px;
+  background: var(--collab-surface);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.nameTipIcon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--collab-ter);
+}
+
+.nameTipText {
+  flex: 1;
+  min-width: 0;
+  color: var(--collab-ink-2);
+}
+
+.nameTipDismiss {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--collab-ter);
+  cursor: pointer;
+}
+
+.nameTipDismiss:hover {
+  background: color-mix(in srgb, var(--color-text-ink, #111d1c) 6%, transparent);
+  color: var(--collab-ink-2);
+}
+
+.nameTipDismiss:focus-visible {
+  outline: 2px solid var(--collab-accent-deep);
+  outline-offset: 1px;
+}
+
 /* 成员首次进入时的单行提示：浅底内联，不遮列表，也不抢标题 */
 .contextTip {
   display: flex;
@@ -814,88 +841,6 @@
 .contextTipAction:hover {
   background: color-mix(in srgb, var(--collab-accent) 16%, transparent);
   color: var(--collab-ink-2);
-}
-
-/* 等你处理的协助：与上面的取用提示同一种提示条，右侧按钮用主色，点了就去处理 */
-.assistWaiting {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-top: 10px;
-  padding: 8px 8px 8px 12px;
-  border: 1px solid color-mix(in srgb, var(--collab-accent) 30%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--collab-active) 55%, var(--color-background-paper, #fff));
-  font-size: 12.5px;
-  line-height: 1.6;
-}
-
-.assistWaitingIcon {
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  color: var(--collab-accent-deep);
-}
-
-.assistWaitingText {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--collab-ink-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.assistWaitingAction {
-  flex: 0 0 auto;
-  height: 26px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--collab-accent-deep);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.assistWaitingAction:hover {
-  background: color-mix(in srgb, var(--collab-accent) 16%, transparent);
-}
-
-/* 「协助」列表底部：收起的未执行请求与上限说明，都是一行小字。
- * 不设左右内边距：工具条没有内边距、列表行用 -14/+14 抵消，这里也贴齐内容左边缘。
- * 那段留白不能靠调工具条或列表行来凑，否则整块列表会往左偏。 */
-.assistFooter {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  margin-top: 8px;
-  padding: 0;
-}
-
-.assistFooterToggle {
-  padding: 4px 0;
-  border: 0;
-  background: transparent;
-  color: var(--collab-muted);
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-
-.assistFooterToggle:hover {
-  color: var(--collab-ink-2);
-  text-decoration: underline;
-}
-
-.assistFooterNote {
-  margin: 0;
-  color: var(--collab-ter);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 .configKnowledgeList {
@@ -1095,7 +1040,7 @@
 }
 
 /*
- * 面板左边缘的拖动条（读任务与协助会话共用，见 collab-reader-resize.tsx）：沿用侧栏的 sidebar-resize-handle
+ * 面板左边缘的拖动条（任务阅读面板，见 collab-reader-resize.tsx）：沿用侧栏的 sidebar-resize-handle
  * （悬停与拖动时出现一条细线、col-resize 光标），只是贴在浮起卡片的内侧。上下让开圆角，线不会画到圆角外面；
  * 面板裁掉溢出，所以去掉手柄原有的负边距。
  */
@@ -1391,7 +1336,7 @@
 }
 
 /*
- * 筛选没结果时的说明卡片：和「协助」空态同一套边框与图标，内容左对齐。
+ * 筛选没结果时的说明卡片：和空态同一套边框与图标，内容左对齐。
  * 单独一类，不改 .empty：没有项目时的页面级空态仍按整块居中、文字居中显示。
  */
 .filterEmpty {
@@ -2392,11 +2337,6 @@
   margin-left: 0;
 }
 
-/* 接收协助请求：开关一行，下面跟着限时授权；左缘与名称对齐（行内边距 10 + 图标 16 + 间距 10） */
-.settingsAssist .grantList {
-  padding: 4px 10px 10px 36px;
-}
-
 .settingsRowError {
   padding: 0 10px 8px 36px;
   color: var(--color-status-error, #b44c42);
@@ -3004,33 +2944,6 @@
   .actionLabel {
     display: none;
   }
-}
-
-/*
- * 成员协助在看板上的一行：图标代替头像，标题前一个「协助」标签，行尾写清谁请谁、由哪个 Agent 执行、现在的状态。
- * 只用现有的薄荷绿主题变量。
- */
-.assistIcon {
-  background: color-mix(in srgb, var(--color-accent-mint, #5cbfae) 14%, var(--color-background-paper, #fff));
-  color: var(--color-accent-deep, #2f8f7f);
-}
-
-.assistTag {
-  display: inline-block;
-  margin-right: 7px;
-  padding: 0 6px;
-  border: 1px solid color-mix(in srgb, var(--color-accent-mint, #5cbfae) 45%, transparent);
-  border-radius: 5px;
-  color: var(--color-accent-deep, #2f8f7f);
-  font-size: 11.5px;
-  font-weight: 600;
-  line-height: 18px;
-  vertical-align: 1px;
-}
-
-/* 还没结束的协助：状态用主题色，一眼看得出哪几条还在进行。 */
-.assistMetaOpen {
-  color: var(--color-accent-deep, #2f8f7f);
 }
 
 /* 筛选栏「协助」后面的待处理数量。 */

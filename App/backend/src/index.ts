@@ -27,12 +27,6 @@ import { createLocalApiServer } from "./adapters/inbound/local-api/server.js";
 import { createBackendServices, createCatalogAgentTaskModelResolver, type BootstrapScenario } from "./services/index.js";
 import { migrateLegacyCollabInstructions } from "./services/collab-instructions-service.js";
 import { createCollabCloudRequest, createCollabService } from "./services/collab-service.js";
-import { createCollabAssistService } from "./services/collab-assist-service.js";
-import { createAcpAssistRunner, createAssistRunner } from "./services/assist/runner.js";
-import { createMemmyAssistRunner } from "./services/assist/memmy-runner.js";
-import { MEMMY_SOURCE_ID, assistAsksForApproval, assistRunnable } from "./services/assist/recipes.js";
-import { createAssistReviewer } from "./services/assist/review.js";
-import { assistEnv } from "./services/assist/shell-env.js";
 import { createLocalSessionReader } from "./adapters/outbound/agent-source/session-reference/local-session-reader.js";
 import { createBuiltinAgentSourceRegistry } from "./services/builtin-agent-source-registry.js";
 import { defaultCollabHome, refreshCollabAgentSkills } from "./services/collab-added-agents.js";
@@ -121,8 +115,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   const appStateStore = createAppStateStore({ databasePath: options.databasePath });
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
   let collabSyncTimer: ReturnType<typeof setInterval> | undefined;
-  /** 成员协助的轮询器：关闭后端时一并停掉。 */
-  let collabAssistTimer: (() => void) | undefined;
   let pluginService: PluginService | null = null;
 
   try {
@@ -352,64 +344,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       });
     }, COLLAB_SYNC_INTERVAL_MS);
     collabSyncTimer.unref();
-    /**
-     * 成员协助：执行方轮询收件箱、拉起对方选的 Agent、回传结果；发起方的请求与等结果也在这一份里。
-     * 它用与协作项目同一套云端签名。执行方可以选的第一个是 Memmy 自己（在对应项目下新建一条任务执行），
-     * 其后是这台电脑上能运行的 Agent（按启动配方查命令行，需要适配器的看本体命令行）；
-     * 「在其他 Agent 中使用协作项目」里被逐个关掉的不列。分层与默认项在 collab-assist-service 里按项目算。
-     */
-    const memmyAgentAdmin = options.memmyAgentAdminClient;
-    const memmyCanAssist = Boolean(memmyAgentAdmin?.startAssistRun && memmyAgentAdmin.readAssistRun);
-    const collabAssist = createCollabAssistService({
-      cloud: createCollabCloudRequest({ cloudBaseUrl: cloudConfig.baseUrl, getAccount: getCollabAccount, userMode }),
-      userMode,
-      projectDirectory: async (projectId: string, projectName?: string) =>
-        (await collab.ensureWorkingDirectory(projectId, projectName)).localDirectory ?? null,
-      agents: async () => {
-        const view = await collabAgentAccess.view();
-        // 判断用的是补上登录 shell PATH 的环境：打包后的 Memmy 进程 PATH 里没有 Homebrew / nvm 的目录，
-        // 按进程 PATH 判断会把装了命令行的人也说成不可用（见 services/assist/shell-env）。
-        // 能运行才出现：有数据目录或装过协作组件不代表能拉起来（Pi 有数据目录却没有命令行）。
-        const assistEnvironment = assistEnv();
-        const external = view.agents
-          .filter((agent) => agent.enabled && agent.available && assistRunnable(agent.sourceId, assistEnvironment))
-          .map((agent) => ({ sourceId: agent.sourceId, name: agent.name, available: true }));
-        return memmyCanAssist
-          ? [{ sourceId: MEMMY_SOURCE_ID, name: "Memmy", available: true }, ...external]
-          : external;
-      },
-      // 本机关联记录里各 Agent 的使用情况：这个项目里关联过的放在第一层。
-      agentUsage: (projectId: string) => collab.agentUsage(projectId),
-      // 只剩执行方那次审查：用她本机账号的「Agent 任务模型」，也就是她自己的额度。发起方只按规则查密钥，不调模型。
-      reviewer: createAssistReviewer({
-        resolveModel: async () =>
-          (await createCatalogAgentTaskModelResolver(appStateStore, memmyConfigWriter).getAgentTaskModel()) ?? null
-      }),
-      // 执行时会不会发批准请求：决定限时授权下能不能直接自动执行（不会请求批准的 Agent 必须她看过再决定）。
-      agentAsksForApproval: assistAsksForApproval,
-      runner: createAssistRunner({
-        acp: createAcpAssistRunner(),
-        memmy: createMemmyAssistRunner({
-          client: memmyAgentAdmin ?? {},
-          localProjectId: (projectId) => collab.localProjectIdFor(projectId)
-        })
-      }),
-      // 在 Memmy 任务里发起的请求：结果回来后送回那条任务，Memmy 接着分析。
-      ...(memmyAgentAdmin?.deliverAssistResult
-        ? { deliverResult: (input: { chatId: string; content: string }) => memmyAgentAdmin.deliverAssistResult!(input) }
-        : {}),
-      // 结果送回后 Memmy 那一轮的回复：作为「发起方 Agent 收到后的回复」记进协助会话。
-      ...(memmyAgentAdmin?.readAssistRun
-        ? {
-            readDeliveryReply: async (chatId: string) => {
-              const run = await memmyAgentAdmin.readAssistRun!(chatId);
-              return run ? { status: run.status, reply: run.reply } : null;
-            }
-          }
-        : {})
-    });
-    // 轮询在后台跑：5 秒一次查收件箱，有生效中的限时授权的请求直接开始执行。
-    collabAssistTimer = collabAssist.start();
     server = createLocalApiServer({
       knowledge: {
         baseUrl: cloudConfig.baseUrl,
@@ -417,7 +351,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       },
       collab,
       collabAgentAccess,
-      collabAssist,
       projectDirectory: createProjectDirectoryService(),
       permissionManager,
       services,
@@ -491,7 +424,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       },
       async close() {
         clearInterval(collabSyncTimer);
-        collabAssistTimer?.();
         try {
           await boundServer.close();
         } finally {
@@ -502,7 +434,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     };
   } catch (error) {
     clearInterval(collabSyncTimer);
-    collabAssistTimer?.();
     await server?.close().catch(() => undefined);
     await pluginService?.shutdown();
     appStateStore.close();

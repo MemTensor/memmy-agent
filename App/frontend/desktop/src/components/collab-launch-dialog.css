@@ -168,11 +168,6 @@
   stroke-linecap: round;
 }
 
-/* 只用来承载移动光迹的路径，本身不画。 */
-.collab-launch-trunk-all {
-  stroke: none;
-}
-
 .collab-launch-lane {
   stroke: var(--color-icon-ember);
   stroke-width: 1.6;
@@ -196,14 +191,6 @@
   stroke: none;
 }
 
-.collab-launch-progress-rect {
-  stroke: var(--color-action-sky-hover);
-  stroke-width: 2.5;
-  stroke-linecap: round;
-  stroke-dasharray: 1;
-  opacity: 0;
-}
-
 /* 连线上流动的短线段 */
 .collab-launch-flow {
   stroke: color-mix(in srgb, var(--color-text-ink) 50%, transparent);
@@ -219,19 +206,6 @@
 
 .collab-launch-ripple,
 .collab-launch-project-ripple {
-  stroke: var(--color-action-sky);
-  stroke-width: 1.6;
-  opacity: 0;
-}
-
-.collab-launch-auth-ring {
-  stroke: var(--color-icon-ember);
-  stroke-width: 2.2;
-  stroke-linecap: round;
-  opacity: 0;
-}
-
-.collab-launch-auth-ripple {
   stroke: var(--color-action-sky);
   stroke-width: 1.6;
   opacity: 0;
@@ -412,10 +386,6 @@
   box-shadow: 0 4px 10px rgba(58, 168, 147, 0.16);
 }
 
-.collab-launch-chip--under {
-  z-index: 2;
-}
-
 .collab-launch-chip--count {
   height: 28px;
   padding: 0 13px;
@@ -561,40 +531,6 @@
   border-bottom: 1px solid rgba(17, 29, 28, 0.07);
 }
 
-.collab-launch-auth__wait,
-.collab-launch-auth__ok {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.collab-launch-auth__ok {
-  display: none;
-}
-
-.collab-launch-auth--ok {
-  background: #ecf9f5;
-  color: #23786a;
-  border-color: #8fd5c6;
-  box-shadow: 0 4px 10px rgba(58, 168, 147, 0.16);
-}
-
-.collab-launch-auth--ok .collab-launch-auth__wait {
-  display: none;
-}
-
-.collab-launch-auth--ok .collab-launch-auth__ok {
-  display: inline-flex;
-}
-
-.collab-launch-pulse {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-icon-ember);
-  animation: collab-launch-blink 900ms ease-in-out infinite;
-}
-
 .collab-launch-loader {
   display: inline-flex;
   gap: 3px;
@@ -616,21 +552,9 @@
   animation-delay: 300ms;
 }
 
-.collab-launch-check {
-  z-index: 8;
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--color-action-sky-hover);
-  color: #fff;
-  box-shadow: 0 0 0 2px #fff;
-}
-
 /* ---------- 进度 ---------- */
 
-/* 五段对应五幕，按一下就从那一幕的第一帧重新播。 */
+/* 四段对应四幕，按一下就从那一幕的第一帧重新播。 */
 .collab-launch-progress {
   position: absolute;
   left: 22px;
