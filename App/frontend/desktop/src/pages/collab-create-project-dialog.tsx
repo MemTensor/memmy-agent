@@ -232,7 +232,7 @@ export function CreateProjectModal(props: {
           {shareAvailable && props.onJoinProject ? (
             <Button
               variant="secondary"
-              size="sm"
+              className={styles.simpleCreateFooterButton}
               data-demo-guide={demo ? "create-join" : undefined}
               onClick={props.onJoinProject}
             >
@@ -240,9 +240,12 @@ export function CreateProjectModal(props: {
             </Button>
           ) : <span />}
           <span className={styles.footerButtons}>
-            <Button variant="ghost" onClick={props.onClose}>{t("collab.cancel")}</Button>
+            <Button variant="ghost" className={styles.simpleCreateFooterButton} onClick={props.onClose}>
+              {t("collab.cancel")}
+            </Button>
             <Button
               variant="primary"
+              className={styles.simpleCreateFooterButton}
               disabled={!valid || busy}
               data-demo-guide={demo ? "create-project-submit" : undefined}
               onClick={() => void submit()}

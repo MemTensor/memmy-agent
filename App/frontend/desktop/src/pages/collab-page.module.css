@@ -1937,6 +1937,19 @@
   padding: 16px 24px 20px;
 }
 
+/*
+ * 页脚三个按钮同一套尺寸：按钮本身不写字号，会继承 16px 正文，和弹窗里 13.5px 的字不是一套；
+ * 「加入项目」原本是 sm（30px、12px），和右侧两个差一档。这里统一成 36px 高、14px、600 字重。
+ * 写成 `:global(.button).xxx` 是为了压过全局 `.button-sm` / `.button-md` 的 min-height 与 padding。
+ */
+:global(.button).simpleCreateFooterButton {
+  min-height: 36px;
+  padding: 0 16px;
+  border-radius: var(--radius-btn, 8px);
+  font-size: 14px;
+  font-weight: 600;
+}
+
 /* 名称：整行输入框，图标与竖线在框内左侧，聚焦时整框描主题色 */
 .simpleNameField {
   display: flex;
@@ -2087,28 +2100,23 @@
   color: var(--collab-ink-2);
 }
 
-/* 共享：与名称框同高、同边框的一个字段，图标与文字和名称框对齐；开启后整框铺一层浅薄荷色 */
+/* 共享是一个开关行，不是又一个输入框：不描边、不铺白底，悬停才铺一层浅底；开启与否由图标颜色和开关本身表达 */
 .simpleShareField {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 44px;
-  margin-top: 12px;
+  height: 40px;
+  margin-top: 8px;
   padding: 0 12px;
-  border: 1px solid var(--collab-line);
-  border-radius: 10px;
-  background: var(--color-background-paper, #fff);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
   cursor: pointer;
-  transition: border-color var(--duration-fast) ease, background-color var(--duration-fast) ease;
+  transition: background-color var(--duration-fast) ease;
 }
 
 .simpleShareField:hover {
-  border-color: color-mix(in srgb, var(--collab-accent) 45%, var(--collab-line));
-}
-
-.simpleShareFieldOn {
-  border-color: color-mix(in srgb, var(--collab-accent) 55%, var(--collab-line));
-  background: color-mix(in srgb, var(--collab-accent) 7%, var(--color-background-paper, #fff));
+  background: color-mix(in srgb, var(--color-canvas-oat, #f2f2ec) 62%, transparent);
 }
 
 .simpleShareIcon {

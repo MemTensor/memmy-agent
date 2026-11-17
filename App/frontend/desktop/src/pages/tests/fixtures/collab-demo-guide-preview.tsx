@@ -273,18 +273,30 @@ function CreateProjectSurface() {
         </div>
         <div
           data-demo-guide="create-collab"
-          style={{ ...field, marginTop: 12, background: "color-mix(in srgb, #5cbfae 7%, #fff)", borderColor: "color-mix(in srgb, #5cbfae 55%, rgba(16,26,25,.14))" }}
+          style={{ ...field, height: 40, marginTop: 8, border: "none", borderRadius: 8, background: "transparent" }}
         >
           <span style={{ color: "#2f8f7f" }} aria-hidden="true">◉</span>
           <span style={{ flex: 1 }}>开启项目协作</span>
           <button type="button" role="switch" aria-checked="true" aria-label="开启项目协作" className={board.settingsSwitchOn} />
         </div>
-        {/* 左下是「加入项目」，右下是取消与创建：与真实弹窗的页脚一致。 */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 20 }}>
-          <button type="button" className="button button-secondary button-sm" data-demo-guide="create-join">加入项目</button>
+        {/* 左下是「加入项目」，右下是取消与创建：与真实弹窗的页脚一致（三个按钮同一尺寸）。 */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 20 }}>
+          <button
+            type="button"
+            className={`button button-secondary ${board.simpleCreateFooterButton}`}
+            data-demo-guide="create-join"
+          >
+            加入项目
+          </button>
           <span style={{ display: "flex", gap: 8 }}>
-            <button type="button" className="button button-ghost">取消</button>
-            <button type="button" className="button button-primary" data-demo-guide="create-project-submit">创建项目</button>
+            <button type="button" className={`button button-ghost ${board.simpleCreateFooterButton}`}>取消</button>
+            <button
+              type="button"
+              className={`button button-primary ${board.simpleCreateFooterButton}`}
+              data-demo-guide="create-project-submit"
+            >
+              创建项目
+            </button>
           </span>
         </div>
       </div>

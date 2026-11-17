@@ -139,14 +139,17 @@ export function JoinProjectModal(props: {
         footer={(
           <>
             {props.onCreateProject ? (
-              <Button variant="secondary" size="sm" onClick={props.onCreateProject}>
+              <Button variant="secondary" className={styles.simpleCreateFooterButton} onClick={props.onCreateProject}>
                 {t("collab.join.createEntry")}
               </Button>
             ) : <span />}
             <span className={styles.footerButtons}>
-              <Button variant="ghost" onClick={props.onClose}>{preview ? t("collab.join.later") : t("collab.cancel")}</Button>
+              <Button variant="ghost" className={styles.simpleCreateFooterButton} onClick={props.onClose}>
+                {preview ? t("collab.join.later") : t("collab.cancel")}
+              </Button>
               <Button
                 variant="primary"
+                className={styles.simpleCreateFooterButton}
                 disabled={busy || pending || (!preview && !reference.trim())}
                 onClick={() => void (preview ? join() : readInvite())}
               >
