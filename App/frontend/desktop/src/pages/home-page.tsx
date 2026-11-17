@@ -985,7 +985,9 @@ export function HomePage() {
   const queueSteerLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
+  const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const voiceInputGenerationRef = useRef(0);
+  const voiceFinishInFlightRef = useRef<number | null>(null);
   const liveVoiceLinesRef = useRef<AsrLiveLine[]>([]);
   const liveVoiceScopeRef = useRef<string | null>(null);
   const liveVoiceRangeRef = useRef<VoiceTranscriptRange | null>(null);
@@ -1007,7 +1009,7 @@ export function HomePage() {
           const updated = replaceVoiceTranscript(current, liveVoiceRangeRef.current, text);
           liveVoiceRangeRef.current = updated.range;
           return updated.value;
-        }, true);
+        }, "voice");
         if (scopeKey === chatScopeKey) {
           window.requestAnimationFrame(() => {
             if (inputRef.current) resizeComposerInput(inputRef.current);
@@ -1016,7 +1018,6 @@ export function HomePage() {
       }
     }
   });
-  const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   useEffect(() => { setTaskRecording(null); }, [chatScopeKey]);
   const cancelVoiceInput = asrRecorder.cancel;
   useLayoutEffect(() => {
@@ -2451,10 +2452,18 @@ export function HomePage() {
    * @param scopeKey The session or new-draft scope.
    * @param value The latest input content, or an updater function based on the previous value.
    */
-  function setComposerDraftForScope(scopeKey: string, value: SetStateAction<string>, voiceUpdate = false) {
+  function setComposerDraftForScope(scopeKey: string, value: SetStateAction<string>, source: "voice" | "manual" | "replace" = "replace") {
     const currentValue = composerDraftsRef.current[scopeKey] ?? "";
     const nextValue = typeof value === "function" ? value(currentValue) : value;
-    if (!voiceUpdate && scopeKey === liveVoiceScopeRef.current) {
+    if (source !== "voice" && nextValue !== currentValue && scopeKey === liveVoiceScopeRef.current && (source === "replace" || !nextValue)) {
+      // Sending or clearing a draft ends capture so late revisions cannot repopulate it.
+      voiceInputGenerationRef.current++;
+      liveVoiceScopeRef.current = null;
+      liveVoiceLinesRef.current = [];
+      liveVoiceRangeRef.current = null;
+      cancelVoiceInput();
+    }
+    if (source === "manual" && scopeKey === liveVoiceScopeRef.current) {
       liveVoiceRangeRef.current = trackVoiceTranscriptEdit(currentValue, nextValue, liveVoiceRangeRef.current);
     }
     const nextDrafts = updateComposerDraftForScope(composerDraftsRef.current, scopeKey, nextValue);
@@ -2530,7 +2539,7 @@ export function HomePage() {
    * @param value The latest input box content.
    */
   function updateComposerInput(value: string) {
-    setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));
+    setComposerDraftForScope(chatScopeKey, buildComposerCommandDraft(selectedComposerCommand, value), "manual");
     setSlashMenuDismissed(false);
     if (
       slashQueryFromInput(value) != null &&
@@ -2873,6 +2882,8 @@ export function HomePage() {
    */
   async function finishVoiceInput() {
     const generation = voiceInputGenerationRef.current;
+    if (voiceFinishInFlightRef.current === generation) return;
+    voiceFinishInFlightRef.current = generation;
     const scopeKey = liveVoiceScopeRef.current ?? chatScopeKey;
     try {
       const transcript = await asrRecorder.finishAndTranscribe();
@@ -2881,7 +2892,7 @@ export function HomePage() {
         current,
         liveVoiceRangeRef.current,
         transcript.text
-      ).value, true);
+      ).value, "voice");
       liveVoiceLinesRef.current = [];
       liveVoiceScopeRef.current = null;
       liveVoiceRangeRef.current = null;
@@ -2900,6 +2911,8 @@ export function HomePage() {
       liveVoiceScopeRef.current = null;
       liveVoiceRangeRef.current = null;
       setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr");
+    } finally {
+      if (voiceFinishInFlightRef.current === generation) voiceFinishInFlightRef.current = null;
     }
   }
 
@@ -3657,7 +3670,7 @@ export function replaceVoiceTranscript(
   next: string
 ): { value: string; range: VoiceTranscriptRange | null } {
   const nextText = next.trim();
-  if (!nextText) return { value: current, range: previous };
+  if (!nextText && !previous) return { value: current, range: previous };
   if (previous && current.slice(previous.start, previous.start + previous.text.length) === previous.text) {
     const text = previous.corrections?.reduce((recognized, correction) =>
       mergeVoiceCorrection(correction.base, correction.changes, recognized), nextText) ?? nextText;
@@ -3675,8 +3688,7 @@ interface VoiceTextChange { start: number; end: number; text: string }
 function mergeVoiceCorrection(base: string, corrections: VoiceTextChange[], recognized: string): string {
   const updates = voiceTextChanges(base, recognized).filter(update => !corrections.some(edit =>
     update.start < edit.end && update.end > edit.start
-    || update.start === edit.start && (update.start === update.end || edit.start === edit.end)
-    || edit.start > update.start && edit.start < update.end));
+    || update.start === edit.start && (update.start === update.end || edit.start === edit.end)));
   return [...corrections, ...updates].sort((a, b) => b.start - a.start || b.end - a.end)
     .reduce((text, edit) => text.slice(0, edit.start) + edit.text + text.slice(edit.end), base);
 }

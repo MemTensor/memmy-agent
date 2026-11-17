@@ -40,7 +40,7 @@ beforeEach(async () => {
   voiceInput = true; Recorder.starts = 0; tap.ready = null; tap.fail = false; tap.close.mockReset(); tap.close.mockResolvedValue(undefined); tap.setPaused.mockClear(); trackStop.mockClear(); socket = new Socket();
   vi.stubGlobal("MediaRecorder", Recorder);
   Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: { getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: trackStop }] })) } });
-  client = { prepare: vi.fn(async () => ({ sessionId: "recording-config", transport: "http" as const })), release: vi.fn(async () => {}),
+  client = { prepare: vi.fn(async () => ({ transport: "http" as const })), release: vi.fn(async () => {}),
     openStream: vi.fn(() => socket as any), transcribe: vi.fn(async () => ({ text: "HTTP complete", modelId: "selected", provider: "dashscope", source: "byok", transcribedAt: new Date().toISOString() })) };
   container = document.createElement("div"); root = createRoot(container);
   await act(async () => root.render(<Harness />));
@@ -68,7 +68,7 @@ describe("complete recording routing", () => {
     vi.stubGlobal("MediaRecorder", class extends Recorder { constructor() { super(); throw new Error("unsupported format"); } });
     await act(async () => { await expect(recorder.start()).rejects.toThrow("unsupported format"); });
     expect(trackStop).toHaveBeenCalledOnce();
-    expect(client.release).toHaveBeenCalledWith("recording-config");
+    expect(client.release).not.toHaveBeenCalled();
   });
   it("pauses PCM at its source and excludes paused time from recording duration", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(0);
@@ -121,16 +121,17 @@ describe("complete recording routing", () => {
     expect(await finishing).toMatchObject({ name: "AbortError" });
     expect(recorder.status).toBe("recording");
   });
-  it("keeps the recording but never switches a failed realtime session to HTTP", async () => {
+  it("falls back once with the full recording after realtime fails", async () => {
     await stream();
     await act(async () => socket.event({ type: "error", message: "upstream 404" }));
     expect(recorder.status).toBe("recording");
     let kept: Blob | undefined;
     await act(async () => {
-      await expect(recorder.finishAndTranscribe({ onRecordingReady: blob => { kept = blob; } })).rejects.toThrow("upstream 404");
+      await expect(recorder.finishAndTranscribe({ onRecordingReady: blob => { kept = blob; } })).resolves.toMatchObject({ text: "HTTP complete" });
     });
     expect(await kept?.text()).toBe("complete recording from first second");
-    expect(client.transcribe).not.toHaveBeenCalled();
+    expect(client.transcribe).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ sessionId: "recording-config" }), expect.any(AbortSignal));
+    expect(recorder.error).toBeNull();
     expect(client.release).toHaveBeenCalledWith("recording-config");
   });
   it("skips HTTP only after a complete realtime result", async () => {
@@ -143,20 +144,21 @@ describe("complete recording routing", () => {
     await act(async () => { await recorder.finishAndTranscribe(); });
     expect(client.transcribe).toHaveBeenCalledOnce();
   });
-  it("retains the realtime diagnostic cause without starting HTTP", async () => {
+  it("reports the HTTP error without retrying when both transports fail", async () => {
     await stream(); socket.event({ type: "error", message: "upstream 404" });
+    vi.mocked(client.transcribe).mockRejectedValueOnce(new Error("HTTP unavailable"));
     await act(async () => {
-      await expect(recorder.finishAndTranscribe()).rejects.toThrow("upstream 404");
+      await expect(recorder.finishAndTranscribe()).rejects.toThrow("HTTP unavailable");
     });
     expect(recorder.status).toBe("error");
-    expect(recorder.error?.cause).toMatchObject({ message: "upstream 404" });
-    expect(client.transcribe).not.toHaveBeenCalled();
+    expect(recorder.error?.cause).toMatchObject({ message: "HTTP unavailable" });
+    expect(client.transcribe).toHaveBeenCalledOnce();
     expect(client.release).toHaveBeenCalledWith("recording-config");
   });
-  it("transfers the pinned session to a background transcription", async () => {
+  it("hands BYOK audio to background transcription without a realtime session", async () => {
     tap.fail = true; await start(); let stopped: any;
     await act(async () => { stopped = await recorder.stop(); });
-    expect(stopped.sessionId).toBe("recording-config");
+    expect(stopped.sessionId).toBeUndefined();
     await act(async () => recorder.cancel());
     expect(client.release).not.toHaveBeenCalled();
   });
@@ -164,7 +166,7 @@ describe("complete recording routing", () => {
 
 
 describe("13-step ASR recording contract", () => {
-  it("keeps opening, middle and tail audio without HTTP fallback after realtime failure", async () => {
+  it("uploads opening, middle and tail audio in one HTTP fallback after realtime failure", async () => {
     vi.mocked(client.prepare).mockResolvedValueOnce({ sessionId: "recording-config", transport: "websocket" });
     await start();
     Recorder.current.chunks = [];
@@ -177,14 +179,15 @@ describe("13-step ASR recording contract", () => {
     Recorder.current.chunks.push("tail");
     let kept: Blob | undefined;
     await act(async () => {
-      await expect(recorder.finishAndTranscribe({ onRecordingReady: blob => { kept = blob; } })).rejects.toThrow("connection lost");
+      await expect(recorder.finishAndTranscribe({ onRecordingReady: blob => { kept = blob; } })).resolves.toMatchObject({ text: "HTTP complete" });
     });
     expect(await kept?.text()).toBe("opening|middle|tail");
-    expect(client.transcribe).not.toHaveBeenCalled();
+    expect(client.transcribe).toHaveBeenCalledOnce();
+    expect(atob(vi.mocked(client.transcribe).mock.calls[0]![0].audioBase64)).toBe("opening|middle|tail");
   });
   it("does not treat retained realtime text as success after a recorded realtime failure", async () => {
     await expect(transcribeRecording(client, new Blob(["full audio"]), 1000, {
-      sessionId: "recording-config", liveText: "unfinished text", liveError: new Error("final flush failed")
+      transport: "websocket", liveText: "unfinished text", liveError: new Error("final flush failed")
     })).rejects.toThrow("final flush failed");
     expect(client.transcribe).not.toHaveBeenCalled();
   });
@@ -193,7 +196,7 @@ describe("13-step ASR recording contract", () => {
     await act(async () => { await expect(recorder.start()).rejects.toMatchObject({ name: "MicrophonePermissionError" }); });
     expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce();
     expect(Recorder.starts).toBe(0);
-    expect(client.release).toHaveBeenCalledWith("recording-config");
+    expect(client.release).not.toHaveBeenCalled();
   });
 });
 
@@ -227,8 +230,9 @@ describe("HTTP cancellation", () => {
     expect(await result).toMatchObject({ name: "AbortError" });
     expect(client.transcribe).not.toHaveBeenCalled();
   });
-  it("aborts a pending HTTP request when the recorder is cancelled", async () => {
-    tap.fail = true; await start();
+  it.each(["http", "websocket"])("aborts a pending %s upload when the recorder is cancelled", async transport => {
+    if (transport === "websocket") { await stream(); socket.event({ type: "error", message: "connection lost" }); }
+    else { tap.fail = true; await start(); }
     vi.mocked(client.transcribe).mockImplementationOnce((_input, signal) => new Promise((_resolve, reject) => {
       signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
     }));
@@ -313,4 +317,23 @@ it("shows the empty-audio message for a successfully completed silent voice inpu
     await expect(recorder.finishAndTranscribe()).rejects.toMatchObject({ cause: expect.objectContaining({ code: "empty_audio" }) });
   });
   expect(client.transcribe).not.toHaveBeenCalled();
+});
+
+it.each(["model_config_changed", "unauthorized", "forbidden"])("does not upload on an account or authorization failure: %s", async code => {
+  await stream();
+  await act(async () => socket.event({ type: "error", message: "account unavailable", code }));
+  await act(async () => { await expect(recorder.finishAndTranscribe()).rejects.toThrow("account unavailable"); });
+  expect(client.transcribe).not.toHaveBeenCalled();
+});
+it("falls back to HTTP when the platform PCM worklet cannot initialize", async () => {
+  vi.mocked(client.prepare).mockResolvedValueOnce({ sessionId: "recording-config", transport: "websocket" });
+  tap.fail = true; await start();
+  await act(async () => { await expect(recorder.finishAndTranscribe()).resolves.toMatchObject({ text: "HTTP complete" }); });
+  expect(client.transcribe).toHaveBeenCalledOnce();
+});
+it("uses the full recording if flushing the final PCM block fails", async () => {
+  await stream(); socket.event({ type: "sentence", sentenceId: 1, text: "partial recording", beginMs: 0 });
+  tap.close.mockRejectedValueOnce(new Error("flush timed out"));
+  await act(async () => { await expect(recorder.finishAndTranscribe()).resolves.toMatchObject({ text: "HTTP complete" }); });
+  expect(client.transcribe).toHaveBeenCalledOnce();
 });

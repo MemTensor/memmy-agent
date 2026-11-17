@@ -133,12 +133,12 @@ export function createStreamLiveTranscriber(
         if (lines.some((line) => !finals.has(line.sentenceId!))) {
           fail("Live ASR did not return a complete final transcript"); return;
         }
-        settle({ text: lines.map((line) => line.text).join(" ") }, "done");
+        settle({ text: lines.map((line) => line.text).filter(Boolean).join(" ") }, "done");
         return;
       }
       clearTimeout(readyTimer); // Older Cloud relays confirm acceptance through their first result.
       const text = frame.text.trim();
-      if (!text) return;
+      if (!text && (!options.finalResult || frame.type !== "sentence")) return;
       if (!options.finalResult) {
         options.onLine({ text, startMs: frame.beginMs, endMs: frame.endMs ?? frame.beginMs });
         return;

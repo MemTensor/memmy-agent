@@ -13,7 +13,7 @@
  * a matching status so a dropped microphone never leaves an upstream task
  * hanging on the Cloud.
  */
-import { AsrStreamControlSchema, AsrStreamEventSchema } from "@memmy/local-api-contracts";
+import { ApiErrorCodeSchema, AsrStreamControlSchema, AsrStreamEventSchema } from "@memmy/local-api-contracts";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer } from "ws";
@@ -58,6 +58,8 @@ const CLOSE_NORMAL = 1000;
 const CLOSE_POLICY = 1008;
 const CLOSE_UPSTREAM_GONE = 1011;
 const MAX_BUFFERED_BYTES = 256 * 1024;
+const MAX_FRAME_BYTES = 64 * 1024;
+const UPSTREAM_HANDSHAKE_TIMEOUT_MS = 3_000;
 
 /**
  * Creates the live ASR stream relay.
@@ -66,16 +68,16 @@ const MAX_BUFFERED_BYTES = 256 * 1024;
  * @returns The relay service.
  */
 export function createAsrStreamService(options: CreateAsrStreamServiceOptions): AsrStreamService {
-  const server = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+  const server = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   const bridges = new Set<WebSocket>();
-  const connectUpstream = options.connectUpstream ?? ((url, headers) => new WebSocket(url, { headers, handshakeTimeout: 3_000 }));
+  const connectUpstream = options.connectUpstream ?? ((url, headers) => new WebSocket(url, { headers, handshakeTimeout: UPSTREAM_HANDSHAKE_TIMEOUT_MS }));
 
   return {
     handleUpgrade(request, socket, head) {
       server.handleUpgrade(request, socket, head, (downstream) => {
         bridges.add(downstream);
         downstream.once("close", () => bridges.delete(downstream));
-        bridge(downstream, options, connectUpstream, new URL(request.url ?? "/", "http://localhost").searchParams.get("sessionId"));
+        bridge(downstream, options, connectUpstream, new URLSearchParams(request.url?.split("?")[1]).get("sessionId"));
       });
     },
 
@@ -117,8 +119,10 @@ function bridge(
         return;
       }
       uuid = snapshot.cloudUuid;
-    } catch {
-      sendEvent(downstream, { type: "error", message: "ASR recording session expired", code: "model_config_changed" });
+    } catch (error) {
+      const code = ApiErrorCodeSchema.safeParse((error as { code?: unknown } | null)?.code);
+      sendEvent(downstream, { type: "error", message: error instanceof Error ? error.message : "ASR recording session unavailable",
+        code: code.success ? code.data : "internal" });
       downstream.close(CLOSE_POLICY, "recording session unavailable");
       return;
     }
@@ -129,6 +133,11 @@ function bridge(
       return;
     }
     uuid = options.accountSessionRepository.getCloudUuid();
+  }
+  if (sessionId && uuid !== options.accountSessionRepository.getCloudUuid()) {
+    sendEvent(downstream, { type: "error", message: "ASR account changed", code: "model_config_changed" });
+    downstream.close(CLOSE_POLICY, "account changed");
+    return;
   }
   if (!uuid) {
     sendEvent(downstream, { type: "error", message: "Cloud account is not authenticated" });
@@ -145,11 +154,22 @@ function bridge(
   const queued: Array<{ data: Buffer; binary: boolean }> = [];
   let upstreamOpen = false;
   let bufferedBytes = 0;
+  let closed = false;
+  const clearQueue = () => { closed = true; queued.length = 0; bufferedBytes = 0; };
+  const fail = (message: string, code: "rate_limited" | "model_config_changed") => {
+    if (closed) return;
+    clearQueue();
+    sendEvent(downstream, { type: "error", message, code });
+    downstream.close(CLOSE_UPSTREAM_GONE, message);
+    upstream.close(CLOSE_UPSTREAM_GONE, message);
+  };
+  const accountChanged = () => Boolean(sessionId) && uuid !== options.accountSessionRepository.getCloudUuid();
 
   const forwardUp = (data: Buffer, binary: boolean) => {
+    if (closed) return;
+    if (accountChanged()) { fail("ASR account changed", "model_config_changed"); return; }
     if (upstream.bufferedAmount + bufferedBytes + data.length > MAX_BUFFERED_BYTES) {
-      sendEvent(downstream, { type: "error", message: "ASR stream cannot keep up with audio" });
-      downstream.close(CLOSE_UPSTREAM_GONE, "audio buffer exceeded");
+      fail("ASR stream cannot keep up with audio", "rate_limited");
       return;
     }
     if (upstreamOpen && upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary });
@@ -157,6 +177,8 @@ function bridge(
   };
 
   upstream.on("open", () => {
+    if (closed) { upstream.close(); return; }
+    if (accountChanged()) { fail("ASR account changed", "model_config_changed"); return; }
     upstreamOpen = true;
     for (const frame of queued) upstream.send(frame.data, { binary: frame.binary });
     queued.length = 0;
@@ -165,6 +187,7 @@ function bridge(
   });
 
   downstream.on("message", (raw, isBinary) => {
+    if (closed) return;
     const data = toBuffer(raw);
     if (isBinary) {
       forwardUp(data, true);
@@ -190,22 +213,26 @@ function bridge(
   });
 
   downstream.on("close", (code, reason) => {
+    clearQueue();
     if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {
       upstream.close(normalizeCloseCode(code), reason.toString());
     }
   });
   upstream.on("close", (code, reason) => {
+    clearQueue();
     if (downstream.readyState === WebSocket.OPEN) {
       downstream.close(normalizeCloseCode(code), reason.toString());
     }
   });
   upstream.on("error", (error) => {
+    clearQueue();
     if (downstream.readyState === WebSocket.OPEN) {
       sendEvent(downstream, { type: "error", message: `upstream: ${error.message}` });
       downstream.close(CLOSE_UPSTREAM_GONE, "upstream error");
     }
   });
   downstream.on("error", () => {
+    clearQueue();
     if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) {
       upstream.close(CLOSE_NORMAL, "downstream error");
     }

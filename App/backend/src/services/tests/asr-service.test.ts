@@ -22,51 +22,47 @@ describe("asr service", () => {
       });
       const prepared = await service.prepare();
       expect(prepared.transport).toBe(mode === "account" ? "websocket" : "http");
-      expect(service.getSession(prepared.sessionId).context.source).toBe(mode);
-      service.release(prepared.sessionId);
-      expect(() => service.getSession(prepared.sessionId)).toThrow("expired");
+      if (prepared.transport === "websocket") {
+        expect(service.getSession(prepared.sessionId).context.source).toBe("account");
+        service.release(prepared.sessionId);
+        expect(() => service.getSession(prepared.sessionId)).toThrow("expired");
+      } else expect(prepared).toEqual({ transport: "http" });
     } finally { fixture.dispose(); }
   });
 
-  it.each(["account-b", null])("keeps the original account credential after switching to %s", async next => {
-    const fixture = catalogFixture("account");
-    let token: string | null = "account-a";
-    const uploads: string[] = [];
+  it.each(["account-b", null])("rejects platform fallback after switching account to %s", async next => {
+    const fixture = catalogFixture("account"); let token: string | null = "account-a"; let uploaded = false;
     try {
       const service = createAsrService({
         bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
-        accountSessionRepository: {
-          get: () => ({ authenticated: true, profile: { userId: "owner-a" } }) as any,
-          getCloudUuid: () => token
-        },
+        accountSessionRepository: { get: () => ({ authenticated: true, profile: { userId: "owner-a" } }) as any, getCloudUuid: () => token },
         memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
-        cloudClient: { transcribeAudio: async input => { uploads.push(input.uuid); return { text: "done", modelId: "account-asr", provider: "memmy_account" }; } }
+        cloudClient: { transcribeAudio: async () => { uploaded = true; return { text: "wrong account", modelId: "asr", provider: "memmy_account" }; } }
       });
-      const session = await service.prepare();
-      token = next;
-      await service.transcribe({ sessionId: session.sessionId, audioBase64: "AQ==", mimeType: "audio/wav" });
-      expect(uploads).toEqual(["account-a"]);
-    } finally { fixture.dispose(); }
-  });
-
-  it("does not borrow a later login when the prepared session had no account credential", async () => {
-    const fixture = catalogFixture("account");
-    let token: string | null = null;
-    let uploaded = false;
-    try {
-      const service = createAsrService({
-        bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
-        accountSessionRepository: {
-          get: () => ({ authenticated: true, profile: { userId: "owner-a" } }) as any,
-          getCloudUuid: () => token
-        },
-        memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
-        cloudClient: { transcribeAudio: async () => { uploaded = true; return { text: "wrong account", modelId: "account-asr", provider: "memmy_account" }; } }
-      });
-      const session = await service.prepare(); token = "account-b";
-      await expect(service.transcribe({ sessionId: session.sessionId, audioBase64: "AQ==", mimeType: "audio/wav" }))
-        .rejects.toMatchObject({ code: "unauthorized" });
+      const prepared = await service.prepare(); token = next;
+      if (prepared.transport !== "websocket") throw new Error("expected platform model");
+      await expect(service.transcribe({ sessionId: prepared.sessionId, audioBase64: "AQ==", mimeType: "audio/wav" }))
+        .rejects.toMatchObject({ code: "model_config_changed" });
       expect(uploaded).toBe(false);
+    } finally { fixture.dispose(); }
+  });
+  it("uses platform HTTP for fallback even if the assignment changes to BYOK", async () => {
+    const fixture = catalogFixture("account"); const uploads: string[] = [];
+    try {
+      const service = createAsrService({
+        bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
+        accountSessionRepository: { get: () => ({ authenticated: true, profile: { userId: "owner-a" } }) as any, getCloudUuid: () => "account-a" },
+        memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+        fetch: async () => { throw new Error("BYOK must not receive platform audio"); },
+        cloudClient: { transcribeAudio: async input => { uploads.push(input.uuid); return { text: "HTTP complete", modelId: "asr", provider: "memmy_account" }; } }
+      });
+      const prepared = await service.prepare();
+      if (prepared.transport !== "websocket") throw new Error("expected platform model");
+      const config = YAML.parse(readFileSync(fixture.configPath, "utf8")); config.modelAssignments.account.asr = "byok-asr";
+      writeFileSync(fixture.configPath, YAML.stringify(config));
+      await expect(service.transcribe({ sessionId: prepared.sessionId, audioBase64: "AQ==", mimeType: "audio/wav" }))
+        .resolves.toMatchObject({ text: "HTTP complete", source: "account" });
+      expect(uploads).toEqual(["account-a"]);
     } finally { fixture.dispose(); }
   });
 

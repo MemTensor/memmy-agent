@@ -2,6 +2,7 @@
 import {
   ASR_MAX_REQUEST_BYTES,
   AsrSessionSchema,
+  AsrSessionHandleSchema,
   AsrTranscriptionInputSchema,
   AsrTranscriptionResponseSchema
 } from "@memmy/local-api-contracts";
@@ -21,7 +22,7 @@ export function registerAsrRoutes(app: FastifyInstance, options: RegisterAsrRout
     withErrorEnvelope(async (_request, reply) => reply.send(AsrSessionSchema.parse(await options.asr.prepare()))));
   app.delete("/api/asr/sessions/:sessionId", { preHandler: options.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
-      const { sessionId } = AsrSessionSchema.parse(request.params);
+      const { sessionId } = AsrSessionHandleSchema.parse(request.params);
       options.asr.release(sessionId);
       return reply.send({ sessionId });
     }));

@@ -69,3 +69,25 @@ it.each(['resolve', 'reject'])('ignores an old final result or error after a new
   expect(app.state.agent.composerDraftsByScope[next]).toBe('新会话继续录入');
   expect(app.state.agent.operationErrorNotice).toBeNull();
 });
+
+it('ignores a second stop while the same final result is in flight', async () => {
+  await startWithText();
+  let complete!: (value: any) => void;
+  capture.finish.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+  await act(async () => { mic().click(); mic().click(); });
+  expect(capture.finish).toHaveBeenCalledOnce();
+  await act(async () => complete({ text: '最终文字' }));
+  expect(app.state.agent.composerDraftsByScope[scope()]).toBe('最终文字');
+  expect(app.state.agent.operationErrorNotice).toBeNull();
+});
+it('cancels capture when the entire draft is cleared and drops late revisions', async () => {
+  await startWithText();
+  const input = document.querySelector<HTMLTextAreaElement>('textarea')!;
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, '');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  expect(capture.cancel).toHaveBeenCalledOnce();
+  act(() => capture.options!.live!.onLine({ sentenceId: 1, text: 'late result', startMs: 0, endMs: 1000 }));
+  expect(app.state.agent.composerDraftsByScope[scope()] ?? '').toBe('');
+});

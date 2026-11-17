@@ -154,7 +154,7 @@ describe("HomePage", () => {
     expect(chipStyles).toMatch(/\.composer-command-chip__leading\s*{[^}]*display:\s*inline-flex;/s);
     expect(source.match(/<ComposerCommandChip/g)).toHaveLength(2);
     expect(source.match(/value=\{composerInput\}/g)).toHaveLength(2);
-    expect(source).toContain("setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));");
+    expect(source).toContain('setComposerDraftForScope(chatScopeKey, buildComposerCommandDraft(selectedComposerCommand, value), "manual");');
     expect(source).toContain("selectedComposerCommandsByScope[chatScopeKey] ?? null");
     expect(source).toContain("setSelectedComposerCommandForScope(chatScopeKey, COMPOSER_GOAL_COMMAND);");
     expect(source).toContain('label={t("home.command.goalChip")}');
@@ -2262,6 +2262,10 @@ describe("voice transcript editing", () => {
     const partial = replaceVoiceTranscript(existing, null, "hello");
     expect(partial.value).toBe(existing + "hello");
     expect(replaceVoiceTranscript(partial.value, partial.range, "hello world").value).toBe(existing + "hello world");
+  });
+  it("removes a retracted provisional sentence without clearing the existing draft", () => {
+    const partial = replaceVoiceTranscript("draft", null, "noise");
+    expect(replaceVoiceTranscript(partial.value, partial.range, "").value).toBe("draft\n");
   });
   it("tracks insertion before the live range and preserves text after it", () => {
     const initial = replaceVoiceTranscript("note", null, "hello");

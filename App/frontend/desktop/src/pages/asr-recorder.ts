@@ -55,7 +55,6 @@ export interface AsrRecorder {
 
 /** A stopped recording and the result of its optional realtime pass. */
 export interface AsrStoppedRecording {
-  sessionId?: string;
   transport?: "http" | "websocket";
   /** Present only after the live stream completed successfully. */
   liveText?: string;
@@ -82,21 +81,27 @@ export async function transcribeRecording(
   asrClient: AsrClient,
   recording: Blob,
   durationMs: number | undefined,
-  options: { diarization?: boolean; emptyAudioMessage?: string; signal?: AbortSignal } & Pick<AsrStoppedRecording, "sessionId" | "transport" | "liveText" | "liveError"> = {}
+  options: { diarization?: boolean; emptyAudioMessage?: string; signal?: AbortSignal; sessionId?: string } & Pick<AsrStoppedRecording, "transport" | "liveText" | "liveError"> = {}
 ): Promise<AsrRecordingTranscription> {
   options.signal?.throwIfAborted();
-  if (options.transport === "websocket" || (!options.transport && (options.liveText || options.liveError))) {
+  if (options.transport === "websocket") {
     if (options.liveText && !options.liveError) {
       return { text: options.liveText, transcribedAt: new Date().toISOString(), recording,
         recordingMimeType: recording.type || "audio/webm", durationMs };
     }
-    const cause = options.liveError ?? Object.assign(
-      new Error(options.emptyAudioMessage ?? EMPTY_AUDIO_ERROR_MESSAGE),
-      { code: "empty_audio" }
-    );
-    const error = new Error(cause.message, { cause });
-    error.name = "AsrTranscriptionError";
-    throw error;
+    // Failed realtime input may retry the complete recording once, under its original account.
+    const mayFallback = options.liveError && options.sessionId
+      && !["model_config_changed", "unauthorized", "forbidden"].includes((options.liveError as { code?: string }).code ?? "");
+    if (!mayFallback) {
+      const cause = options.liveError ?? Object.assign(
+        new Error(options.emptyAudioMessage ?? EMPTY_AUDIO_ERROR_MESSAGE),
+        { code: "empty_audio" }
+      );
+      const error = new Error(cause.message, { cause });
+      error.name = "AsrTranscriptionError";
+      Object.assign(error, { code: (error.cause as { code?: string }).code });
+      throw error;
+    }
   }
   try {
     if (recording.size > ASR_MAX_AUDIO_BYTES) {
@@ -107,7 +112,7 @@ export async function transcribeRecording(
     const encoded = await blobToAudioBase64(recording, options.emptyAudioMessage);
     options.signal?.throwIfAborted();
     const result = await asrClient.transcribe({
-      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.transport === "websocket" && options.sessionId ? { sessionId: options.sessionId } : {}),
       audioBase64: encoded.audioBase64,
       mimeType: encoded.mimeType,
       durationMs,
@@ -125,6 +130,7 @@ export async function transcribeRecording(
     const httpError = caught instanceof Error ? caught : new Error(String(caught));
     const error = new Error(httpError.message, { cause: httpError });
     error.name = "AsrTranscriptionError";
+    Object.assign(error, { code: (error.cause as { code?: string }).code });
     throw error;
   }
 }
@@ -273,7 +279,7 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       setStatus("checkingPermission");
       const prepared = options.voiceInput ? await asrClient.prepare() : null;
       const sessionId = prepared?.sessionId;
-      const transport = prepared?.transport ?? (options.voiceInput ? "http" : null);
+      const transport = prepared?.transport ?? null;
       if (generation !== generationRef.current) {
         if (sessionId) void asrClient.release(sessionId).catch(() => undefined);
         return;
@@ -318,8 +324,8 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
           onLine: (line) => { if (generation === generationRef.current) liveOptionsRef.current?.onLine(line); },
           onError: (liveError) => {
             if (generation !== generationRef.current) return;
-            liveOptionsRef.current?.onError?.(liveError);
             if (!options.voiceInput) {
+              liveOptionsRef.current?.onError?.(liveError);
               if (recorderRef.current && liveRef.current === streamed) liveRef.current = createChunkedLiveTranscriber(asrClient, {
                 sampleRate: PCM_TAP_SAMPLE_RATE,
                 onLine: line => liveOptionsRef.current?.onLine(line),
@@ -341,7 +347,6 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
             if (streamed && options.voiceInput) {
               liveFailureRef.current = tapError;
               setError(tapError);
-              liveOptionsRef.current?.onError?.(tapError);
               streamed.cancel();
               if (liveRef.current === streamed) liveRef.current = null;
             }
@@ -362,7 +367,6 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
           if (streamed && options.voiceInput) {
             liveFailureRef.current = caught instanceof Error ? caught : new Error(String(caught));
             setError(liveFailureRef.current);
-            liveOptionsRef.current?.onError?.(liveFailureRef.current);
             streamed.cancel();
             if (liveRef.current === streamed) liveRef.current = null;
           }
@@ -436,7 +440,7 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
     const generation = generationRef.current;
     try {
       setStatus("transcribing");
-      const { recording: blob, durationMs, liveText, liveError, sessionId } = await stopCapture(recorder);
+      const { recording: blob, durationMs, liveText, liveError } = await stopCapture(recorder);
       // The recording is already complete at this point. Notify the caller
       // before size checks and encoding so it can keep the audio visible even
       // when the final ASR request will be rejected.
@@ -445,7 +449,7 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       const controller = new AbortController();
       transcriptionAbortRef.current = controller;
       const result = await transcribeRecording(asrClient, blob, durationMs, {
-        ...(options.voiceInput ? { signal: controller.signal, sessionId,
+        ...(options.voiceInput ? { signal: controller.signal, sessionId: sessionRef.current ?? undefined,
           transport: transportRef.current ?? undefined, liveText, liveError } : {}),
         diarization: transcribeOptions.diarization,
         emptyAudioMessage: options.emptyAudioMessage
@@ -454,6 +458,7 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       transcriptionAbortRef.current = null;
       releaseSession();
       chunksRef.current = [];
+      setError(null);
       setStatus("idle");
       return result;
     } catch (caught) {
@@ -484,8 +489,7 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
     try {
       setStatus("transcribing");
       const stopped = await stopCapture(recorder);
-      sessionRef.current = null; // The handover owns this snapshot until the selected adapter completes.
-      transportRef.current = null;
+      releaseSession();
       chunksRef.current = [];
       setStatus("idle");
       return stopped;
@@ -500,12 +504,11 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       streamRef.current = null;
       throw nextError;
     }
-  }, [releaseLiveCapture, releaseSession]);
+  }, [options.voiceInput, releaseLiveCapture, releaseSession]);
 
   /** Ends capture and the live pass, leaving the recording in hand. */
   async function stopCapture(recorder: MediaRecorder): Promise<AsrStoppedRecording> {
     const generation = generationRef.current;
-    const sessionId = sessionRef.current;
     const transport = transportRef.current;
     const stream = streamRef.current;
     const tap = tapRef.current;
@@ -535,7 +538,6 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       recording: blob,
       recordingMimeType: blob.type || "audio/webm",
       durationMs,
-      ...(sessionId ? { sessionId } : {}),
       ...(transport ? { transport } : {}),
       ...(options.voiceInput && liveFailureRef.current ? { liveError: liveFailureRef.current } : {}),
       ...(options.voiceInput && liveResult?.text ? { liveText: liveResult.text } : {})

@@ -136,6 +136,19 @@ describe("createStreamLiveTranscriber", () => {
     expect(socket.closes.at(-1)).toEqual({ code: 1000, reason: "done" });
   });
 
+  it("accepts an empty final sentence as a retraction instead of retaining a stale partial", async () => {
+    const socket = new FakeSocket(); const onLine = vi.fn(); const onError = vi.fn();
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine, onError });
+    transcriber.push(block(160)); socket.open();
+    socket.receive({ type: "partial", sentenceId: 1, text: "noise", beginMs: 0 });
+    socket.receive({ type: "sentence", sentenceId: 1, text: "", beginMs: 0 });
+    socket.receive({ type: "sentence", sentenceId: 2, text: "real speech", beginMs: 100 });
+    const finishing = transcriber.finish(); socket.receive({ type: "finished" });
+    await expect(finishing).resolves.toEqual({ text: "real speech" });
+    expect(onError).not.toHaveBeenCalled();
+    expect(onLine).toHaveBeenCalledWith(expect.objectContaining({ sentenceId: 1, text: "" }));
+  });
+
   it("fails when the stream finishes with only a provisional sentence", async () => {
     const socket = new FakeSocket();
     const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: () => undefined });

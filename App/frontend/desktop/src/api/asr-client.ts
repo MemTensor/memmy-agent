@@ -1,5 +1,6 @@
 import {
   AsrSessionSchema,
+  AsrSessionHandleSchema,
   AsrTranscriptionInputSchema,
   AsrTranscriptionResponseSchema,
   type AsrTranscriptionInput,
@@ -31,7 +32,7 @@ export function createHttpAsrClient(config: RuntimeConfig): AsrClient {
     },
     async release(sessionId) {
       await requestJson({ config, path: `/api/asr/sessions/${encodeURIComponent(sessionId)}`,
-        schema: AsrSessionSchema, init: { method: "DELETE", signal: AbortSignal.timeout(5_000) } });
+        schema: AsrSessionHandleSchema, init: { method: "DELETE", signal: AbortSignal.timeout(5_000) } });
     },
     async transcribe(input, signal) {
       return requestJson({

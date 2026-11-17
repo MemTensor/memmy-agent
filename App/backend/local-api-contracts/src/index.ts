@@ -1254,13 +1254,17 @@ export const ASR_MAX_AUDIO_BYTES = 15 * 1024 * 1024;
 /** Base64 inflates by 4/3; the route needs headroom for that plus the JSON envelope. */
 export const ASR_MAX_REQUEST_BYTES = Math.ceil(ASR_MAX_AUDIO_BYTES * 4 / 3) + 64 * 1024;
 
-export const AsrSessionSchema = z.object({
-    sessionId: z.string().uuid(),
-    transport: z.enum(["http", "websocket"]).optional()
-});
+/** Opaque platform realtime session, valid for three hours and released after capture. */
+export const AsrSessionHandleSchema = z.object({ sessionId: z.string().uuid() });
+/** BYOK keeps the existing HTTP path without creating a realtime session. */
+export const AsrSessionSchema = z.discriminatedUnion("transport", [
+    AsrSessionHandleSchema.extend({ transport: z.literal("websocket") }),
+    z.object({ transport: z.literal("http"), sessionId: z.undefined().optional() })
+]);
 export type AsrSession = z.infer<typeof AsrSessionSchema>;
 
 export const AsrTranscriptionInputSchema = z.object({
+    /** Present only for the HTTP fallback of a prepared platform realtime input. */
     sessionId: z.string().uuid().optional(),
     audioBase64: z.string().min(1).max(Math.ceil(ASR_MAX_AUDIO_BYTES * 4 / 3)),
     mimeType: z.string().min(1),
