@@ -232,7 +232,6 @@ export function CreateProjectModal(props: {
           {shareAvailable && props.onJoinProject ? (
             <Button
               variant="secondary"
-              size="sm"
               data-demo-guide={demo ? "create-join" : undefined}
               onClick={props.onJoinProject}
             >

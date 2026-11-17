@@ -38,16 +38,17 @@ describe("home starter actions", () => {
     ));
   }
 
-  it("shows three generic prompts without active plugin scenarios", async () => {
+  it("shows four generic prompts without active plugin scenarios", async () => {
     await render([]);
     const buttons = [...container.querySelectorAll<HTMLButtonElement>(".home-prompt-suggestions button")];
     expect(buttons.map((button) => button.textContent)).toEqual([
-      zhCNMessages["home.suggestion.one"],
+      zhCNMessages["home.suggestion.four"],
       zhCNMessages["home.suggestion.two"],
+      zhCNMessages["home.suggestion.one"],
       zhCNMessages["home.suggestion.three"]
     ]);
     await act(async () => buttons[0]?.click());
-    expect(onSelect).toHaveBeenCalledWith(zhCNMessages["home.suggestionPrompt.one"]);
+    expect(onSelect).toHaveBeenCalledWith(zhCNMessages["home.suggestionPrompt.four"]);
   });
 
   it("replaces generic prompts with the installed plugin's scenarios", async () => {

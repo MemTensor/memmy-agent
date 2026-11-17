@@ -7,7 +7,7 @@ import { useConversationFeatures } from "./conversation-features.js";
 import { applySidebarRecordingAction, sidebarRecordingStatus } from "./recording-entry.js";
 import { pendingAgentQuestion, AgentQuestionCard, AgentQuestionActiveRequestContext } from "./agent-question-card.js";
 /** Home page module. */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type SetStateAction, type UIEvent } from "react";
 import { resolveThinkingEnabled, resolveThinkingLevel, type AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { createHttpCollabClient, type CollabProjectSession } from "../api/collab-client.js";
@@ -24,9 +24,9 @@ import {
 } from "../app/collab-demo-guide-store.js";
 import { mentionEmptyLabelKey } from "./collab-session-mention.js";
 import { CollabShareToggle } from "./collab-share-toggle.js";
-import { getCollabProjectsSnapshot, selectCollabProject, sharedProjectFor, subscribeCollabProjects } from "../app/collab-projects-store.js";
+import { getCollabProjectsSnapshot, requestCreateProject, selectCollabProject, sharedProjectFor, subscribeCollabProjects } from "../app/collab-projects-store.js";
 import { handOffDraftShare } from "../app/collab-share-intent.js";
-import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
+import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
 import { FOCUSED_AGENT_CHAT_STORAGE_KEY, clearFocusedAgentTarget, isAccountTokenQuotaExhausted, normalizeAgentChatId, readLaunchAgentChatId, removeLaunchAgentChatIdFromUrl } from "../app/routes.js";
 import {
@@ -101,7 +101,6 @@ import {
 import { AgentAttachmentCard, splitAgentAttachmentName } from "./agent-file-attachment-chip.js";
 import { AgentGoalBar, type AgentGoalControlRequest } from "./agent-goal-bar.js";
 import { AgentQueuedMessageList, queuedComposerEditDecision } from "./agent-queued-message-list.js";
-import { agentOutputSignature, useStalledOutputShimmer } from "./agent-stall-shimmer.js";
 import { AgentThreadMessages, ChatImageLightbox } from "./agent-thread-messages.js";
 import { AgentThreadPanel, PLUGIN_RECORDING_TAB_ID, useAgentThreadPanel } from "./agent-thread-panel.js";
 import { hasPendingBrowserOpen, MEMMY_BROWSER_OPEN_EVENT } from "./browser-panel.js";
@@ -132,7 +131,7 @@ import { HomeStarterActions } from "./home-starter-actions.js";
 import { LlmProviderLogo } from "./llm-provider-logo.js";
 import { Mic, Pause, Plus, Send } from "./memory/memory-prototype-icons.js";
 import { resolveWorkspaceEnvironmentScope, useWorkspaceEnvironment } from "./use-workspace-environment.js";
-import { ArrowDown, Check, ChevronDown, Folder, MessageSquare, PanelRight, Plus as LucidePlus, RotateCw, Target, X } from "lucide-react";
+import { ArrowDown, Check, Folder, MessageSquare, PanelRight, Plus as LucidePlus, RotateCw, Search, Target, X } from "lucide-react";
 
 export { agentChatScopeKey, updateComposerDraftForScope };
 export { hydrateAgentThreadInBackground };
@@ -232,7 +231,6 @@ const TRANSLATABLE_AGENT_ERROR_KEYS = new Set<MessageKey>([
   "home.composer.emptyMessage",
   "home.goal.controlUnknown",
   "home.modelSelector.unavailable",
-  "home.project.desktopRequired",
   "collab.share.failed",
   "collab.create.shareQuotaExceeded",
   "home.queue.removeFailed",
@@ -1019,7 +1017,6 @@ export function HomePage() {
   const [historyDagPanel, setHistoryDagPanel] = useState<HistoryDagPanelState>({ open: false });
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
-  const [projectPickerOperationId, setProjectPickerOperationId] = useState<string | null>(null);
   const [firstEncounterRelayChatId, setFirstEncounterRelayChatId] = useState<string | null>(() => (
     readFirstEncounterRelayChat(typeof window === "undefined" ? undefined : window.sessionStorage)
   ));
@@ -1069,8 +1066,6 @@ export function HomePage() {
   const pluginConversationCreationRef = useRef<Promise<string | null> | null>(null);
   const queueRemoveLocksRef = useRef<Set<string>>(new Set());
   const queueSteerLocksRef = useRef<Set<string>>(new Set());
-  const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
-  draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
@@ -1583,11 +1578,6 @@ export function HomePage() {
     stopTurnForDemoRef.current?.();
   }, [demoGuide.phase, demoGuide.status]);
 
-  useStalledOutputShimmer(
-    conversationContentRef,
-    (isCurrentAgentRunning || isCurrentGoalActive) && !pendingCardKey,
-    agentOutputSignature(state.agent.messages)
-  );
   const currentTaskCompletedUnseen = state.agent.chatWindowFocused && state.agent.chatViewVisible && !state.agent.blankDraftActive
     ? false
     : state.agent.tasks.find((task) => task.chatId === state.agent.currentChatId)?.completedUnseen;
@@ -2602,50 +2592,6 @@ export function HomePage() {
     setProjectPickerOpen(false);
   }
 
-  async function selectOtherProjectFolder() {
-    if (state.agent.currentChatId || messageSendInFlight || projectPickerOperationId || !clients?.memmyAgent) {
-      return;
-    }
-    if (!window.memmy?.selectProjectDirectory) {
-      dispatch(agentActions.operationFailed("chat", createAgentOperationError({
-        source: "new-chat",
-        message: "home.project.desktopRequired",
-        scopeKey: chatScopeKey
-      })));
-      return;
-    }
-    const operationId = `draft-project-picker-${crypto.randomUUID()}`;
-    const scopeKey = chatScopeKey;
-    const revision = state.agent.draftTargetRevisionByScope[scopeKey] ?? 0;
-    setProjectPickerOperationId(operationId);
-    try {
-      await runProjectTargetFolderSelection({
-        selectDirectory: () => window.memmy!.selectProjectDirectory(),
-        mutateProject: (operation) => taskStateCoordinator.mutateProject(operation),
-        onCommitted: (project) => {
-          const currentRevision = draftTargetRevisionRef.current[scopeKey] ?? 0;
-          if (scopeKey === chatScopeKey && currentRevision === revision) {
-            dispatch(agentActions.draftTargetUpdated(scopeKey, {
-              kind: "project",
-              projectId: project.id
-            }));
-          }
-          setProjectPickerOpen(false);
-        },
-        onError: (error) => dispatch(agentActions.operationFailed("chat", createAgentOperationError({
-          source: "new-chat",
-          message: error instanceof MemmyAgentRequestError
-            ? error.code ?? "project_operation_failed"
-            : "network_unavailable",
-          scopeKey
-        }))),
-        onRefresh: () => taskStateCoordinator.refreshTaskState({ reason: "manual", state: state.agent })
-      });
-    } finally {
-      setProjectPickerOperationId((current) => current === operationId ? null : current);
-    }
-  }
-
   function runExactLocalSlashCommand(command: string): boolean {
     if (!pendingAttachments.length && features.runCommand(command)) { setCurrentComposerDraft(""); return true; }
     const normalized = command.trim().toLowerCase();
@@ -3621,7 +3567,7 @@ export function HomePage() {
           <div className="home-empty-brand text-center">
             <div className="conversation-feature-cards agent-confirmation-dock">{features.cards}</div>
             <div className="home-empty-brand-mascot flex justify-center">
-              <Memmy pose="think" size={165} className="memmy-bob" />
+              <Memmy pose="think" size={216} className="memmy-bob" />
             </div>
             {/* 草稿落在某个项目上时，标题带出项目名：悬停显示完整路径，长名字换行不撑破版面 */}
             <h1 className="home-empty-title text-2xl font-bold text-text-ink">
@@ -3635,6 +3581,9 @@ export function HomePage() {
                 </>
               ) : t("home.subtitle")}
             </h1>
+          </div>
+          <div className="home-empty-column home-empty-suggestions">
+            <HomeStarterActions scenarios={features.scenarios} onSelect={selectHomeStarter} />
           </div>
           <div className="home-empty-column home-empty-input">
             <AgentOperationErrorSlot message={agentError} />
@@ -3711,6 +3660,15 @@ export function HomePage() {
                   onPaste={handleComposerPaste}
                 />
                 <div className="composer-actions absolute bottom-3 right-4 z-50">
+                  <button
+                    type="button"
+                    aria-label={t("home.media.menu")}
+                    title={t("home.media.menu")}
+                    onClick={openMediaFilePicker}
+                    className="composer-action-btn home-composer-add-button"
+                  >
+                    <Plus size={15} strokeWidth={2} />
+                  </button>
                   <AgentModelSelector
                     mode={modelWorkspaceMode}
                     scopeKey={modelSelectionScopeKey}
@@ -3718,15 +3676,6 @@ export function HomePage() {
                     seedConfig={state.modelConfig}
                     onDefaultModelSelected={persistDefaultModel}
                   />
-                  <button
-                    type="button"
-                    aria-label={t("home.media.menu")}
-                    title={t("home.media.menu")}
-                    onClick={openMediaFilePicker}
-                    className="composer-action-btn"
-                  >
-                    <Plus size={15} strokeWidth={2} />
-                  </button>
                   <button
                     type="button"
                     aria-label={t("home.voiceInput")}
@@ -3755,11 +3704,14 @@ export function HomePage() {
                   projects={state.agent.projects}
                   sessions={state.agent.sessions}
                   registryState={state.agent.projectRegistryState}
-                  disabled={messageSendInFlight || projectPickerOperationId != null}
+                  disabled={messageSendInFlight}
                   onToggle={() => setProjectPickerOpen((open) => !open)}
                   onClose={() => setProjectPickerOpen(false)}
                   onSelect={selectDraftTarget}
-                  onChooseOther={() => void selectOtherProjectFolder()}
+                  onCreateProject={() => {
+                    setProjectPickerOpen(false);
+                    requestCreateProject();
+                  }}
                 />
                 {shareToggle}
                 <AgentWorkspaceContext
@@ -3774,11 +3726,7 @@ export function HomePage() {
             </div>
           </div>
           <div className="home-empty-column home-empty-footer">
-            <HomeStarterActions scenarios={features.scenarios} onSelect={selectHomeStarter} />
-            <div className="home-empty-status-area">
-              {statusText && <p className="text-center text-xs text-text-ink/45 mt-4">{statusText}</p>}
-              <p className="text-center text-[11px] text-text-ink/40 mt-4">{t("home.notice")}</p>
-            </div>
+            {statusText && <p className="home-empty-connection-status" role="status">{statusText}</p>}
             <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
           </div>
         </section>
@@ -3982,6 +3930,15 @@ export function HomePage() {
                     />
                     <div className="agent-composer-toolbar">
                       <div className="agent-composer-toolbar__leading">
+                        <button
+                          type="button"
+                          aria-label={t("home.media.menu")}
+                          title={t("home.media.menu")}
+                          onClick={openMediaFilePicker}
+                          className="composer-action-btn"
+                        >
+                          <Plus size={15} strokeWidth={2} />
+                        </button>
                         {selectedComposerCommand ? (
                           <ComposerCommandChip
                             command={selectedComposerCommand}
@@ -4000,15 +3957,6 @@ export function HomePage() {
                           seedConfig={state.modelConfig}
                           onDefaultModelSelected={persistDefaultModel}
                         />
-                        <button
-                          type="button"
-                          aria-label={t("home.media.menu")}
-                          title={t("home.media.menu")}
-                          onClick={openMediaFilePicker}
-                          className="composer-action-btn"
-                        >
-                          <Plus size={15} strokeWidth={2} />
-                        </button>
                         <button
                           type="button"
                           aria-label={t("home.voiceInput")}
@@ -4033,7 +3981,6 @@ export function HomePage() {
                   </div>
                 </div>
               </div>
-              <p className="agent-conversation-disclaimer">{t("home.notice")}</p>
               <input ref={fileInputRef} type="file" accept={AGENT_MEDIA_ACCEPT} multiple hidden className="hidden" onChange={(event) => void selectMedia(event)} />
             </div>
           </div>
@@ -4101,53 +4048,6 @@ export function workspaceFolderName(rootPath: string): string {
   return displayPath.slice(displayPath.lastIndexOf("/") + 1) || displayPath;
 }
 
-/** Approximate UI width: CJK glyphs count double so paths collapse before the leaf is clipped. */
-function workspacePathDisplayWidth(value: string): number {
-  let width = 0;
-  for (const char of value) {
-    width += (char.codePointAt(0) ?? 0) > 0xff ? 2 : 1;
-  }
-  return width;
-}
-
-function truncateWorkspacePathToWidth(value: string, maxWidth: number): string {
-  if (workspacePathDisplayWidth(value) <= maxWidth) return value;
-  let width = 0;
-  let cut = 0;
-  for (const char of value) {
-    const next = width + ((char.codePointAt(0) ?? 0) > 0xff ? 2 : 1);
-    if (next > Math.max(1, maxWidth - 1)) break;
-    width = next;
-    cut += char.length;
-  }
-  return `${value.slice(0, Math.max(1, cut))}…`;
-}
-
-/**
- * Single-line path label that always keeps the leaf folder name intact.
- * Collapse the middle/prefix first (`~/…/leaf`), never CSS-truncate the leaf.
- */
-export function formatCompactWorkspacePath(rootPath: string, maxWidth = 28): string {
-  const displayPath = formatWorkspaceDisplayPath(rootPath).replace(/\/+$/, "");
-  const folder = workspaceFolderName(rootPath);
-  if (workspacePathDisplayWidth(folder) >= maxWidth) {
-    return truncateWorkspacePathToWidth(folder, maxWidth);
-  }
-  if (workspacePathDisplayWidth(displayPath) <= maxWidth) {
-    return displayPath;
-  }
-
-  const homePrefixed = displayPath.startsWith("~/");
-  const drivePrefixed = /^[A-Za-z]:\//.test(displayPath);
-  const compact = homePrefixed
-    ? `~/…/${folder}`
-    : drivePrefixed
-      ? `${displayPath.slice(0, 2)}/…/${folder}`
-      : `…/${folder}`;
-  if (workspacePathDisplayWidth(compact) <= maxWidth) return compact;
-  return folder;
-}
-
 export const PROJECT_TARGET_PICKER_MAX_RECENT = 10;
 
 type ProjectPickerSessionActivity = Pick<MemmyAgentSessionSummary, "projectId" | "updatedAt" | "run_started_at">;
@@ -4201,43 +4101,8 @@ export const resolveProjectTargetPickerActiveIndex = (
   selectedKey: string | null
 ): number => Math.max(0, selectedKey ? itemKeys.indexOf(selectedKey) : 0);
 
-export interface RunProjectTargetFolderSelectionInput {
-  selectDirectory: NonNullable<Window["memmy"]>["selectProjectDirectory"];
-  mutateProject: AgentTaskStateCoordinator["mutateProject"];
-  onCommitted: (project: MemmyAgentProject) => void;
-  onError: (error: unknown) => void;
-  onRefresh: () => void;
-}
-
-export const runProjectTargetFolderSelection = async (
-  input: RunProjectTargetFolderSelectionInput
-): Promise<"canceled" | "committed" | "failed"> => {
-  try {
-    const selected = await input.selectDirectory();
-    if (selected.canceled) return "canceled";
-    const result = await input.mutateProject({
-      kind: "create",
-      input: { mode: "existing", path: selected.path }
-    });
-    if (result.status !== "committed" || !result.project) {
-      throw new MemmyAgentRequestError(
-        "project registration failed",
-        result.status === "rejected" ? 409 : 503,
-        result.status === "rejected" ? result.code : "network_unavailable"
-      );
-    }
-    input.onCommitted(result.project);
-    return "committed";
-  } catch (error) {
-    input.onError(error);
-    input.onRefresh();
-    return "failed";
-  }
-};
-
-const preserveProjectTargetPickerSearchFocus = (event: ReactPointerEvent<HTMLButtonElement>) => {
-  event.preventDefault();
-};
+const projectTargetPickerName = (project: MemmyAgentProject): string =>
+  project.name.trim() || workspaceFolderName(project.rootPath);
 
 export function ProjectTargetPicker(props: {
   open: boolean;
@@ -4250,7 +4115,7 @@ export function ProjectTargetPicker(props: {
   onToggle: () => void;
   onClose: () => void;
   onSelect: (target: WebuiSessionTarget) => void;
-  onChooseOther: () => void;
+  onCreateProject: () => void;
 }) {
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
@@ -4265,15 +4130,14 @@ export function ProjectTargetPicker(props: {
   const selectedLabel = props.registryState === "corrupt"
     ? t("home.project.registryUnavailable")
     : props.selectedProject
-      // 项目可以重命名，显示名称以项目名为准；没有名称时才退回目录名。
-      ? props.selectedProject.name.trim() || workspaceFolderName(props.selectedProject.rootPath)
+      ? projectTargetPickerName(props.selectedProject)
       : t("home.project.optional");
   const visibleProjects = props.registryState === "ready"
     ? filterProjectTargetPickerProjects(props.projects, query, props.sessions)
     : [];
   const itemKeys = [
     ...visibleProjects.map((project) => `project:${project.id}`),
-    ...(props.registryState === "ready" ? ["new"] : []),
+    ...(props.registryState === "ready" ? ["create"] : []),
     ...(props.target.kind === "project" ? ["standalone"] : [])
   ];
   const selectedKey = props.target.kind === "project" ? `project:${props.target.projectId}` : null;
@@ -4311,8 +4175,8 @@ export function ProjectTargetPicker(props: {
   const activateItem = (key: string | undefined) => {
     if (key?.startsWith("project:")) {
       props.onSelect({ kind: "project", projectId: key.slice("project:".length) });
-    } else if (key === "new") {
-      props.onChooseOther();
+    } else if (key === "create") {
+      props.onCreateProject();
     } else if (key === "standalone") {
       props.onSelect({ kind: "standalone" });
     }
@@ -4342,15 +4206,13 @@ export function ProjectTargetPicker(props: {
     }
   };
 
-  const triggerActive = Boolean(props.selectedProject) || props.open;
-
   return (
     <div ref={rootRef} className="home-project-picker">
       <div className={`home-project-picker__control${props.selectedProject ? " home-project-picker__control--selected" : ""}${props.open ? " home-project-picker__control--open" : ""}`}>
         <button
           ref={triggerRef}
           type="button"
-          className={`home-project-picker__trigger${triggerActive ? " home-project-picker__trigger--selected" : ""}`}
+          className={`home-project-picker__trigger${props.selectedProject ? " home-project-picker__trigger--selected" : ""}`}
           disabled={props.disabled}
           aria-expanded={props.open}
           aria-haspopup="listbox"
@@ -4362,11 +4224,6 @@ export function ProjectTargetPicker(props: {
             {props.selectedProject ? <X size={13} className="home-project-picker__clear-icon" /> : null}
           </span>
           <span className="home-project-picker__label truncate">{selectedLabel}</span>
-          <ChevronDown
-            size={13}
-            className={`home-project-picker__chevron${props.open ? " home-project-picker__chevron--open" : ""}`}
-            aria-hidden="true"
-          />
         </button>
         {props.selectedProject ? (
           <button
@@ -4375,7 +4232,6 @@ export function ProjectTargetPicker(props: {
             disabled={props.disabled}
             aria-label={t("home.project.clear")}
             title={t("home.project.clear")}
-            onPointerDown={preserveProjectTargetPickerSearchFocus}
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -4388,6 +4244,7 @@ export function ProjectTargetPicker(props: {
       {props.open ? (
         <div className="home-project-picker__menu">
           <label className="home-project-picker__search">
+            <Search size={14} strokeWidth={1.8} className="home-project-picker__search-icon" aria-hidden="true" />
             <input
               ref={searchInputRef}
               value={query}
@@ -4413,7 +4270,7 @@ export function ProjectTargetPicker(props: {
                 <p className="home-project-picker__empty" role="status">{t("home.project.empty")}</p>
               ) : visibleProjects.map((project, index) => {
                 const selected = props.target.kind === "project" && props.target.projectId === project.id;
-                const displayPath = formatCompactWorkspacePath(project.rootPath);
+                const displayName = projectTargetPickerName(project);
                 return (
                   <button
                     id={`home-project-picker-option-${index}`}
@@ -4425,17 +4282,16 @@ export function ProjectTargetPicker(props: {
                     data-project-id={project.id}
                     className={`home-project-picker__option${selected ? " home-project-picker__option--selected" : ""}${hasKeyboardNavigated && activeIndex === index ? " home-project-picker__option--keyboard-active" : ""}`}
                     title={formatWorkspaceDisplayPath(project.rootPath)}
-                    onPointerDown={preserveProjectTargetPickerSearchFocus}
                     onClick={() => props.onSelect({ kind: "project", projectId: project.id })}
                   >
                     <Folder size={13} className="shrink-0" aria-hidden="true" />
-                    <span className="home-project-picker__path truncate">{displayPath}</span>
+                    <span className="home-project-picker__name truncate">{displayName}</span>
                     {selected ? <Check size={13} className="shrink-0" aria-hidden="true" /> : null}
                   </button>
                 );
               })}
             </div>
-            {itemKeys.some((key) => key === "new" || key === "standalone") ? (
+            {itemKeys.some((key) => key === "create" || key === "standalone") ? (
               <div className="home-project-picker__divider" role="separator" />
             ) : null}
             <div className="home-project-picker__actions" role="presentation">
@@ -4447,8 +4303,7 @@ export function ProjectTargetPicker(props: {
                   tabIndex={-1}
                   aria-selected="false"
                   className={`home-project-picker__option home-project-picker__option--action${hasKeyboardNavigated && activeIndex === visibleProjects.length ? " home-project-picker__option--keyboard-active" : ""}`}
-                  onPointerDown={preserveProjectTargetPickerSearchFocus}
-                  onClick={props.onChooseOther}
+                  onClick={props.onCreateProject}
                 >
                   <LucidePlus size={13} strokeWidth={1.75} className="shrink-0 home-project-picker__action-icon" aria-hidden="true" />
                   <span>{t("home.project.new")}</span>
@@ -4462,7 +4317,6 @@ export function ProjectTargetPicker(props: {
                   tabIndex={-1}
                   aria-selected="false"
                   className={`home-project-picker__option home-project-picker__option--action${hasKeyboardNavigated && activeIndex === itemKeys.length - 1 ? " home-project-picker__option--keyboard-active" : ""}`}
-                  onPointerDown={preserveProjectTargetPickerSearchFocus}
                   onClick={() => props.onSelect({ kind: "standalone" })}
                 >
                   <X size={13} className="shrink-0" aria-hidden="true" />
