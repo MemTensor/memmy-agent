@@ -106,6 +106,30 @@ export function demoGuideTarget(phase: DemoGuidePhase): DemoGuideTarget {
 /** 亮区外扩一点，元素自己的圆角与阴影不会被切掉。 */
 export const DEMO_GUIDE_HOLE_PADDING = 6;
 
+/**
+ * 这一屏要不要在亮区上摆一个「点这里」的呼吸箭头。
+ *
+ * 判据只看亮区里有没有一个真的接点击的控件：`stroke` 有、且不是「只介绍、不让人动手」的 `blockStroke`
+ * 与只压暗的 `clean`。看板导览、加入那一屏、等结果这几屏没有任何可点的控件，就不摆。
+ */
+export function demoGuideClickTarget(target: DemoGuideTarget): string | null {
+  if (!target.stroke || target.blockStroke === true || target.clean === true) return null;
+  return target.stroke;
+}
+
+/**
+ * 呼吸箭头落在哪一点（箭头尖就在这个点上）。
+ *
+ * 大块的控件（任务行、输入区）指正中：一眼看出要点的是这一条；
+ * 小控件（按钮、齿轮、开关）指右下角外侧，箭头只压在角上，不遮挡按钮上的字与图标。
+ */
+export function clickHintAnchor(rect: Rect): { left: number; top: number } {
+  const small = rect.height <= 56 || rect.width <= 140;
+  return small
+    ? { left: rect.left + rect.width, top: rect.top + rect.height }
+    : { left: rect.left + rect.width / 2, top: rect.top + rect.height / 2 };
+}
+
 /** 亮区不能压在窗口边缘上：至少留出这点距离，说明卡才放得下。 */
 const EDGE_MARGIN = 8;
 

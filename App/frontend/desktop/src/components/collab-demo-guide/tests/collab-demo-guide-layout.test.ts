@@ -6,7 +6,9 @@ import type { DemoGuidePhase } from "../../../app/collab-demo-guide-store.js";
 import {
   blockerRects,
   cardPlacement,
+  clickHintAnchor,
   DEMO_GUIDE_CARD_WIDTH,
+  demoGuideClickTarget,
   demoGuideTarget,
   maskRects,
   padRect,
@@ -186,6 +188,53 @@ describe("demo guide layout", () => {
     // 只保证不抛错：界面在阶段表有缺口时也只是不画蒙版。
     expect(() => demoGuideTarget("not-a-phase" as DemoGuidePhase)).not.toThrow();
     expect(demoGuideTarget("not-a-phase" as DemoGuidePhase)).toBeUndefined();
+  });
+
+  it("puts the breathing click arrow on the control each screen asks people to click", () => {
+    // 大块（任务行、输入区）指正中：一眼看出要点的是这一条。
+    expect(clickHintAnchor({ left: 100, top: 200, width: 800, height: 100 })).toEqual({ left: 500, top: 250 });
+    // 小控件（按钮、齿轮、开关）指右下角：箭头与波纹压在边上，不挡住按钮上的图标与字。
+    expect(clickHintAnchor({ left: 900, top: 600, width: 96, height: 32 })).toEqual({ left: 996, top: 632 });
+    expect(clickHintAnchor({ left: 40, top: 40, width: 28, height: 28 })).toEqual({ left: 68, top: 68 });
+
+    // 真的要人点的那几屏都摆箭头：建的按钮、任务行、接续任务、发送、齿轮、接收开关、允许。
+    for (const phase of [
+      "create-project",
+      "task-row",
+      "reader",
+      "compose",
+      "ask-compose",
+      "settings-open",
+      "settings-assist",
+      "help-dialog"
+    ] as const) {
+      expect(demoGuideClickTarget(demoGuideTarget(phase)), phase).toBe(demoGuideTarget(phase).stroke);
+    }
+    // 只介绍、只等结果的屏一个都不摆：没有可点的控件时箭头只会指错地方。
+    for (const phase of [
+      "intro",
+      "name",
+      "folder",
+      "collab",
+      "join-entry",
+      "joined",
+      "tour-board",
+      "tour-tabs",
+      "tour-associate",
+      "tour-associate-pick",
+      "tour-new-task",
+      "reply-waiting",
+      "reply-done",
+      "ask-waiting",
+      "ask-done",
+      "help-waiting",
+      "help-running",
+      "help-done",
+      "help-rejected",
+      "complete"
+    ] as const) {
+      expect(demoGuideClickTarget(demoGuideTarget(phase)), phase).toBeNull();
+    }
   });
 
   it("pads the hole without running past the window edge", () => {

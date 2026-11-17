@@ -71,6 +71,69 @@
   75% { transform: translateX(-3px); }
 }
 
+/*
+ * 要人点的那一个控件上的「点这里」：一枚呼吸的箭头，加两圈从箭尖扩散出去的点击波纹。
+ * 整块不接点击（箭头压在按钮上也不能挡住按钮），只负责把人指过去。
+ */
+.clickHint {
+  position: fixed;
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* 波纹从箭尖往外扩：外圈延时半拍，看起来像连点了两下。 */
+.clickRipple {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 50px;
+  height: 50px;
+  margin: -25px 0 0 -25px;
+  border-radius: 50%;
+  border: 2px solid var(--color-action-sky);
+  background: color-mix(in srgb, var(--color-action-sky) 16%, transparent);
+  transform: scale(0.35);
+  opacity: 0;
+  animation: clickRipple 1.9s ease-out infinite;
+}
+
+.clickRippleLate {
+  animation-delay: 0.95s;
+}
+
+@keyframes clickRipple {
+  0% { transform: scale(0.35); opacity: 0.9; }
+  70% { transform: scale(1); opacity: 0; }
+  100% { transform: scale(1); opacity: 0; }
+}
+
+/* 箭尖落在左上角外一点：`clickHint` 的定位点就是箭尖（见 `clickHintAnchor`）。 */
+.clickCursor {
+  position: absolute;
+  left: -4px;
+  top: -3px;
+  width: 32px;
+  height: 32px;
+  fill: var(--color-text-ink, #1b2423);
+  stroke: var(--color-background-paper, #fff);
+  stroke-width: 1.3;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 2px 4px rgba(16, 26, 25, 0.32));
+  transform-origin: 2px 2px;
+  animation: clickBreathe 1.9s ease-in-out infinite;
+}
+
+/* 呼吸：箭头自己慢慢放大再收回，比只画一圈静态描边显眼，也不至于晃眼。 */
+@keyframes clickBreathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.14); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clickCursor { animation: none; }
+  .clickRipple { animation: none; opacity: 0.5; transform: scale(0.7); }
+}
+
 .card {
   position: fixed;
   /* 宽度由组件按「常规 340 / 加宽 400」写进 style：这里不再写死。 */

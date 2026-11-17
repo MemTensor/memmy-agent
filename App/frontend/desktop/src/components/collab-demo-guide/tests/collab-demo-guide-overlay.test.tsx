@@ -576,6 +576,40 @@ describe("demo guide overlay tracking", () => {
     expect(document.body.textContent).toContain("正在本机执行，完成后结果会回传给小饭团");
   });
 
+  it("marks the one control a screen asks people to click with a breathing arrow", async () => {
+    // 第一步亮的是一整条任务行（大块）：箭头落在亮区正中，看的人一眼知道要点的就是这一条。
+    anchor("board-task-row", () => rect({ left: 90, top: 300, width: 1000, height: 100 }));
+    await mount("task-row");
+
+    const hint = document.querySelector<HTMLElement>("[data-demo-click-hint]");
+    expect(hint).toBeTruthy();
+    // 亮区是任务行外扩 6px（84,294 → 1096,406），正中就是箭尖的位置。
+    expect(Number.parseFloat(hint!.style.left)).toBe(590);
+    expect(Number.parseFloat(hint!.style.top)).toBe(350);
+    // 一枚箭头 + 两圈波纹（呼吸的那一下在箭头自己身上，由 CSS 动画负责）。
+    expect(hint!.querySelectorAll("." + styles.clickRipple)).toHaveLength(2);
+    expect(hint!.querySelector("." + styles.clickCursor)).toBeTruthy();
+    // 箭头不接点击：压在按钮上也不能把按钮挡掉。
+    expect(hint!.getAttribute("aria-hidden")).toBe("true");
+
+    // 小控件（只读面板头部的「继续任务」）箭头落在右下角外侧，不盖住按钮上的字。
+    await mount("reader");
+    const small = document.querySelector<HTMLElement>("[data-demo-click-hint]");
+    expect(small).toBeTruthy();
+    // 描边是「继续任务」外扩 3px（1127,93,80,34），箭尖就压在它的右下角上。
+    expect(Number.parseFloat(small!.style.left)).toBe(1207);
+    expect(Number.parseFloat(small!.style.top)).toBe(127);
+
+    // 只介绍或只等结果的屏一个箭头都不摆：看板导览每一站、等一位成员回话。
+    anchor("board-list", () => rect({ left: 90, top: 132, width: 1000, height: 560 }));
+    await mount("tour-board");
+    expect(document.querySelector("[data-demo-click-hint]")).toBeNull();
+    anchor("assist-task", () => rect({ left: 100, top: 60, width: 1000, height: 620 }));
+    await mount("help-running");
+    expect(holeOf()).not.toBeNull();
+    expect(document.querySelector("[data-demo-click-hint]")).toBeNull();
+  });
+
   it("waits for the target instead of drawing an overlay over nothing", async () => {
     for (const element of Array.from(document.querySelectorAll("[data-demo-guide]"))) element.remove();
     await mount("reader");
