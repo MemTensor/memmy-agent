@@ -1075,7 +1075,9 @@ export function AppFrame(props: AppFrameProps) {
   function newProject() {
     handleFirstSidebarInteraction();
     // 第一次新建就走引导时，弹窗要默认开共享（与路径 A 一致）；普通新建仍然默认关。
-    if (shouldDemoOnNewProject({ collabEnabled, demoGuideActive: isDemoGuideActive() })) {
+    // 既有新手引导还有步骤排着（数据改进计划、产品导览、昵称）时不带演示：
+    // 小饭团不能和那些弹窗同屏，等它们走完再从大卡进体验。
+    if (deferredGuidanceStep == null && shouldDemoOnNewProject({ collabEnabled, demoGuideActive: isDemoGuideActive() })) {
       requestCreateProject({ share: true, demo: true });
       return;
     }

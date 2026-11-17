@@ -46,6 +46,17 @@ vi.mock("../../app/use-guidance-progress.js", () => ({
   useGuidanceDone: () => mocks.guidanceDone
 }));
 
+// The quiet window itself is covered in collab-launch-prompt-guidance.wait.test.tsx; here the existing guidance is
+// either over (and the workspace already settled) or still running.
+vi.mock("../../app/use-onboarding-quiet.js", () => ({
+  ONBOARDING_QUIET_MS: 4_000,
+  useOnboardingQuiet: () => ({
+    complete: mocks.guidanceDone,
+    stepQueued: !mocks.guidanceDone,
+    quiet: mocks.guidanceDone
+  })
+}));
+
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 class MemoryStorage implements Storage {
