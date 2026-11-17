@@ -7,7 +7,7 @@
  * 两步：先讲授权后能做什么并列出要装的 Agent，点「授权」后原地换成逐个安装的结果页。
  */
 import { useEffect, useState } from "react";
-import { AlertCircle, Check, FileText, Link2, Loader2, MessageSquare } from "lucide-react";
+import { AlertCircle, Check, Loader2 } from "lucide-react";
 import type { CollabAgentInstallResult, CollabClient } from "../api/collab-client.js";
 import { Button } from "../components/button.js";
 import { Memmy } from "../components/mascot/memmy.js";
@@ -125,7 +125,7 @@ export function CollabAgentAccessDialog(props: {
         ? t("collab.access.donePartialTitle", { done: String(doneCount), failed: String(failed.length) })
         : t("collab.access.doneTitle", { count: String(doneCount) });
   const lead = phase === "ask"
-    ? t("collab.access.askLead")
+    ? null
     : busy
       ? t("collab.access.installingLead")
       : t("collab.access.doneLead");
@@ -144,17 +144,17 @@ export function CollabAgentAccessDialog(props: {
       backdropClassName={styles.backdrop}
       footer={phase === "ask" ? (
         <div className={styles.actions}>
-          <Button variant="ghost" onClick={props.onClose}>{t("collab.access.decline")}</Button>
-          <Button variant="primary" disabled={busy || candidates === null} onClick={() => void grant()}>
+          <Button className={styles.footerButton} variant="ghost" onClick={props.onClose}>{t("collab.access.decline")}</Button>
+          <Button className={styles.footerButton} variant="primary" disabled={busy || candidates === null} onClick={() => void grant()}>
             {t("collab.access.grant")}
           </Button>
         </div>
       ) : (
         <div className={styles.actions}>
           {failed.length && !busy ? (
-            <Button variant="ghost" onClick={() => void retry()}>{t("collab.access.retry")}</Button>
+            <Button className={styles.footerButton} variant="ghost" onClick={() => void retry()}>{t("collab.access.retry")}</Button>
           ) : null}
-          <Button variant="primary" disabled={busy} onClick={() => props.onDecided(true, results)}>
+          <Button className={styles.footerButton} variant="primary" disabled={busy} onClick={() => props.onDecided(true, results)}>
             {t("collab.access.done")}
           </Button>
         </div>
@@ -167,15 +167,15 @@ export function CollabAgentAccessDialog(props: {
           className={styles.mascot}
         />
         <h2 className={styles.title}>{title}</h2>
-        <p className={styles.lead}>{lead}</p>
+        {lead ? <p className={styles.lead}>{lead}</p> : null}
       </div>
 
       {phase === "ask" ? (
         <>
           <div className={styles.caps}>
-            <span className={styles.cap}><Link2 size={15} aria-hidden="true" />{t("collab.access.capPick")}</span>
-            <span className={styles.cap}><MessageSquare size={15} aria-hidden="true" />{t("collab.access.capChat")}</span>
-            <span className={styles.cap}><FileText size={15} aria-hidden="true" />{t("collab.access.capContext")}</span>
+            <span className={styles.cap}>{t("collab.access.capPick")}</span>
+            <span className={styles.cap}>{t("collab.access.capChat")}</span>
+            <span className={styles.cap}>{t("collab.access.capContext")}</span>
           </div>
           <p className={styles.head}>{t("collab.access.agentsHead")}</p>
           {candidates === null ? (

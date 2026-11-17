@@ -20,9 +20,14 @@
   overscroll-behavior: contain;
 }
 
-.footer {
+/*
+ * 页脚不画分隔线：弹窗本来就短，一条横线只是把按钮和内容隔成两块互不相干的区域。
+ * 写成 `:global(.modal-footer).footer` 是为了压过 styles.css 里后加载的 `.modal-footer` padding。
+ */
+:global(.modal-footer).footer {
   flex: 0 0 auto;
-  border-top: 1px solid color-mix(in srgb, var(--color-border-stone, #d6dfdc) 35%, transparent);
+  /* 左右与正文对齐（正文 16 + 28），按钮不单独贴着窗口边。 */
+  padding: 12px 44px 20px;
 }
 
 /* 与看板弹窗一致：一层浅遮罩，不做整窗模糊。 */
@@ -62,7 +67,7 @@
 /* ---------- 能力清单 ---------- */
 
 .caps {
-  margin: 16px 28px 0;
+  margin: 18px 28px 0;
   padding: 12px 14px;
   border-radius: 12px;
   background: color-mix(in srgb, var(--color-canvas-oat, #f4f7f6) 55%, transparent);
@@ -72,19 +77,11 @@
   gap: 9px;
 }
 
+/* 不做图标列：三句话各自完整，加图标只是多一列待对齐的装饰。 */
 .cap {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
   font-size: 13px;
   line-height: 1.5;
   color: color-mix(in srgb, var(--color-text-ink, #111d1c) 78%, transparent);
-}
-
-.cap > svg {
-  flex: none;
-  margin-top: 2px;
-  color: var(--color-action-sky-hover, #3f9a8a);
 }
 
 /* ---------- Agent 胶囊 ---------- */
@@ -249,4 +246,15 @@
   justify-content: flex-end;
   gap: 10px;
   width: 100%;
+}
+
+/*
+ * 两个按钮同一套尺寸：全局 .button 不写字号，会继承 16px 正文、字重 750，
+ * 和弹窗里 13px 的字不是一套。这里统一成 36px 高、14px、600 字重。
+ */
+:global(.button).footerButton {
+  min-height: 36px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 600;
 }

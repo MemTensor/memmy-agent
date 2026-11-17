@@ -127,7 +127,7 @@ function dialogContaining(text: string): HTMLElement | null {
 }
 
 function accessDialog(): HTMLElement | null {
-  return dialogContaining("授权后，你可以：");
+  return dialogContaining("Memmy 会读取下列 Agent 的任务");
 }
 
 function taskPickerDialog(): HTMLElement | null {

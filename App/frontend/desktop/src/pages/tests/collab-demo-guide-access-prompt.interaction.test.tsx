@@ -109,7 +109,7 @@ async function flush(): Promise<void> {
 
 function accessDialog(): HTMLElement | null {
   return Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]'))
-    .find((entry) => entry.textContent?.includes("授权后，你可以：")) ?? null;
+    .find((entry) => entry.textContent?.includes("Memmy 会读取下列 Agent 的任务")) ?? null;
 }
 
 /** 演示正压在这个项目上：第一步，等待点开小饭团的任务。 */

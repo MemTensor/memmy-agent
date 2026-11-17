@@ -60,7 +60,7 @@ afterEach(async () => {
 describe("collab agent access dialog", () => {
   it("lists the agents to set up, leaving out the ones turned off in settings", async () => {
     await render(client());
-    expect(document.body.textContent).toContain("授权后，你可以：");
+    expect(document.body.textContent).toContain("Memmy 会读取下列 Agent 的任务");
     expect(document.body.textContent).toContain("Cursor");
     expect(document.body.textContent).toContain("Codex");
     // 设置里关掉的不在安装清单里，只用一句话说明。
