@@ -1,8 +1,9 @@
 /**
  * 成员协助在 Memmy 任务页上的部分。
  *
- * 执行方：协助由 Memmy 执行时，协助本身就是项目里的一条 Memmy 任务。输入框上方一个可呼吸的小 chip 说明是谁的请求、
- * 授权到什么程度（仅这一次，或「1 小时内直接执行（到 08:45）」），执行中可以在 chip 里停止、限时授权可以结束；
+ * 执行方：协助由 Memmy 执行时，协助本身就是项目里的一条 Memmy 任务。输入框上方一个可呼吸的小 chip 说明是谁的请求，
+ * 以及这一次的进展——停下时说清是谁停的、没跑完时给出原因、其余只写状态；执行中可以在 chip 里停止、限时授权可以结束。
+ * 授权到什么程度（仅这一次，或「1 小时内直接执行（到 08:45）」）收在悬停提示里，
  * 同一次排查的后续请求需要她确认时，确认卡片出现在任务底部，
  * 确认后就在这条任务里继续；结果发出后，底部一行说明「结果已发给谁」，可展开查看发出去的内容。
  *
@@ -17,9 +18,9 @@ import { AgentMessageContent } from "./agent-message-content.js";
 import { CollabAssistRequestCard } from "./collab-assist-card.js";
 import { ConfirmCard, type ConfirmDecision } from "./collab-assist-detail.js";
 import {
-  ASSIST_STATUS_KEYS,
   AssistAgentLogo,
   assistAgentName,
+  assistStatusKey,
   assistStopText,
   grantSummary,
   pickAssistAgent,
@@ -67,8 +68,9 @@ export function useAssistTask(collab: CollabClient | null, chatId: string | null
 }
 
 /**
- * 输入框上方的协助 chip：只写是谁的哪个 Agent 发来的请求，状态只用两种样子表达——进行中薄荷绿并轻轻呼吸，
- * 停下或结束后变红、不再动。授权方式、第几次、结局这些细节收进悬停提示，不摊在 chip 上。
+ * 输入框上方的协助 chip：写是谁的哪个 Agent 发来的请求，这一次的状态也写在同一行里，不另起一行。
+ * 状态只用两种样子表达——进行中薄荷绿并轻轻呼吸，停下或结束后变红、不再动；
+ * 授权方式、第几次这些细节收进悬停提示，不摊在 chip 上。
  */
 export function CollabAssistTaskChip(props: { view: AssistTaskView; collab: CollabClient | null; onChanged: () => void }) {
   const { t } = useTranslation();
@@ -80,15 +82,23 @@ export function CollabAssistTaskChip(props: { view: AssistTaskView; collab: Coll
   const running = runningRequest !== null;
   const grantLive = thread.scope === "timed" && Boolean(thread.grant?.active);
   const label = t("collab.assist.requestFrom", { name: thread.requester.name, via: thread.via });
+  // 这一次的结果直接写进 chip：停下时说清是谁停的，没跑完时给出原因，其余只写状态本身。
+  const outcome = latest && !running
+    ? latest.status === "stopped"
+      ? assistStopText(latest, t)
+      : latest.status === "failed"
+        ? t("collab.assist.conv.notFinished", { reason: latest.failure ?? t("collab.assist.state.failed") })
+        : t(assistStatusKey(latest))
+    : "";
+  // 停下那句话本身就带名字（「小饭团停止了这次执行」），不再重复一遍「小饭团的 Memmy 请求」。
+  const chipText = !outcome || latest?.status === "stopped" ? outcome || label : `${label} · ${outcome}`;
   // 悬停时才看的细节：第几次、授权到什么程度、这一次的结局。
   const detail = [
     latest && thread.attempt > 1 ? t("collab.assist.attemptLabel", { attempt: String(thread.attempt) }) : "",
     thread.scope === "timed" && thread.grant
       ? grantSummary(thread.grant, t)
       : thread.scope && latest?.status !== "confirm" && latest?.status !== "pending" ? t("collab.assist.scopeOnce") : "",
-    latest && !running
-      ? latest.status === "stopped" ? assistStopText(latest, t) : t(ASSIST_STATUS_KEYS[latest.status])
-      : ""
+    latest && latest.status !== "stopped" ? outcome : ""
   ].filter(Boolean).join(" · ");
 
   async function act(run: () => Promise<unknown>) {
@@ -119,7 +129,7 @@ export function CollabAssistTaskChip(props: { view: AssistTaskView; collab: Coll
           <i />
           <i />
         </span>
-        <span className={styles.chipText}>{label}</span>
+        <span className={styles.chipText}>{chipText}</span>
         {runningRequest && collab ? (
           <button type="button" className={styles.chipAction} disabled={busy} onClick={() => void act(() => collab.stopAssist(runningRequest.id))}>
             {t("collab.assist.stop")}
@@ -210,11 +220,6 @@ export function CollabAssistTaskDock(props: { view: AssistTaskView; collab: Coll
               {latest.reply ? <div className={styles.sentReply}><AgentMessageContent content={latest.reply} readOnlyFileReferences /></div> : null}
             </div>
           ) : null}
-        </div>
-      ) : null}
-      {thread && latest && !confirm && (latest.status === "failed" || latest.status === "stopped") ? (
-        <div className={styles.sent}>
-          {latest.status === "stopped" ? assistStopText(latest, t) : latest.failure ?? t(ASSIST_STATUS_KEYS[latest.status])}
         </div>
       ) : null}
       {waiting.map((request) => (

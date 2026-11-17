@@ -336,6 +336,31 @@ describe("执行方的协助任务", () => {
     expect(collab.revokeAssistGrant).toHaveBeenCalledWith("p1", REQUESTER.userId);
   });
 
+  it("这一次的结果写在同一行 chip 里：停下写谁停的，没跑完写原因，不再另起一行", async () => {
+    async function chipText(latest: AssistRequest): Promise<{ text: string; title: string | null; state: string | null }> {
+      const view: AssistTaskView = { executing: { thread: thread({ agent: "memmy", scope: "once" }, [latest]), confirm: null }, requested: [] };
+      await act(async () => root.render(
+        <I18nProvider language="zh-CN">
+          <CollabAssistTaskChip view={view} collab={client()} onChanged={() => undefined} />
+        </I18nProvider>
+      ));
+      const chip = document.querySelector("[data-collab-assist-chip]");
+      return { text: chip?.textContent ?? "", title: chip?.getAttribute("title") ?? null, state: chip?.getAttribute("data-state") ?? null };
+    }
+
+    // 停下：那句话本身就带名字，不再重复一遍「谁的 Codex 请求」。
+    const stopped = await chipText(request({ status: "stopped", stoppedBy: "requester", agent: "memmy", scope: "once" }));
+    expect(stopped.text).toBe("孙起停止了这次执行");
+    expect(stopped.state).toBe("stopped");
+    // 没跑完：先写是谁的请求，再写原因。
+    const failed = await chipText(request({ status: "failed", failure: "Cursor 没有响应", agent: "memmy", scope: "once" }));
+    expect(failed.text).toBe("孙起的 Codex 请求 · 没有完成：Cursor 没有响应");
+    expect(failed.title).toContain("没有完成：Cursor 没有响应");
+    // 跑完：只剩状态，结果已经发给她。
+    const done = await chipText(request({ status: "done", agent: "memmy", scope: "once" }));
+    expect(done.text).toBe("孙起的 Codex 请求 · 已完成");
+  });
+
   it("同一次排查的第二次请求在任务底部确认，沿用上一次的执行 Agent", async () => {
     const collab = client();
     const second = request({ id: "r2", status: "confirm", attempt: 2 });
