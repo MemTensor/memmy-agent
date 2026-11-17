@@ -53,6 +53,10 @@ export function JoinProjectModal(props: {
   const [directory, setDirectory] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 加入时顺手改的昵称：留空就沿用账号原来的名字，所以不给默认值。 */
+  const [nickname, setNickname] = useState("");
+  /** 加入被拒的原因（重名、成员已满）就写在字段下：它们都是这次提交里能改的东西。 */
+  const [joinError, setJoinError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -79,6 +83,8 @@ export function JoinProjectModal(props: {
     setPreview(null);
     setDirectory(null);
     setError(null);
+    setNickname("");
+    setJoinError(null);
     if (initialReference) void loadInvite(initialReference);
   }, [props.open, initialReference, loadInvite]);
 
@@ -106,8 +112,10 @@ export function JoinProjectModal(props: {
     if (!preview || busy) return;
     setBusy(true);
     setError(null);
+    setJoinError(null);
     try {
-      const result = await props.collab.joinProject(reference.trim(), directory ?? undefined);
+      const wanted = nickname.trim();
+      const result = await props.collab.joinProject(reference.trim(), directory ?? undefined, wanted || undefined);
       if (result.status === "pending") {
         props.onApplied?.({ projectId: result.projectId, projectName: preview.projectName });
         props.onClose();
@@ -120,7 +128,10 @@ export function JoinProjectModal(props: {
         props.onJoined(result.project);
       }
     } catch (cause) {
-      setError(messageOf(cause));
+      // 加入阶段能改的错（名字重了、成员满了）写在字段下面，别的错误留在弹窗底部。
+      const message = messageOf(cause);
+      if (nickname.trim()) setJoinError(message);
+      else setError(message);
     } finally {
       setBusy(false);
     }
@@ -182,6 +193,29 @@ export function JoinProjectModal(props: {
               </span>
             </div>
             <p className={styles.joinNote}>{t("collab.join.noteSessions")}</p>
+            {preview.status === "member" ? null : (
+              <div className={styles.field}>
+                <span className={styles.nicknameLabel}>
+                  {t("collab.join.nicknameLabel")}
+                  <em className={styles.nicknameOptional}>{t("collab.join.nicknameOptional")}</em>
+                </span>
+                <input
+                  className={`${styles.joinNicknameInput} ${joinError ? styles.joinNicknameInvalid : ""}`}
+                  value={nickname}
+                  maxLength={32}
+                  placeholder={t("collab.join.nicknamePlaceholder")}
+                  aria-label={t("collab.join.nicknameLabel")}
+                  aria-invalid={joinError ? true : undefined}
+                  disabled={pending}
+                  onChange={(event) => {
+                    setNickname(event.target.value);
+                    // 改了字就把上一次的错误收起来：重名与否要看新输入的名字。
+                    if (joinError) setJoinError(null);
+                  }}
+                />
+                {joinError ? <p className={styles.joinNicknameError} role="alert">{joinError}</p> : null}
+              </div>
+            )}
             {preview.status === "member" ? null : (
               <div className={styles.field}>
                 <span>{t("collab.create.dirOptional")}</span>

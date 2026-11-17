@@ -363,6 +363,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     configClient,
     byokTokenUsageClient,
     tokenQuotaClient,
+    collabClient,
     update,
     track = noopTrackAnalyticsEvent,
     activeTab: activeTabProp,
@@ -384,6 +385,14 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const [confirm, setConfirm] = useState<ConfirmKind>(null);
   const [isEditingNickname, setIsEditingNickname] = useState(false);
   const [nicknameDraft, setNicknameDraft] = useState("");
+  /**
+   * 改名会连带改掉其他协作项目里的名字，所以先算清影响面：
+   * 有人撞名就拦下，只是会一起变就请人确认。
+   */
+  const [nicknameConfirm, setNicknameConfirm] = useState<{
+    next: string;
+    projects: Array<{ id: string; name: string; memberCount: number }>;
+  } | null>(null);
   const [accountBusy, setAccountBusy] = useState(false);
   const [accountIdCopied, setAccountIdCopied] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
@@ -1405,7 +1414,34 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     if (!nextNickname) {
       return;
     }
+    // 名字没改就不用走一遍检查：这一步只在真的要换成别的名字时才有意义。
+    if (nextNickname === state.account.nickname) {
+      setIsEditingNickname(false);
+      return;
+    }
 
+    // 昵称只有一份，先问清它在其他项目里会不会撞到人、会连带改掉哪些项目。
+    const check = await collabClient?.checkNickname(nextNickname).catch(() => null);
+    if (check) {
+      const conflict = check.conflicts[0];
+      if (conflict) {
+        setAccountError(t("settings.account.nicknameTaken", {
+          project: conflict.projectName,
+          name: conflict.memberName
+        }));
+        return;
+      }
+      if (check.projects.length) {
+        setNicknameConfirm({ next: nextNickname, projects: check.projects });
+        return;
+      }
+    }
+
+    await commitNickname(nextNickname);
+  }
+
+  /** 真正写入昵称：确认后的那一步与没有任何影响面时走同一条路。 */
+  async function commitNickname(nextNickname: string) {
     setAccountBusy(true);
     setAccountError(null);
     try {
@@ -1417,6 +1453,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         registeredAt: profile?.registeredAt ?? state.account.registeredAt
       }));
       setIsEditingNickname(false);
+      setNicknameConfirm(null);
     } catch (error) {
       console.warn("update account nickname failed", error);
       setAccountError(t("settings.account.saveNicknameFailed"));
@@ -1989,6 +2026,39 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           width={360}
           onCancel={() => setConfirm(null)}
           onConfirm={handleConfirmAccountExit}
+        />
+      )}
+      {nicknameConfirm && (
+        <ConfirmDialog
+          open
+          title={t("settings.account.nicknameSyncTitle")}
+          message={(
+            <span className="flex flex-col gap-2">
+              <span>
+                {t("settings.account.nicknameSyncBody", {
+                  from: state.account.nickname || accountName,
+                  to: nicknameConfirm.next
+                })}
+              </span>
+              {/* 列出会跟着变的项目：只说「其他项目」的话，人想不起来是哪些。 */}
+              <span className="flex flex-col gap-1">
+                {nicknameConfirm.projects.map((project) => (
+                  <span key={project.id} className="flex items-center justify-between gap-3 rounded-input bg-canvas-oat/60 px-2.5 py-1.5 text-xs text-text-ink/70">
+                    <span className="min-w-0 truncate">{project.name}</span>
+                    <span className="shrink-0 text-text-ink/40">{t("settings.account.nicknameSyncMembers", { count: project.memberCount })}</span>
+                  </span>
+                ))}
+              </span>
+            </span>
+          )}
+          cancelLabel={t("dialog.cancel")}
+          closeLabel={t("common.close")}
+          confirmLabel={t("settings.account.nicknameSyncConfirm")}
+          confirmDisabled={accountBusy}
+          ariaLabel={t("settings.account.nicknameSyncTitle")}
+          width={420}
+          onCancel={() => setNicknameConfirm(null)}
+          onConfirm={() => void commitNickname(nicknameConfirm.next)}
         />
       )}
       {showApplyMore && (

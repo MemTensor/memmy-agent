@@ -161,7 +161,12 @@ const PreviewInviteSchema = z.object({ reference: InviteReferenceSchema }).stric
 const JoinSchema = z.object({
   reference: InviteReferenceSchema,
   /** The folder the person picked for the project's tasks; a managed folder is used when absent. */
-  directory: z.string().trim().min(1).max(4_000).optional()
+  directory: z.string().trim().min(1).max(4_000).optional(),
+  /**
+   * 加入时顺手改的昵称，可不填：不填就沿用账号原来的名字。
+   * 填了要跟本项目现有成员不重名，由云端判定，这里只卡长度。
+   */
+  nickname: z.string().trim().max(32, "昵称不超过 32 个字").optional()
 }).strict();
 
 export function registerCollabRoutes(app: FastifyInstance, options: RegisterCollabRoutesOptions): void {
@@ -358,7 +363,14 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
 
   app.post("/api/collab/invites/join", guard, withErrorEnvelope(async (request, reply) => {
     const input = JoinSchema.parse(request.body ?? {});
-    return reply.send(await options.collab.joinProject(input.reference, input.directory));
+    return reply.send(await options.collab.joinProject(input.reference, input.directory, input.nickname));
+  }));
+
+  // 改名前的检查：会跟着变的项目，以及其中已经有人占了这个名字的项目。
+  // 规则在云端实现一次，桌面端只根据返回结果决定能不能改。
+  app.get("/api/collab/nickname", guard, withErrorEnvelope(async (request, reply) => {
+    const { value } = request.query as { value?: string };
+    return reply.send(await options.collab.checkNickname(value ?? ""));
   }));
 
   app.delete<{ Params: { projectId: string; sessionId: string } }>("/api/collab/projects/:projectId/sessions/:sessionId", guard, withErrorEnvelope(async (request, reply) => {

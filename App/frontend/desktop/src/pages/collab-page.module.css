@@ -1432,9 +1432,42 @@
   font-size: 13.5px;
 }
 
-.fieldHint {
+
+/* 昵称字段：标签后面跟一个中性徽标，「可选」只说明可以不填，不是警示 */
+.nicknameLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nicknameOptional {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--collab-surface);
   color: var(--collab-ter);
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.joinNicknameInput::placeholder {
+  color: color-mix(in srgb, var(--collab-ter) 92%, transparent);
+  font-size: 13px;
+}
+
+.joinNicknameInvalid {
+  border-color: color-mix(in srgb, #c4553d 45%, #fff) !important;
+}
+
+.joinNicknameError {
+  margin: 0;
+  color: #c4553d;
   font-size: 12px;
+  line-height: 1.5;
+}
+.fieldHint {
+  color: var(--collab-ter);  font-size: 12px;
   line-height: 1.6;
 }
 

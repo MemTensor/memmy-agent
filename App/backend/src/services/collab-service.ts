@@ -688,9 +688,21 @@ export interface CollabService {
   previewInvite(reference: string): Promise<{ invite: CollabInvitePreview }>;
   /**
    * Joins through an invite. A chosen `directory` is kept for the project, so the local project made once the person
-   * is in — now, or after approval — runs its tasks there.
+   * is in — now, or after approval — runs its tasks there. `nickname` is optional: when given, the account's nickname
+   * is changed along with the join, as long as no one in the project already goes by it.
    */
-  joinProject(reference: string, directory?: string): Promise<CollabJoinResult>;
+  joinProject(reference: string, directory?: string, nickname?: string): Promise<CollabJoinResult>;
+  /**
+   * 改名前的检查：`projects` 是昵称会跟着变的项目（昵称只有一份），`conflicts` 是其中已经有人叫这个名字的项目。
+   * 两者都空就没任何影响，可以直接改。
+   */
+  checkNickname(nickname: string): Promise<CollabNicknameCheck>;
+}
+
+/** 改名的影响面：会变哪些项目，以及被哪些项目里的同名成员拦住。 */
+export interface CollabNicknameCheck {
+  projects: Array<{ id: string; name: string; memberCount: number }>;
+  conflicts: Array<{ projectId: string; projectName: string; memberName: string }>;
 }
 
 export interface SessionSearchInput {
@@ -2316,10 +2328,15 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       return { invite: toInvitePreview(data.invite) };
     },
 
-    async joinProject(reference, directory) {
+    async joinProject(reference, directory, nickname) {
       const account = requireAccount();
       const code = requireInviteCode(reference);
-      const data = await cloud(`/invites/${encodeURIComponent(code)}/join`, { method: "POST", body: {} });
+      const wanted = nickname?.trim() ?? "";
+      const data = await cloud(`/invites/${encodeURIComponent(code)}/join`, {
+        method: "POST",
+        // 昵称留空就不传：云端把缺字段当成「不改」，而不是把名字改成空。
+        body: wanted ? { nickname: wanted } : {}
+      });
       const status = data.status === "joined" || data.status === "pending" || data.status === "member" ? data.status : null;
       const project = data.project === undefined || data.project === null ? null : toProject(data.project);
       const projectId = project?.id || text(data.projectId);
@@ -2339,6 +2356,25 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
         return latest;
       });
       return { status, projectId, project: project ? { ...project, localProjectId: stored.localProjectId } : null };
+    },
+
+    async checkNickname(nickname) {
+      const value = nickname.trim();
+      if (!value) return { projects: [], conflicts: [] };
+      const data = await cloud(`/nickname?value=${encodeURIComponent(value)}`);
+      const rows = (input: unknown) => list(input).map(record).filter((row) => Object.keys(row).length > 0);
+      return {
+        projects: rows(data.projects).map((row) => ({
+          id: text(row.id),
+          name: text(row.name),
+          memberCount: number(row.memberCount)
+        })),
+        conflicts: rows(data.conflicts).map((row) => ({
+          projectId: text(row.projectId),
+          projectName: text(row.projectName),
+          memberName: text(row.memberName)
+        }))
+      };
     },
 
     syncProjectTasks(projectId) {

@@ -78,6 +78,40 @@ describe("join dialog opened from an invite link", () => {
   it("joins with the code that came from the link", async () => {
     await act(async () => button("加入项目")!.click());
     await flush();
-    expect(collab.joinProject).toHaveBeenCalledWith(CODE, undefined);
+    expect(collab.joinProject).toHaveBeenCalledWith(CODE, undefined, undefined);
+  });
+
+  /**
+   * 昵称是可选字段：不填就沿用账号原来的名字，所以不拦人；填了就当新名字一起交上去。
+   */
+  it("sends the nickname only when one was typed", async () => {
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="修改昵称"]');
+    expect(input).toBeTruthy();
+    expect(input!.placeholder).toBe("为了更好地协作，改个方便同事称呼的名字吧");
+    expect(document.body.textContent).toContain("可选");
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input!, "  张三  ");
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button("加入项目")!.click());
+    await flush();
+    expect(collab.joinProject).toHaveBeenCalledWith(CODE, undefined, "张三");
+  });
+
+  /** 重名被云端拦下时，原因写在字段下面，而不是只把弹窗关掉或弹一个不相干的错误。 */
+  it("shows why a name was refused under the field itself", async () => {
+    collab.joinProject.mockRejectedValue(new Error("本项目已有人叫这个名字"));
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="修改昵称"]')!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "快乐锦鲤");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button("加入项目")!.click());
+    await flush();
+    expect(document.body.textContent).toContain("本项目已有人叫这个名字");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
   });
 });

@@ -271,7 +271,7 @@ describe("join project dialog", () => {
     collab.joinProject.mockResolvedValue({ status: "pending", projectId: "cloud-1", project: null });
     await act(async () => button("申请加入").click());
     await flush();
-    expect(collab.joinProject).toHaveBeenCalledWith(expect.stringContaining(invite.code), undefined);
+    expect(collab.joinProject).toHaveBeenCalledWith(expect.stringContaining(invite.code), undefined, undefined);
     expect(onClose).toHaveBeenCalled();
     expect(onJoined).not.toHaveBeenCalled();
     expect(onApplied).toHaveBeenCalledWith({ projectId: "cloud-1", projectName: "Memmy 开发" });
