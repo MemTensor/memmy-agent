@@ -193,8 +193,8 @@ describe("demo guide layout", () => {
 
   it("puts the breathing click dot on the control each screen asks people to click", () => {
     const radius = DEMO_GUIDE_HINT_RADIUS;
-    // 一体规则：圆心落在控件某条边的中点上，整个圆点在控件外面，所以永远不会盖住按钮上的字与图标。
-    // 窄的按钮：默认贴下沿，圆心落在下沿中点、整个圆点在按钮外面，所以永远不会盖住按钮上的字。
+    // 小控件（按钮、齿轮、开关）：圆心落在控件某条边的中点上，整个圆点在控件外面，所以永远不会盖住字与图标。
+    // 默认贴下沿，下方放不下时依次试上沿、右侧、左侧。
     const button = { left: 900, top: 600, width: 96, height: 32 };
     expect(clickHintPlacement(button, viewport)).toEqual({
       side: "bottom",
@@ -208,22 +208,23 @@ describe("demo guide layout", () => {
       left: low.left + low.width / 2,
       top: low.top - radius - 1
     });
-    // 一长条（任务行）：贴右端中点，圆点整个在行外，也不占下方——那里要放说明卡。
-    // 右侧真的贴到窗口边（放不下整颗）时改贴左端中点，不夹进行里盖住内容。
+    // 一长条（任务行）：行里就是一大片空白，圆心放在行内正中——明显「在这条上」，
+    // 又不压在右侧的时间戳与说明卡之间（贴右沿时正是那样）。
     const row = { left: 100, top: 300, width: 900, height: 76 };
     expect(clickHintPlacement(row, viewport)).toEqual({
-      side: "right",
-      left: row.left + row.width + radius + 1,
+      side: "inside",
+      left: row.left + row.width / 2,
       top: row.top + row.height / 2
     });
+    // 贴到窗口边上的宽行也一样在行内，不会跑到窗口外面去。
     const edgeRow = { left: 100, top: 300, width: 1160, height: 76 };
     expect(clickHintPlacement(edgeRow, viewport)).toEqual({
-      side: "left",
-      left: edgeRow.left - radius - 1,
+      side: "inside",
+      left: edgeRow.left + edgeRow.width / 2,
       top: edgeRow.top + edgeRow.height / 2
     });
-    // 四周都没空地（控件比窗口还大）时夹回窗口里：宁可压住控件一点，也要整颗看得见。
-    const huge = { left: -20, top: -20, width: 1300, height: 900 };
+    // 小控件贴着窗口边、四周都没空地时夹回窗口里：宁可压住控件一点，也要整颗看得见。
+    const huge = { left: -20, top: -20, width: 300, height: 900 };
     const clamped = clickHintPlacement(huge, viewport);
     expect(clamped.left).toBeGreaterThanOrEqual(radius);
     expect(clamped.top).toBeGreaterThanOrEqual(radius);

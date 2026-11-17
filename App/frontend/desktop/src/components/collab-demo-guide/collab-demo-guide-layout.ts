@@ -120,43 +120,55 @@ export function demoGuideClickTarget(target: DemoGuideTarget): string | null {
 /** 呼吸圆点的半径（px）：圆点直径 22，白心 7，外面再一圈 2px 白边。 */
 export const DEMO_GUIDE_HINT_RADIUS = 11;
 
-/** 圆点贴在控件哪条边上。 */
-export type DemoGuideHintSide = "bottom" | "right" | "left" | "top";
+/** 圆点落在控件哪里：
+ *
+ * - `inside`：整块控件（一整条共享任务行）——圆点放在行里，水平居中、竖向居中；
+ * - `bottom` / `top` / `right` / `left`：小控件（按钮、齿轮、开关）——圆心贴在那条边的中点上，整个圆点在控件外面。
+ */
+export type DemoGuideHintSide = "inside" | "bottom" | "right" | "left" | "top";
 
 export interface ClickHintPlacement {
-  /** 圆点的圆心：它一定落在控件某条边的中点上，再沿边法线往外让开一个半径。 */
+  /** 圆点的圆心。内侧屏落在控件里，其余落在控件某条边的中点再沿法线往外让开一个半径。 */
   left: number;
   top: number;
   side: DemoGuideHintSide;
 }
 
-/** 宽到这个程度的控件是「一条」，圆点贴在右端中点比贴在下方正中好看：下方正中会被说明卡占住。 */
+/** 宽到这个程度、又足够高的控件算「一大块」（整条任务行）：圆点摆到它里面，不趴在外沿上。 */
 const WIDE_TARGET = 420;
+const TALL_TARGET = 48;
 
 /**
- * 呼吸圆点落在哪：圆心贴在控件某条边的中点上，整个圆点在控件外面（不遮字、不遮图标）。
+ * 呼吸圆点落在哪。
  *
- * 上一版把箭头挂在控件右下角外侧、且箭尖与缩放原点各用一个常数，人看到的就是「飘在角上、没对上」。
- * 现在只有一条规则：**圆心 = 某条边的中点 + 半径**，所以它总是居中地贴在控件某一条边上，
- * 圆点与扩散的波纹共用同一个圆心，肉眼能直接验证「就是这个控件」。
+ * 上一版把箭头挂在控件右下角外侧、且箭尖与缩放原点各用一个常数，人看到的就是「飘在角上、没对上」；
+ * 之后又改成一律贴边，结果整条任务行那个圆点跑到行外、压在右边的时间戳与说明卡之间。
+ * 现在的规则只有两条，每一条都能一眼验证：
  *
- * 选哪条边：控件自身宽不宽决定优先级——宽的是整条任务行，优先贴右侧（下方要留给说明卡，正中又会被下方
- * 的说明卡抢走），右侧放不下或会被夹回控件里时改贴左侧；窄的按钮一律先贴下沿，下方确实放不下时再试上、右、左。
- * 四条边都放不下（控件比窗口还大）就取最宽的那边并夹回窗口里。
+ * - **一长条控件**（共享任务行）：行里就是一大片空白，圆心放在行内正中。它明显「在这条上」，
+ *   又不会压在右侧的时间戳或说明卡上。
+ * - **按钮、齿轮、开关这类小控件**：圆心贴在控件某条边的中点上，整个圆点在控件外（所以不遮字、不遮图标）。
+ *   先试下沿，下方不够再试上沿、右侧、左侧；四条边都放不下就取最宽的那边并夹回窗口里。
  */
 export function clickHintPlacement(rect: Rect, viewport: Viewport): ClickHintPlacement {
   const radius = DEMO_GUIDE_HINT_RADIUS;
+  if (rect.width >= WIDE_TARGET && rect.height >= TALL_TARGET) {
+    // 整条控件：行内正中。四周再夹一次，控件比窗口还大时也不会被切掉。
+    return {
+      side: "inside",
+      left: Math.max(radius + 2, Math.min(rect.left + rect.width / 2, viewport.width - radius - 2)),
+      top: Math.max(radius + 2, Math.min(rect.top + rect.height / 2, viewport.height - radius - 2))
+    };
+  }
   const space = {
     bottom: viewport.height - (rect.top + rect.height),
     top: rect.top,
     right: viewport.width - (rect.left + rect.width),
     left: rect.left
   };
-  const fits = (side: DemoGuideHintSide) => space[side] >= radius * 2 + 8;
-  const order: DemoGuideHintSide[] = rect.width >= WIDE_TARGET
-    ? ["right", "left", "bottom", "top"]
-    : ["bottom", "top", "right", "left"];
-  const side: DemoGuideHintSide = order.find(fits)
+  const fits = (side: Exclude<DemoGuideHintSide, "inside">) => space[side] >= radius * 2 + 8;
+  const order: Array<Exclude<DemoGuideHintSide, "inside">> = ["bottom", "top", "right", "left"];
+  const side = order.find(fits)
     ?? order.reduce((best, candidate) => (space[candidate] > space[best] ? candidate : best));
   const gap = radius + 1;
   const point = side === "bottom"

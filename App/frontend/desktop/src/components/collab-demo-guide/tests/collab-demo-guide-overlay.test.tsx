@@ -577,15 +577,15 @@ describe("demo guide overlay tracking", () => {
   });
 
   it("marks the one control a screen asks people to click with a breathing dot", async () => {
-    // 第一步亮的是一整条任务行：圆点贴它右端中点，整个在行外（下方要留给说明卡）。
+    // 第一步亮的是一整条任务行：圆点放在行里正中，而不是趴在外沿上压住时间戳。
     anchor("board-task-row", () => rect({ left: 90, top: 300, width: 1000, height: 100 }));
     await mount("task-row");
 
     const hint = document.querySelector<HTMLElement>("[data-demo-click-hint]");
     expect(hint).toBeTruthy();
-    // 描边是任务行外扩 3px（87,297,1006,106）：圆心 = 右沿 +11+1、竖向中点。
-    expect(hint!.dataset.demoClickHint).toBe("right");
-    expect(Number.parseFloat(hint!.style.left)).toBe(1105);
+    // 描边是任务行外扩 3px（87,297,1006,106）：圆心 = 行内正中。
+    expect(hint!.dataset.demoClickHint).toBe("inside");
+    expect(Number.parseFloat(hint!.style.left)).toBe(590);
     expect(Number.parseFloat(hint!.style.top)).toBe(350);
     // 一颗绿色圆点（里面一个白心）+ 两圈波纹：呼吸由 CSS 负责，圆心与波纹圆心是同一个定位点。
     expect(hint!.querySelectorAll("." + styles.clickRipple)).toHaveLength(2);
