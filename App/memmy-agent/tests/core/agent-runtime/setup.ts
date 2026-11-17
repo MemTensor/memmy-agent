@@ -26,7 +26,7 @@ export function makeLoop(
     model = "test-model",
     contextWindowTokens = 128_000,
     sessionTtlMinutes = 0,
-    maxMessages = 120,
+    maxMessages = 80,
     unifiedSession = false,
     toolsConfig = null,
     modelPresets = null,

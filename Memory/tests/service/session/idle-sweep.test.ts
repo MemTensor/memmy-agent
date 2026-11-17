@@ -1,3 +1,4 @@
+import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createMemoryServiceFixture,
@@ -22,11 +23,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "idle-session"
       }
     });
-    const idleTurn = service.completeTurn("turn-idle-episode-old", {
+    const idleTurn = (await service.completeTurn("turn-idle-episode-old", {
       sessionId: idleSession.sessionId,
       query: "Prepare the old deployment checklist",
       answer: "The old deployment checklist is ready."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const idleAt = new Date(Date.now() - 2 * 60 * 60 * 1000 - 5_000).toISOString();
@@ -45,11 +46,11 @@ describe("MemoryService / session / idle sweep", () => {
       sessionId: triggerSession.sessionId,
       query: "Start a separate release task"
     });
-    const triggerTurn = service.completeTurn("turn-idle-episode-trigger", {
+    const triggerTurn = (await service.completeTurn("turn-idle-episode-trigger", {
       sessionId: triggerSession.sessionId,
       query: "Start a separate release task",
       answer: "The separate release task has started."
-    });
+    }));
 
     expect(triggerTurn.jobs.map((job) => job.jobType)).toContain("episode_idle_close");
     const run = await service.runWorkerOnce(20);
@@ -59,18 +60,18 @@ describe("MemoryService / session / idle sweep", () => {
       `SELECT id, status, meta_json
        FROM episodes
        WHERE id IN (?, ?)`
-    ).all(idleTurn.episodeId, triggerTurn.episodeId) as Array<{
+    ).all(assignedEpisodeId(service, idleTurn), assignedEpisodeId(service, triggerTurn)) as Array<{
       id: string;
       status: string;
       meta_json: string;
     }>;
-    const closedIdleEpisode = episodes.find((episode) => episode.id === idleTurn.episodeId);
-    const currentEpisode = episodes.find((episode) => episode.id === triggerTurn.episodeId);
+    const closedIdleEpisode = episodes.find((episode) => episode.id === assignedEpisodeId(service, idleTurn));
+    const currentEpisode = episodes.find((episode) => episode.id === assignedEpisodeId(service, triggerTurn));
     expect(closedIdleEpisode?.status).toBe("closed");
     expect(JSON.parse(closedIdleEpisode!.meta_json)).toMatchObject({
       closeReason: "idle_timeout",
       closedBy: "worker.episode_idle_close",
-      triggerEpisodeId: triggerTurn.episodeId
+      triggerEpisodeId: assignedEpisodeId(service, triggerTurn)
     });
     expect(currentEpisode?.status).toBe("open");
 
@@ -79,8 +80,13 @@ describe("MemoryService / session / idle sweep", () => {
        FROM evolution_jobs
        WHERE episode_id = ?
          AND job_type = 'reflection'`
-    ).get(idleTurn.episodeId) as { status: string; payload_json: string } | undefined;
-    expect(reflection?.status).toBe("queued");
+    ).get(assignedEpisodeId(service, idleTurn)) as { status: string; payload_json: string } | undefined;
+    // Continuous admission can finish the reflection produced by idle close in
+    // the same drain, rather than leaving it for a later timer round.
+    expect(reflection?.status).toBe("succeeded");
+    expect(run.jobs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobType: "reflection", status: "succeeded" })
+    ]));
     expect(JSON.parse(reflection!.payload_json)).toMatchObject({
       trigger: "idle_timeout",
       targetKind: "episode"
@@ -93,7 +99,7 @@ describe("MemoryService / session / idle sweep", () => {
          AND change_type = 'episode_closed'
        ORDER BY seq DESC
        LIMIT 1`
-    ).get(idleTurn.episodeId) as { change_type: string; source: string } | undefined;
+    ).get(assignedEpisodeId(service, idleTurn)) as { change_type: string; source: string } | undefined;
     expect(change).toEqual({
       change_type: "episode_closed",
       source: "worker.episode_idle_close"
@@ -111,11 +117,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "recent-session"
       }
     });
-    const recentTurn = service.completeTurn("turn-recent-episode", {
+    const recentTurn = (await service.completeTurn("turn-recent-episode", {
       sessionId: recentSession.sessionId,
       query: "Prepare a recent checklist",
       answer: "The recent checklist is ready."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const recentAt = new Date(Date.now() - 90 * 60 * 1000).toISOString();
@@ -129,18 +135,18 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "recent-trigger-session"
       }
     });
-    service.completeTurn("turn-recent-episode-trigger", {
+    (await service.completeTurn("turn-recent-episode-trigger", {
       sessionId: triggerSession.sessionId,
       query: "Start another recent task",
       answer: "Another recent task has started."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const recentEpisode = db.db.prepare(
       `SELECT status
        FROM episodes
        WHERE id = ?`
-    ).get(recentTurn.episodeId) as { status: string };
+    ).get(assignedEpisodeId(service, recentTurn)) as { status: string };
     expect(recentEpisode.status).toBe("open");
     db.close();
   });
@@ -155,11 +161,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "cloud-idle-session"
       }
     });
-    const idleTurn = service.completeTurn("turn-cloud-idle-old", {
+    const idleTurn = (await service.completeTurn("turn-cloud-idle-old", {
       sessionId: idleSession.sessionId,
       query: "Prepare the cloud deployment checklist",
       answer: "The cloud deployment checklist is ready."
-    });
+    }));
     await service.runWorkerOnce(20);
     setRawTurnActivityAt(
       db,
@@ -175,18 +181,18 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "cloud-other-user-session"
       }
     });
-    service.completeTurn("turn-cloud-other-user", {
+    (await service.completeTurn("turn-cloud-other-user", {
       sessionId: otherUserSession.sessionId,
       query: "Start work for another cloud user",
       answer: "The other cloud user task has started."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const closedEpisode = db.db.prepare(
       `SELECT status
        FROM episodes
        WHERE id = ?`
-    ).get(idleTurn.episodeId) as { status: string };
+    ).get(assignedEpisodeId(service, idleTurn)) as { status: string };
     expect(closedEpisode.status).toBe("closed");
     db.close();
   });
@@ -210,17 +216,17 @@ describe("MemoryService / session / idle sweep", () => {
     expect(db.db.prepare(
       "SELECT episode_id, status FROM raw_turns WHERE session_id = ? AND turn_id = ?"
     ).get(longSession.sessionId, "turn-long-running")).toBeUndefined();
-    const completed = service.completeTurn("turn-long-running", {
+    const completed = (await service.completeTurn("turn-long-running", {
       sessionId: longSession.sessionId,
       query: "Run a long deployment verification",
       answer: "The long deployment verification completed."
-    });
-    expect(completed.episodeId).toMatch(/^episode_/u);
+    }));
+    expect(assignedEpisodeId(service, completed)).toMatch(/^episode_/u);
     db.db.prepare(
       `UPDATE episodes
        SET updated_at = ?
        WHERE id = ?`
-    ).run(new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(), completed.episodeId);
+    ).run(new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(), assignedEpisodeId(service, completed));
 
     const triggerSession = service.openSession({
       namespace: {
@@ -230,18 +236,18 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "long-turn-trigger-session"
       }
     });
-    service.completeTurn("turn-long-running-trigger", {
+    (await service.completeTurn("turn-long-running-trigger", {
       sessionId: triggerSession.sessionId,
       query: "Start a new local task",
       answer: "The new local task has started."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const episode = db.db.prepare(
       `SELECT status
        FROM episodes
        WHERE id = ?`
-    ).get(completed.episodeId) as { status: string };
+    ).get(assignedEpisodeId(service, completed)) as { status: string };
     expect(episode.status).toBe("open");
     db.close();
   });
@@ -299,11 +305,11 @@ describe("MemoryService / session / idle sweep", () => {
         sessionKey: "active-tool-trigger-session"
       }
     });
-    service.completeTurn("turn-active-tool-trigger", {
+    (await service.completeTurn("turn-active-tool-trigger", {
       sessionId: triggerSession.sessionId,
       query: "Record another memory",
       answer: "Another memory was recorded."
-    });
+    }));
     await service.runWorkerOnce(20);
 
     const episode = db.db.prepare(
@@ -324,25 +330,25 @@ describe("MemoryService / session / idle sweep", () => {
         userId: "user-direct-complete-retry"
       }
     });
-    const first = service.completeTurn("turn-direct-complete-retry", {
+    const first = (await service.completeTurn("turn-direct-complete-retry", {
       sessionId: session.sessionId,
       query: "Record the direct completion",
       answer: "The direct completion was recorded."
-    });
+    }));
     await service.runWorkerOnce(20);
 
-    const retry = service.completeTurn("turn-direct-complete-retry", {
+    const retry = (await service.completeTurn("turn-direct-complete-retry", {
       sessionId: session.sessionId,
       query: "Record the direct completion",
       answer: "The direct completion was recorded."
-    });
+    }));
     expect(retry.jobs.map((job) => job.jobType)).not.toContain("episode_idle_close");
     const idleCloseJobs = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
        WHERE job_type = 'episode_idle_close'
          AND episode_id = ?`
-    ).get(first.episodeId) as { count: number };
+    ).get(assignedEpisodeId(service, first)) as { count: number };
     expect(idleCloseJobs.count).toBe(1);
     db.close();
   });

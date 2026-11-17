@@ -13,9 +13,11 @@ APP_PATH="/Applications/Memmy.app"
 # CLI symlinks created by the current installer, plus locations used by older installers.
 CLI_SYMLINKS=(
   "$HOME/.local/bin/memmy-memory"
+  "$HOME/.local/bin/memmy-project"
   "$HOME/.local/bin/memmy-agent"
   "$HOME/.local/bin/memmy"
   "/usr/local/bin/memmy-memory"
+  "/usr/local/bin/memmy-project"
   "/usr/local/bin/memmy-agent"
   "/usr/local/bin/memmy"
 )

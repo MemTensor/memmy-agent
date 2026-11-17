@@ -11,7 +11,7 @@ const source = ts.createSourceFile("main.ts", readFileSync(new URL("../src/main/
 const functionNames = new Set([
   "captureMacPermissionRestartRequest", "shouldIgnoreStaleReopenQuit", "relaunchAfterQuitCleanupIfRequested",
   "armQuitCleanupForceExitTimer", "clearQuitCleanupForceExitTimer",
-  "isMacSystemSessionEnding", "readMacSystemSessionProbe", "readMacQuitContext",
+  "isMacSystemSessionEnding", "readMacSystemSessionProbe", "readMacQuitContext", "traceQuitCleanup",
 ]);
 const variableNames = new Set([
   "isQuitting", "isQuitCleanupInProgress", "isQuitCleanupComplete", "stopMemoryServiceForCurrentQuit",
@@ -82,6 +82,7 @@ function setup(options: {
     requestSingleInstanceLock: ReturnType<typeof vi.fn>;
   };
   const logs: string[] = [];
+  const quitTrace = vi.fn();
   const events: string[] = [];
   let completeCleanup!: () => void;
   let failCleanup!: (error: Error) => void;
@@ -134,7 +135,7 @@ function setup(options: {
     process: { platform: options.platform ?? "darwin", env: {}, resourcesPath: "/Applications/Memmy.app/Contents/Resources",
       argv: options.argv ?? ["Memmy", ...(options.relaunchMarker ? ["--memmy-permission-relaunch"] : [])] },
     Date, setTimeout, clearTimeout, queueMicrotask,
-    console: { warn: vi.fn() },
+    console: { warn: vi.fn(), info: quitTrace },
     loadMenuBarAppearanceNative,
     isMacPermissionSystemQuit: policy,
     isMacSystemSessionQuit, MacPermissionRestartIntent,
@@ -167,7 +168,7 @@ function setup(options: {
   const finishGuide = (token: number, approved: boolean) => runInContext(`macPermissionRestartIntent.finish(${token}, ${approved})`, context);
   if (options.permissionRequested) beginGuide();
   return {
-    app, logs, events, readCurrentQuitContext, readSystemSessionEnding, readSystemSessionEndingState,
+    app, logs, events, quitTrace, readCurrentQuitContext, readSystemSessionEnding, readSystemSessionEndingState,
     loadMenuBarAppearanceNative, policy,
     cleanupBeforeQuit, closeServices, terminateSync, requestQuit, completeCleanup, failCleanup,
     stopComputerUseAgentsOnExitSync, stopComputerUseAgentForPermissionRestart,
@@ -206,6 +207,30 @@ describe("native app-agent shutdown during desktop quit", () => {
     expect(test.events).toEqual(["native-async", "services-close", "native-sync", "relaunch", "quit"]);
     expect(test.stopComputerUseAgentsOnExitSync).toHaveBeenCalledExactlyOnceWith(true,
       "/Applications/Memmy.app/Contents/Resources", undefined);
+    expect(test.quitTrace).toHaveBeenCalledWith("[quit] runtime-services:start");
+    expect(test.quitTrace).toHaveBeenCalledWith("[quit] native-history-agent:start");
+    expect(test.quitTrace).toHaveBeenCalledWith(expect.stringMatching(/^\[quit\] runtime-services:finished elapsedMs=\d+$/));
+    expect(test.quitTrace).toHaveBeenCalledWith(expect.stringMatching(/^\[quit\] native-history-agent:finished elapsedMs=\d+$/));
+  });
+
+  it("closes services while native shutdown is pending, then waits for its bounded cleanup before quitting", async () => {
+    const test = setup({ actualCleanup: true, quitContext: userQuit });
+    let completeNative!: () => void;
+    test.stopComputerUseAgentForPermissionRestart.mockImplementation(() => new Promise<void>(resolve => { completeNative = resolve; }));
+    test.requestQuit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.closeServices).toHaveBeenCalledOnce();
+    test.completeCleanup();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.quitTrace).toHaveBeenCalledWith(expect.stringMatching(/^\[quit\] runtime-services:finished /));
+    expect(test.quitTrace).not.toHaveBeenCalledWith(expect.stringMatching(/^\[quit\] native-history-agent:finished /));
+    expect(test.stopComputerUseAgentsOnExitSync).not.toHaveBeenCalled();
+    expect(test.events).not.toContain("quit");
+    completeNative();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(test.quitTrace).toHaveBeenCalledWith(expect.stringMatching(/^\[quit\] native-history-agent:finished /));
+    expect(test.stopComputerUseAgentsOnExitSync).toHaveBeenCalledOnce();
+    expect(test.events).toContain("quit");
   });
 
   it("runs native exit cleanup after an earlier cleanup failure and before an ordinary quit", async () => {

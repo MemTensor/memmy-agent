@@ -10,6 +10,7 @@ import type { AnalyticsEvent } from "../analytics/analytics-events.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import type { AccountClient } from "../api/account-client.js";
 import type { ByokTokenUsageClient } from "../api/byok-token-usage-client.js";
+import { createHttpCollabClient, type CollabAgentAccessView, type CollabAgentInstallResult, type CollabClient } from "../api/collab-client.js";
 import type { TokenQuotaClient } from "../api/token-quota-client.js";
 import type { ConfigClient, ModelProviderConfig } from "../api/config-client.js";
 import {
@@ -30,6 +31,7 @@ import { useAppState } from "../state/app-state.js";
 import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ComputerUseSettings } from "./computer-use-settings.js";
+import { agentSourceLogoUrl } from "./agent-source-logos.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
   MEMORY_TOKEN_BUDGET_SECTION_ID,
@@ -263,6 +265,7 @@ export function SettingsPage() {
         byokTokenUsageClient={clients?.byokTokenUsage}
         tokenQuotaClient={clients?.tokenQuota}
         computerUseClient={clients?.memmyAgent}
+        collabClient={clients ? createHttpCollabClient(clients.runtimeConfig) : undefined}
         update={update}
         track={track}
         activeTab={activeTab}
@@ -294,6 +297,8 @@ export interface SettingsPageViewProps {
   byokTokenUsageClient?: ByokTokenUsageClient;
   tokenQuotaClient?: TokenQuotaClient;
   computerUseClient?: import("../api/memmy-agent-client.js").MemmyAgentClient;
+  /** 协作项目的授权与按 Agent 开关；未登录账号时不传。 */
+  collabClient?: CollabClient;
   update: UpdateCoordinatorValue;
   track?: TrackAnalyticsEvent;
   activeTab?: SettingsTabId;
@@ -1843,6 +1848,14 @@ export function SettingsPageView(props: SettingsPageViewProps) {
             />
           </div>
         </Section>
+
+        {/* 协作项目只在账号模式存在：API Key 模式没有云端，这一项也不显示。 */}
+        {isAccountMode ? (
+          <Section icon={<Users size={16} className="text-text-ink/60" />} title={t("settings.collab")}>
+            {/* 成员协助不在这里设置：是否接收协助请求按项目在项目设置里开关，限时授权也列在那里。 */}
+            <CollabAgentAccessSection client={props.collabClient} />
+          </Section>
+        ) : null}
 
         <Section icon={<Bell size={16} className="text-text-ink/60" />} title={t("settings.notifications")}>
           <div className="space-y-1">
@@ -3793,4 +3806,185 @@ function formatTokenSummary(value: number): string {
  */
 function formatTokens(value: number): string {
   return value.toLocaleString("en-US");
+}
+
+/**
+ * 设置 → 偏好 → 协作项目：在其他 Agent 中使用协作项目的授权。
+ *
+ * 用户只需要知道「授权了没有」和「哪个 Agent 被关掉了」，所以这一块只显示状态、开关与撤销，
+ * 不逐个列出装了 skill 还是 hook——那是实现细节。
+ */
+export function CollabAgentAccessSection(props: { client?: CollabClient }) {
+  const { t } = useTranslation();
+  const { client } = props;
+  const [view, setView] = useState<CollabAgentAccessView | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failures, setFailures] = useState<CollabAgentInstallResult[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+
+  useEffect(() => {
+    if (!client) return;
+    let cancelled = false;
+    void client.getAgentAccess()
+      .then((next) => {
+        if (!cancelled) setView(next);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
+  /** 授权、重装、单开关都走这里：先转圈，再把每个 Agent 的结果留下，失败的可以重试。 */
+  async function run(task: () => Promise<{ view: CollabAgentAccessView; results: CollabAgentInstallResult[] }>) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await task();
+      setView(result.view);
+      setFailures(result.results.filter((item) => !item.ok));
+    } catch {
+      setError(t("collab.access.failed"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const granted = view?.granted ?? false;
+  const agents = view?.agents.filter((agent) => agent.available) ?? [];
+
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-6 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm text-text-ink/70">{t("settings.collab.row")}</div>
+          <div className="mt-0.5 text-xs leading-relaxed text-text-ink/50">
+            {granted ? t("settings.collab.descriptionGranted") : t("settings.collab.description")}
+          </div>
+          {error ? <div className="mt-1 text-xs text-status-error" role="alert">{error}</div> : null}
+        </div>
+        <div className="flex shrink-0 items-center gap-3 pt-0.5">
+          {granted ? (
+            <>
+              {busy ? (
+                <span className="flex items-center gap-1.5 text-xs text-text-ink/45">
+                  <Loader2 size={12} className="animate-spin" />{t("settings.collab.installing")}
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 text-xs text-text-ink/45">
+                  <Check size={13} className="text-status-success" />{t("settings.collab.granted")}
+                </span>
+              )}
+              {!busy && failures.length ? (
+                <span className="rounded-full bg-status-error/10 px-2 py-0.5 text-[11px] text-status-error">
+                  {t("settings.collab.failedCount", { count: String(failures.length) })}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setConfirmRevoke(true)}
+                className="text-xs text-text-ink/50 hover:text-status-error cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {t("settings.collab.revoke")}
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              disabled={busy || !client}
+              onClick={() => client && void run(() => client.setAgentAccess(true))}
+              className="shrink-0 rounded-btn border border-action-sky/30 bg-background-paper px-3 py-1.5 text-xs text-action-sky hover:bg-action-sky/8 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {busy ? t("settings.collab.installing") : t("settings.collab.grant")}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {granted ? (
+        <>
+          <div className="pt-1">
+            {agents.map((agent) => (
+              <CollabAgentSettingsRow
+                key={agent.sourceId}
+                agent={agent}
+                onToggle={(enabled) => client && void run(() => client.setAgentEnabled(agent.sourceId, enabled))}
+              />
+            ))}
+            {!agents.length ? <p className="py-3 text-xs text-text-ink/50">{t("settings.collab.none")}</p> : null}
+          </div>
+          {failures.length ? (
+            <div className="mt-3 flex items-center justify-between gap-3 rounded-card border-content-panel px-4 py-2.5">
+              <span className="text-xs text-status-error">
+                {t("settings.collab.failed", { names: failures.map((item) => item.name).join("、") })}
+              </span>
+              <button
+                type="button"
+                disabled={busy || !client}
+                onClick={() => client && void run(() => client.installAgentAccess(failures.map((item) => item.sourceId)))}
+                className="shrink-0 rounded-btn border border-action-sky/30 px-2.5 py-1 text-xs text-action-sky hover:bg-action-sky/8 cursor-pointer disabled:opacity-60"
+              >
+                {t("settings.collab.retry")}
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      <ConfirmDialog
+        open={confirmRevoke}
+        title={t("settings.collab.revokeTitle")}
+        message={t("settings.collab.revokeMessage", { count: String(agents.filter((agent) => agent.enabled).length) })}
+        cancelLabel={t("collab.cancel")}
+        confirmLabel={t("settings.collab.revokeConfirm")}
+        confirmVariant="danger"
+        icon={null}
+        onCancel={() => setConfirmRevoke(false)}
+        onConfirm={() => {
+          setConfirmRevoke(false);
+          if (client) void run(() => client.setAgentAccess(false));
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * 设置里的一行 Agent：图标、名字与开关。
+ *
+ * 行距照着「记忆管理 → 跨 Agent 接入」的 Agent 列表来：图标放进浅色方块，第二行放状态胶囊，
+ * 每行 py-3.5、行间一条浅分隔线，避免元素挤在一起。
+ */
+function CollabAgentSettingsRow(props: {
+  agent: CollabAgentAccessView["agents"][number];
+  onToggle: (enabled: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const { agent } = props;
+  const logo = agentSourceLogoUrl(agent.sourceId);
+  return (
+    <div className={`flex items-center gap-3.5 border-t border-border-stone/30 py-3.5 first:border-t-0 ${agent.enabled ? "" : "opacity-70"}`}>
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-canvas-oat">
+        {logo ? <img src={logo} alt="" aria-hidden="true" className="h-5 w-5 object-contain" /> : (
+          <span className="text-xs font-bold text-text-ink/65">{Array.from(agent.name)[0] ?? "A"}</span>
+        )}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm text-text-ink/80">{agent.name}</div>
+        {/* 打开的行不必再写「已授权」，表头已经说过；关掉的行才需要点明。 */}
+        {agent.enabled ? null : (
+          <div className="mt-1 flex items-center gap-2">
+            <span className="shrink-0 rounded-full bg-border-stone/30 px-2 py-0.5 text-[11px] text-text-ink/50">
+              {t("settings.collab.agentOff")}
+            </span>
+            <span className="truncate text-xs text-text-ink/45">{t("settings.collab.agentOffHint")}</span>
+          </div>
+        )}
+      </div>
+      <Toggle checked={agent.enabled} ariaLabel={agent.name} onChange={props.onToggle} />
+    </div>
+  );
 }

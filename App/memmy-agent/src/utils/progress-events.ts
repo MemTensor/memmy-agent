@@ -204,6 +204,8 @@ export function buildToolEventFinishPayloads(context: any): Array<Record<string,
       arguments: redactBrowserAuthArguments(call?.name ?? call?.function?.name, call?.arguments ?? {}),
       result: phase === "end" ? sanitized.result : null,
       error: null,
+      ...(typeof event.display_text === "string" ? { display_text: event.display_text } : {}),
+      ...(event.output_file ? { output_file: event.output_file } : {}),
       files: eventFiles,
       embeds,
     };

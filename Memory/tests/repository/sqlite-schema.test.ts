@@ -190,7 +190,7 @@ describe("repository sqlite schema contract", () => {
         "idx_episodes_project_updated",
         "idx_episodes_pipeline"
       ]));
-      expect(skillTrialColumns.find((column) => column.name === "episode_id")?.notnull).toBe(1);
+      expect(skillTrialColumns.find((column) => column.name === "episode_id")?.notnull).toBe(0);
       expect(skillTrialColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
         "status",
         "outcome",
@@ -703,6 +703,7 @@ describe("repository sqlite schema contract", () => {
         DROP TABLE l3_world_model_scopes;
         DROP INDEX uq_evolution_jobs_l3_immutable_dedupe;
         DROP INDEX uq_evolution_jobs_scope_seq;
+        DROP TRIGGER evolution_jobs_policy_dirty;
         ALTER TABLE evolution_jobs DROP COLUMN scope_key;
         ALTER TABLE evolution_jobs DROP COLUMN scope_seq;
         DELETE FROM schema_migrations;

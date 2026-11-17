@@ -1,3 +1,4 @@
+import { DEVICE_MEMORY_OWNER } from "../../../src/service/namespace/memory-owner.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
@@ -90,7 +91,7 @@ describe("Session L3 World Model context read model", () => {
       `UPDATE l3_world_model_project_environment_state
        SET project_kind = 'code', status = 'clean', applied_scan_id = 'scan-1', updated_at = ?
        WHERE user_id = ? AND project_id = ?`
-    ).run("2026-01-01T00:00:00.000Z", namespace.userId, projectId);
+    ).run("2026-01-01T00:00:00.000Z", DEVICE_MEMORY_OWNER, projectId);
 
     const context = service.l3WorldModelContext(opened.sessionId, envelope(scopedNamespace));
     expect(context).toMatchObject({
@@ -103,7 +104,7 @@ describe("Session L3 World Model context read model", () => {
     db.db.prepare(
       `UPDATE l3_world_model_project_environment_state
        SET applied_scan_id = 'scan-2' WHERE user_id = ? AND project_id = ?`
-    ).run(namespace.userId, projectId);
+    ).run(DEVICE_MEMORY_OWNER, projectId);
     const projected = service.l3WorldModelContext(opened.sessionId, envelope(scopedNamespace));
     expect(projected.projectEnvironmentProfile).toBeNull();
     expect(projected.projectContract).toBe("提交前运行测试。");

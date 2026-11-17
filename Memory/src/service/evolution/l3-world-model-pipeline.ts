@@ -16,6 +16,7 @@ import type {
 } from "../../storage/repositories.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
 import { completeStrictJson } from "../l3-world-model/strict-json-completion.js";
+import { isNeutralFeedback } from "./turn-judge.js";
 
 type FieldUpdateOperation = "noop" | "create" | "update";
 
@@ -74,7 +75,13 @@ export class L3WorldModelTraceFieldPipeline {
       throw new L3WorldModelTerminalEvidenceError("L3 World Model batch payload hash mismatch");
     }
 
-    const fields = this.deps.repos.l3WorldModels.fields(batch.userId, batch.projectId);
+    const snapshot = this.deps.repos.l3WorldModels.effectiveFields(batch.projectId ?? null);
+    const fields = snapshot.fields;
+    const fieldProperty = payload.targetField === "general_rules_and_safety_constraints" ? "generalRulesAndSafetyConstraints"
+      : payload.targetField === "project_contract" ? "projectContract" : "domainKnowledge";
+    const expectedFieldRevision = snapshot.revisions[fieldProperty];
+    const expectedProfileRevision = payload.targetField === "general_rules_and_safety_constraints"
+      ? undefined : snapshot.revisions.projectEnvironmentProfile;
     const currentField = fieldValue(fields, payload.targetField) ?? "";
     const profile = fields.projectEnvironmentProfile ?? "";
     const expectedFieldHash = sha256Hex(currentField);
@@ -93,6 +100,8 @@ export class L3WorldModelTraceFieldPipeline {
         operation: "noop",
         value: "",
         expectedFieldHash,
+        expectedFieldRevision,
+        expectedProfileRevision,
         expectedProfileHash,
         eligibleL1MemoryIds: evidence.eligibleL1MemoryIds
       });
@@ -123,6 +132,8 @@ export class L3WorldModelTraceFieldPipeline {
       operation: output.op,
       value: output.value,
       expectedFieldHash,
+      expectedFieldRevision,
+      expectedProfileRevision,
       expectedProfileHash,
       eligibleL1MemoryIds: evidence.eligibleL1MemoryIds
     });
@@ -132,7 +143,7 @@ export class L3WorldModelTraceFieldPipeline {
     const batch = this.deps.repos.l3WorldModels.getBatch(batchId);
     if (!batch) throw new L3WorldModelTerminalEvidenceError(`missing batch: ${batchId}`);
     const session = this.deps.repos.runtime.getSession(batch.sessionId);
-    if (!session || session.userId !== batch.userId || (session.projectId ?? null) !== (batch.projectId ?? null)) {
+    if (!session || (session.projectId ?? null) !== (batch.projectId ?? null)) {
       throw new L3WorldModelTerminalEvidenceError("L3 World Model batch session scope mismatch");
     }
     const traces = this.deps.repos.l3WorldModels.listBatchTraces(batchId);
@@ -148,7 +159,8 @@ export class L3WorldModelTraceFieldPipeline {
     const feedbackByRawTurn = new Map<string, FeedbackRecord[]>();
     for (const feedbackId of batch.feedbackIds) {
       const feedback = this.deps.repos.runtime.getFeedback(feedbackId);
-      if (!feedback) continue;
+      // A neutral reaction says nothing about the result and is not evidence.
+      if (!feedback || isNeutralFeedback(feedback)) continue;
       const trace = feedback.rawTurnId
         ? traceByRawTurn.get(feedback.rawTurnId)
         : feedback.l1MemoryId
@@ -156,7 +168,6 @@ export class L3WorldModelTraceFieldPipeline {
           : undefined;
       if (
         !trace ||
-        feedback.userId !== batch.userId ||
         feedback.sessionId !== batch.sessionId ||
         (feedback.projectId ?? null) !== (batch.projectId ?? null)
       ) {
@@ -182,7 +193,7 @@ export class L3WorldModelTraceFieldPipeline {
     for (const trace of traces) {
       const memory = this.deps.repos.memories.get(trace.l1MemoryId);
       if (!memory) continue;
-      if (memory.userId !== batch.userId || memory.sessionId !== batch.sessionId) {
+      if (memory.sessionId !== batch.sessionId) {
         throw new L3WorldModelTerminalEvidenceError(`L1 scope mismatch: ${memory.id}`);
       }
       if (!memory.deletedAt && memory.status !== "deleted" && usableRawTurnIds.has(trace.rawTurnId)) {
@@ -265,7 +276,8 @@ function assertJsonArray(value: unknown[], label: string): JsonValue[] {
 }
 
 function assertRawTurnScope(rawTurn: RawTurnRecord, userId: string, sessionId: string): void {
-  if (rawTurn.userId !== userId || rawTurn.sessionId !== sessionId) {
+  void userId;
+  if (rawTurn.sessionId !== sessionId) {
     throw new L3WorldModelTerminalEvidenceError(`RawTurn scope mismatch: ${rawTurn.id}`);
   }
 }

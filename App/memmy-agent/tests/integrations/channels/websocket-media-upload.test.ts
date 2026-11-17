@@ -236,6 +236,28 @@ describe("WebUI media upload route", () => {
     }
   });
 
+  it("rejects binary TXT with a useful reason and accepts BOM-marked UTF-16 text", async () => {
+    tmpRoot();
+    const channel = new WebSocketChannel({}, new MessageBus());
+    const token = await bootstrapToken(channel);
+    const le = Buffer.from("文献综述\nEvidence", "utf16le");
+    const be = Buffer.from(le).swap16();
+    for (const [bytes, status] of [
+      [Buffer.from([0, 0, 1, 154, 0, 0, 1, 154]), 415],
+      [Buffer.concat([Buffer.from([255, 254]), le]), 200],
+      [Buffer.concat([Buffer.from([254, 255]), be]), 200],
+      [Buffer.from([255, 254, 65]), 415]
+    ] as const) {
+      const { body, contentType } = await multipartBody([{ name: "paper.txt", bytes, mime: "text/plain" }]);
+      const response = await channel.dispatchHttp({ remoteAddress: ["127.0.0.1"] }, {
+        path: "/api/webui/media/upload", method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": contentType }, body
+      });
+      expect(response?.status).toBe(status);
+      if (status === 415) expect(String(response?.body)).toContain("invalid_text_content");
+    }
+  });
+
   it("rejects videos, SVG, MIME spoofing, old Office, and archives", async () => {
     tmpRoot();
     const channel = new WebSocketChannel({}, new MessageBus());

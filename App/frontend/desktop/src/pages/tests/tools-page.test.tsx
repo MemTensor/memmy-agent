@@ -76,7 +76,7 @@ describe("ToolsPageView", () => {
     const catalog = getAllIntegrationMeta();
 
     expect(catalog.filter((item) => item.isChannel)).toHaveLength(6);
-    expect(catalog.filter((item) => !item.isChannel)).toHaveLength(118);
+    expect(catalog.filter((item) => !item.isChannel)).toHaveLength(117);
     expect(html).not.toContain("Telegram");
     expect(html).not.toContain("WeChat");
     expect(html).toContain("GitHub");
@@ -87,6 +87,7 @@ describe("ToolsPageView", () => {
     expect(channelsHtml).not.toContain('data-surface="integration"');
     expect(html).toContain('data-surface="integration"');
     expect(html).not.toContain('data-surface="channel"');
+    expect(html).not.toContain("Strava");
     expect(html).not.toContain("ToolDetailDrawer");
     expect(html).not.toContain("modal-right");
   });
@@ -94,7 +95,7 @@ describe("ToolsPageView", () => {
   it("保留页面骨架，三个分类共用紧凑目录的布局", () => {
     const html = renderView(initialToolsState);
 
-    expect(html).toContain('padding-top:calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px) + -8px)');
+    expect(html).toContain('padding-top:calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px) + -20px)');
     expect(html).toContain('class="app-frame-page-content h-full overflow-y-auto tools-page-content"');
     expect(html).toContain('style="padding-bottom:24px"');
     expect(html).toContain('data-tour-anchor="product-tour-tools-content"');

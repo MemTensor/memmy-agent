@@ -6,7 +6,7 @@ source "$ROOT_DIR/scripts/internal/shared/package-logging.sh"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 MEMORY_DIR="$ROOT_DIR/Memory"
-AGENT_SOURCE_CORE_DIR="$ROOT_DIR/AgentSourceCore"
+AGENT_SOURCE_CORE_DIR="$ROOT_DIR/Memory/AgentSourceCore"
 MIGRATIONS_DIR="$ROOT_DIR/Migrations"
 LOCAL_API_CONTRACTS_DIR="$ROOT_DIR/App/backend/local-api-contracts"
 RUNTIME_DIR="$DESKTOP_DIR/dist/runtime"
@@ -796,6 +796,7 @@ verify_packaged_windows_unpacked_artifacts() {
     "$(to_node_readable_path "$UNPACKED_DIR/resources/browser-extension")"
   require_packaged_runtime_file "$UNPACKED_DIR/resources/cli/memmy-memory.cmd"
   require_packaged_runtime_file "$UNPACKED_DIR/resources/cli/memmy.cmd"
+  require_packaged_runtime_file "$UNPACKED_DIR/resources/cli/memmy-project.cmd"
   require_packaged_runtime_file "$packaged_memory_runtime/dist/src/cli/index.js"
   if ! grep -Fq 'set "ENTRY=%RESOURCES_DIR%\memory-runtime\dist\src\cli\index.js"' \
     "$UNPACKED_DIR/resources/cli/memmy-memory.cmd"; then
@@ -1038,6 +1039,12 @@ package_step_start "Build native Windows History recorder from source"
 bash "$ROOT_DIR/scripts/internal/win/build-memmy-computer-history.sh" \
   "$RUNTIME_DIR/memmy-agent/dist/native-computer-history/windows/amd64/memmy-computer-history.exe" amd64
 package_step_start "Stage Windows memmy-agent workspace runtime packages"
+# local-api-contracts shares scan ordering with Memory through this browser-safe package.
+RUNTIME_AGENT_SOURCE_CORE_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/agent-source-core"
+rm -rf "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+mkdir -p "$RUNTIME_AGENT_SOURCE_CORE_DIR"
+cp "$MEMORY_DIR/AgentSourceCore/package.json" "$RUNTIME_AGENT_SOURCE_CORE_DIR/package.json"
+cp -R "$MEMORY_DIR/AgentSourceCore/dist" "$RUNTIME_AGENT_SOURCE_CORE_DIR/dist"
 RUNTIME_LOCAL_API_CONTRACTS_DIR="$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts"
 rm -rf "$RUNTIME_LOCAL_API_CONTRACTS_DIR"
 mkdir -p "$RUNTIME_LOCAL_API_CONTRACTS_DIR"
@@ -1143,6 +1150,7 @@ node "$ROOT_DIR/scripts/internal/shared/prepare-plugin-migration-state.mjs" \
 package_step_start "Create Windows CLI launchers and embedding model"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy-memory.cmd" "memory-runtime\\dist\\src\\cli\\index.js"
 create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd" "app.asar\\dist\\runtime\\memmy-agent\\dist\\main.js"
+create_windows_cli_launcher "$CLI_BIN_DIR/memmy-project.cmd" "app.asar\\dist\\cli\\memmy-project.js"
 node "$ROOT_DIR/scripts/internal/shared/prepare-embedding-model.mjs" "$EMBEDDING_MODELS_DIR"
 cp -R "$EMBEDDING_MODELS_DIR" "$RUNTIME_DIR/memory/embedding-models"
 

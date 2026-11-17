@@ -73,6 +73,7 @@ import { WelcomePage } from "../pages/welcome-page.js";
 // These pages are not needed to show the startup, sign-in, or chat screens.
 const MemoryPage = lazy(() => import("../pages/memory-page.js").then(({ MemoryPage }) => ({ default: MemoryPage })));
 const KnowledgePage = lazy(() => import("../pages/knowledge-page.js").then(({ KnowledgePage }) => ({ default: KnowledgePage })));
+const CollabPage = lazy(() => import("../pages/collab-page.js").then(({ CollabPage }) => ({ default: CollabPage })));
 const SettingsPage = lazy(() => import("../pages/settings-page.js").then(({ SettingsPage }) => ({ default: SettingsPage })));
 const ToolsPage = lazy(() => import("../pages/tools-page.js").then(({ ToolsPage }) => ({ default: ToolsPage })));
 
@@ -392,6 +393,8 @@ function renderRoute(path: AppRoutePath) {
       return <MemoryPage />;
     case "/knowledge":
       return <KnowledgePage />;
+    case "/collab":
+      return <CollabPage />;
     case "/memory-sources":
       return <MemoryPage initialSubPage="sources" />;
     case "/plugin":

@@ -8,7 +8,7 @@ import { installViewerCli, viewerCliStatus } from "../src/server/viewer-cli.js";
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all((await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))));
 });
 
 describe("Viewer CLI installation", () => {

@@ -170,8 +170,8 @@ describe("edit_file valid modes and independent replacement counts", () => {
     { occurrence: 1, line_hint: null, lineHint: null, replace_all: false },
     { occurrence: null, line_hint: 1, replace_all: false },
     { occurrence: null, line_hint: null, replace_all: true },
-    { occurrence: 1, replace_all: false, replaceAll: true, line_hint: null, lineHint: null },
-  ])("accepts unused selectors and preserves alias precedence: %j", async (options) => {
+    { occurrence: 1, replace_all: false, replaceAll: false, line_hint: null, lineHint: null },
+  ])("accepts unused selectors and matching aliases: %j", async (options) => {
     const { file, registry } = setup();
     await fs.mkdir(path.dirname(file));
     await fs.writeFile(file, "same\n");

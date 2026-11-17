@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 
@@ -496,20 +497,39 @@ describe("desktop packaged runtime boundaries", () => {
 
   it("keeps the desktop main process on the shared Memmy identity and config path", () => {
     const source = readFileSync(mainSourcePath, "utf8");
-
-    expect(source).toContain('app.setName("Memmy");');
-    expect(source).toContain("windowsDataLayout = resolveWindowsDataLayout({");
-    expect(source).toContain("const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);");
-    expect(source).toContain("const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);");
-    expect(source).toContain('app.setPath("userData", userDataPath);');
-    expect(source).not.toContain('return join(dirname(process.execPath), "data");');
-    expect(source).toContain('windowsDataLayout?.updatesPath ?? join(app.getPath("userData"), "updates")');
-    expect(source).toContain("advanceWindowsDataMigrationAfterBoot(");
-    expect(source).toContain('[join(homedir(), ".memmy")]');
-    expect(source).toContain("process.env.MEMMY_MEMORY_DB = memoryDatabasePath;");
-    expect(source).toContain('const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");');
-    expect(source).toContain("accountChannel: resolveCurrentDesktopAccountChannel()");
-    expect(source).toContain("runtimeServices = await startManagedRuntimeServices({");
+    const includes = (fragment: string, expected = true) => {
+      // Keep failure diagnostics bounded to the missing contract, not the entire main module.
+      expect(source.includes(fragment), `Main identity contract: ${fragment}`).toBe(expected);
+    };
+    includes('app.setName("Memmy");');
+    includes("windowsDataLayout = resolveWindowsDataLayout({");
+    const devProfile = source.match(/^  const devProfile =[^;]+;/m)?.[0];
+    const userDataPath = source.match(/^  const userDataPath =[^;]+;/m)?.[0];
+    expect(devProfile).toBeDefined();
+    expect(userDataPath).toBeDefined();
+    if (!devProfile || !userDataPath) throw new Error("Missing desktop data-path declarations");
+    const evaluatePath = (isPackaged: boolean, profile: string | undefined, windowsPath: string | null): unknown =>
+      runInNewContext(`${devProfile}\n${userDataPath}\nuserDataPath`, {
+        app: { isPackaged }, process: { env: { MEMMY_DEV_PROFILE_DIR: profile } }, join,
+        windowsDataLayout: windowsPath ? { userDataPath: windowsPath } : null,
+        resolveDesktopUserDataPath: (edition: string) => `/canonical/${edition}`, edition: "cn"
+      });
+    // Packaged builds ignore the development override; development instances keep separate locks.
+    expect(evaluatePath(true, "/dev-profile", "/windows-data")).toBe("/windows-data");
+    expect(evaluatePath(true, "/dev-profile", null)).toBe("/canonical/cn");
+    expect(evaluatePath(false, "/dev-profile", "/windows-data")).toBe(join("/dev-profile", "userData"));
+    expect(evaluatePath(false, undefined, "/windows-data")).toBe("/windows-data");
+    expect(evaluatePath(false, undefined, null)).toBe("/canonical/cn");
+    includes("const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);");
+    includes('app.setPath("userData", userDataPath);');
+    includes('return join(dirname(process.execPath), "data");', false);
+    includes('windowsDataLayout?.updatesPath ?? join(app.getPath("userData"), "updates")');
+    includes("advanceWindowsDataMigrationAfterBoot(");
+    includes('[join(homedir(), ".memmy")]');
+    includes("process.env.MEMMY_MEMORY_DB = memoryDatabasePath;");
+    includes('const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");');
+    includes("accountChannel: resolveCurrentDesktopAccountChannel()");
+    includes("runtimeServices = await startManagedRuntimeServices({");
     const runtimeServicesSource = readFileSync(runtimeServicesPath, "utf8");
     expect(runtimeServicesSource.indexOf("await runPackagedMigrationCommand({")).toBeLessThan(
       runtimeServicesSource.indexOf("await options.beforeStartServices?.({")
@@ -517,9 +537,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(runtimeServicesSource.indexOf("await options.beforeStartServices?.({")).toBeLessThan(
       runtimeServicesSource.indexOf("browserPreparation ??= startPackagedBrowserPreparation(")
     );
-    expect(source).toContain("resolveDevelopmentRuntimeEntryPaths(import.meta.dirname)");
-    expect(source).toContain("memmyConfigPath: process.env.MEMMY_CONFIG");
-    expect(source).not.toContain("startDesktopRuntimeServices");
+    includes("resolveDevelopmentRuntimeEntryPaths(import.meta.dirname)");
+    includes("memmyConfigPath: process.env.MEMMY_CONFIG");
+    includes("startDesktopRuntimeServices", false);
   });
 
   it("waits for an active renderer bootstrap handshake before verifying migrated data", () => {
@@ -1127,6 +1147,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:install-cli-tools")');
     expect(mainSource).toContain("async function installCliTools");
     expect(mainSource).toContain("installPackagedWindowsCliTools");
+    expect(mainSource).toContain("installPackagedWindowsCliOnBoot");
     expect(mainSource).toContain("resolveCliInstallStrategy(");
     expect(mainSource).toContain('Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)');
     expect(mainSource).toContain(') === "packaged-windows"');
@@ -1161,9 +1182,16 @@ describe("desktop packaged runtime boundaries", () => {
 
     expect(agentPackage.bin).toEqual({ memmy: "./dist/main.js" });
     expect(agentPackageLock.packages?.[""]?.bin).toEqual({ memmy: "dist/main.js" });
-    expect(mainSource).toContain('const memmyCli = join(cliDirectory, "memmy")');
-    expect(mainSource).toContain('await Promise.all([access(memoryCli), access(memmyCli)])');
-    expect(mainSource).toContain('installSymlink(memmyCli, join(binDirectory, "memmy"))');
+    expect(mainSource).toContain("await installPackagedMacCliLaunchers()");
+    expect(mainSource).toContain("renderMemmyCliLauncher");
+    expect(mainSource).toContain('["memmy", join(cliDirectory, "memmy")]');
+    expect(mainSource).toContain('["memmy-project", join(cliDirectory, "memmy-project")]');
+    expect(mainSource).toContain("bundledCliInstallDecision");
+    expect(mainSource).not.toContain("await Promise.all([access(memoryCli), access(memmyCli), access(sessionCli)])");
+    expect(packageSource).toContain('create_cli_launcher "$CLI_BIN_DIR/memmy-project" "dist/cli/memmy-project.js"');
+    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$UNPACKED_DIR/resources/cli/memmy-project.cmd"');
+    expect(mainSource).toContain("installSymlink(source, join(binDirectory, name))");
+    expect(mainSource).toContain("installSystemBinSymlink(source, name)");
     expect(mainSource).not.toContain(['join(cliDirectory, "', 'memmy-agent', '")'].join(""));
     expect(mainSource).not.toContain(['join(binDirectory, "', 'memmy-agent', '")'].join(""));
     expect(packageSource).toContain('create_cli_launcher "$CLI_BIN_DIR/memmy"');

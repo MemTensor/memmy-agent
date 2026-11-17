@@ -1,0 +1,137 @@
+{
+  "date": "2026-10-24",
+  "branch": "test-memory-queue-v1.2.6",
+  "targetBranch": "v1.2.6",
+  "upstreamCommit": "68697053ab4e1d0a47f1f38431a7b810c20a94f1",
+  "sourceCommit": "fdc58fd9d4e64679464f9c9f06307dbd03aad0ed",
+  "mergeUsed": true,
+  "rebaseUsed": false,
+  "defaultLimits": {
+    "global": 4,
+    "background": 3,
+    "reservedInteractive": 1,
+    "localProvider": 1,
+    "cloudProvider": 2,
+    "embeddingRequests": 1,
+    "embeddingBatchSize": 16
+  },
+  "versions": {
+    "desktop": "1.2.4",
+    "memory": "2.1.7",
+    "schema": 13
+  },
+  "checks": {
+    "rootLint": "passed",
+    "rootTypecheck": "passed",
+    "rootNpmTest": "passed",
+    "memory": {
+      "passedEachRun": 2279,
+      "skippedEachRun": 1,
+      "runs": 2
+    },
+    "backend": {
+      "passed": 1030
+    },
+    "frontend": {
+      "passed": 2717
+    },
+    "desktop": {
+      "passed": 1308,
+      "skipped": 126
+    },
+    "agentFull": {
+      "passed": 7339,
+      "skipped": 80
+    },
+    "agentTypecheck": "passed"
+  },
+  "conflictResolution": {
+    "files": 10,
+    "extraRegression": [
+      "Responses and Chat Provider capacity",
+      "independent Custom endpoints and canonicalization",
+      "frontend no-auth endpoint identity",
+      "native helper bounded cleanup and late events",
+      "Embedding shared errors and input isolation",
+      "observation recovery with real retry backoff"
+    ]
+  },
+  "environmentRecovery": [
+    "Git uses existing macOS HTTP proxy per command; no global configuration changes",
+    "isolated Agent browser runtime copied from local cached binaries; no real browser profile data copied"
+  ],
+  "artifactVerification": "passed",
+  "package": {
+    "file": "Memmy-1.2.4-darwin-arm64-cn-unsigned.dmg",
+    "sha256": "4de797265b1790dea8ac6a0427cb5ffb17c9f7cfa09541113a8b3646923a38e2",
+    "integrity": "VALID",
+    "packagingSeconds": 212,
+    "electronCacheVerification": {
+      "archive": "electron-v38.4.0-darwin-arm64.zip",
+      "sha256": "0895d02b29b26f33fc984aa0fc06005093f6128343ecce42da89855c14c22aac",
+      "expected": "0895d02b29b26f33fc984aa0fc06005093f6128343ecce42da89855c14c22aac",
+      "matchesOfficialElectronPackage": true
+    },
+    "identity": {
+      "memoryJavaScriptModulesCompared": 232,
+      "mismatches": [],
+      "criticalModuleSha256": {
+        "service/worker/worker-concurrency.js": "9814a75d7b9afa2c3c5214fda25e83f88f7d33c678d3478b0d9ba47708a06950",
+        "service/worker/worker-observability.js": "3bc3006c8cb386dbbaa9ae61cf1f61883903ddc4f7fa6f24c2d665422c80f3eb",
+        "service/worker/worker-runner.js": "54117b8f99f5b585fa43744af402c2f89bcd5144f9e41f76276f003762b3393b",
+        "service/worker/worker-work-requirements.js": "c551ae8a14b77d84b9d29c10b7dfe3be8f8fafaaba11bbbeeff4ee37953aeafe"
+      },
+      "manifest": {
+        "version": "2.1.7",
+        "buildId": "3e82006f0450c9abc60058fd852d3425f08752e4f3e86291c4885924e07bc9d0",
+        "schemaVersion": 13,
+        "protocolVersion": 1,
+        "target": "darwin-arm64",
+        "entrypoint": "dist/src/server/index.js",
+        "viewer": "dist/viewer/index.html"
+      }
+    }
+  },
+  "installedQueueProbe": {
+    "success": true,
+    "backlog": 10000,
+    "backgroundLeased": 3,
+    "untouchedQueued": 9997,
+    "interactiveStartWaitMs": {
+      "native": 7.00329099999999,
+      "onboarding": 6.665915999999925
+    },
+    "basis": "installed compiled queue and real SQLite; business/model work replaced by controlled gates"
+  },
+  "installedAppSmoke": {
+    "success": true,
+    "verification": "automated installed app startup/render/health/normal quit/relaunch; no manual UI operation",
+    "launches": [
+      {
+        "launch": 1,
+        "healthyMs": 5008.2397089999995,
+        "quitMs": 214.74608400000034,
+        "rendered": true,
+        "exit": {
+          "code": 0,
+          "signal": null
+        }
+      },
+      {
+        "launch": 2,
+        "healthyMs": 1452.8067499999997,
+        "quitMs": 215.62770799999998,
+        "rendered": true,
+        "exit": {
+          "code": 0,
+          "signal": null
+        }
+      }
+    ]
+  },
+  "postPackageTestsPassed": 70,
+  "developmentNativeRestored": true,
+  "manualAuthenticatedBusinessUiTest": false,
+  "liveCloudProviderLoadTest": false,
+  "evidenceDirectory": "/Users/lijia/Desktop/memmy-agent-main/queue-pr-sync-20261024"
+}

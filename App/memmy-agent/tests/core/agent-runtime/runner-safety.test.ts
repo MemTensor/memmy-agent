@@ -16,6 +16,7 @@ describe("AgentRunner tool result safety", () => {
     const call = new ToolCallRequest({ id: "c1", name: "noop" });
     const spec = new AgentRunSpec({
       maxToolResultChars: 4,
+      toolResultCompressionEnabled: true,
       tools: { execute: async () => "abcdef", get: () => null } as any,
     });
 
