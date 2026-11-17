@@ -1,3 +1,5 @@
+import { setImmediate as yieldToIO } from "node:timers/promises";
+import { isRecord } from "../../utils/json.js";
 import type {
   CompiledRetrievalQuery,
   SeededChannelScores
@@ -14,7 +16,7 @@ import type {
   MemoryLayer,
   MemoryRow
 } from "../../types.js";
-import { deduplicateCrossAccountMemoryCandidates } from "./cross-account-candidate-dedup.js";
+import { createRecallSourceResolver, deduplicateCrossAccountMemoryCandidates } from "./cross-account-candidate-dedup.js";
 
 export function dedupeStrings(values: readonly string[]): string[] {
   const out: string[] = [];
@@ -25,6 +27,18 @@ export function dedupeStrings(values: readonly string[]): string[] {
     out.push(value);
   }
   return out;
+}
+
+export interface RecallRouteDiagnostic {
+  channel: string;
+  rounds: number;
+  rawHits: number;
+  duplicateHits: number;
+  unknownIdentityCount: number;
+  metadataRows: number;
+  durationMs?: number;
+  uniqueCandidates: number;
+  stopReason: "target_met" | "scope_exhausted" | "work_budget_limited" | "deadline" | "cancelled" | "error" | "no_progress";
 }
 
 interface IndexedCandidatePoolDependencies {
@@ -77,6 +91,8 @@ export class IndexedCandidatePool {
     projectId?: string | null;
     targetSkillId?: string;
     currentAgentId?: string;
+    excludeTraceRawTurnIds?: ReadonlySet<string>;
+    budget?: { maxRows?: number; maxMetadataRows?: number; deadlineAt?: number; signal?: AbortSignal; usage?: {rows: number; metadataRows: number} };
     config: {
       tier1TopK: number;
       tier2TopK: number;
@@ -88,11 +104,119 @@ export class IndexedCandidatePool {
   }): Promise<{
     memories: MemoryRow[];
     channelScoresByMemory: ReadonlyMap<string, SeededChannelScores>;
+    diagnostics: RecallRouteDiagnostic[];
   }> {
     const routeTasks: Array<Promise<MemorySearchIdHit[]>> = [];
+    const diagnostics: RecallRouteDiagnostic[] = [];
+    const usage = input.budget?.usage ?? {rows: 0, metadataRows: 0};
+    const work = {deadlineAt: input.budget?.deadlineAt ?? Date.now() + 5_000,
+      maxRows: input.budget?.maxRows ?? 10_000, maxMetadataRows: input.budget?.maxMetadataRows ?? 50_000};
+    const keyCache = new Map<string, string>();
+    const resolveSourceKey = createRecallSourceResolver(this.deps.repos);
+    const groupCache = new Map<string, string[]>();
+    const recentGroups = new Set<string>();
+    const keyOf = (memory: MemoryRow) => {
+      if (!keyCache.has(memory.id)) keyCache.set(memory.id, resolveSourceKey(memory) ?? `id:${memory.id}`);
+      return keyCache.get(memory.id)!;
+    };
+    const refill = async (filter: MemoryFilter, limit: number, channel: string,
+      run: (filter: MemoryFilter, limit: number, onWindow: (ids: string[], more: boolean) => void) => MemorySearchIdHit[]) => {
+      if (filter.memoryLayer !== "L1") {
+        try { return run(filter, limit, () => {}); }
+        catch { diagnostics.push({channel,rounds:1,rawHits:0,duplicateHits:0,unknownIdentityCount:0,metadataRows:0,uniqueCandidates:0,stopReason:"error"});return []; }
+      }
+      const routeStarted=Date.now();
+      const accepted = new Map<string, MemorySearchIdHit>();
+      const excluded = new Set<string>();
+      const unknownIdentities = new Set<string>();
+      const diagnostic: RecallRouteDiagnostic = {channel, rounds: 0, rawHits: 0, duplicateHits: 0, unknownIdentityCount: 0, metadataRows: 0, uniqueCandidates: 0, stopReason: "scope_exhausted"};
+      diagnostics.push(diagnostic);
+      const batchSize = Math.max(1, Math.min(256, limit));
+      for (let round=0; round<128; round++) {
+        if (accepted.size >= limit) {diagnostic.stopReason="target_met"; break;}
+        if (input.budget?.signal?.aborted) {diagnostic.stopReason="cancelled"; break;}
+        if (Date.now() >= work.deadlineAt) {diagnostic.stopReason="deadline"; break;}
+        if (usage.rows >= work.maxRows || usage.metadataRows >= work.maxMetadataRows) {diagnostic.stopReason="work_budget_limited"; break;}
+        let window: string[] | undefined;
+        let windowMore = false;
+        const size = Math.min(batchSize, work.maxRows - usage.rows);
+        let hits: MemorySearchIdHit[];
+        try {
+          hits = run({...filter, excludedIds: [...excluded]}, size,
+            (ids, more) => {window=ids; windowMore=more;});
+        } catch {diagnostic.stopReason="error"; break;}
+        diagnostic.rounds++;
+        usage.rows += hits.length;
+        diagnostic.rawHits += hits.length;
+        const fresh = hits.filter(hit => !excluded.has(hit.id));
+        const memories = this.deps.repos.memories.getMany(dedupeStrings(fresh.map(hit => hit.id)));
+        const memoriesById = new Map(memories.map(memory => [memory.id, memory]));
+        const before = excluded.size;
+        for (const hit of fresh) {
+          excluded.add(hit.id);
+          const memory = memoriesById.get(hit.id);
+          if (!memory) continue;
+          const key = keyOf(memory);
+          if (key.startsWith("id:")) unknownIdentities.add(memory.id);
+          if (!this.isMemoryReadyForRetrieval(memory)) continue;
+          const trace = isRecord(memory.properties.internal_info.trace) ? memory.properties.internal_info.trace : undefined;
+          const raw = trace?.raw_turn_id ?? memory.info.raw_turn_id;
+          if (typeof raw === "string" && input.excludeTraceRawTurnIds?.has(raw)) recentGroups.add(key);
+          if (!key.startsWith("id:") && !groupCache.has(key) &&
+            (accepted.has(key) || Boolean(input.excludeTraceRawTurnIds?.size))) {
+            const turn = memory.info.turn_id ?? trace?.turn_id;
+            if (typeof turn === "string") {
+              const remaining = Math.max(0, work.maxMetadataRows - usage.metadataRows);
+              const cap = Math.min(10_000, remaining);
+              const members = this.deps.repos.memories.recallSourceCandidates(turn, filter, cap + 1, typeof trace?.step_index === "number" ? trace.step_index : undefined);
+              usage.metadataRows += members.length;
+              diagnostic.metadataRows += members.length;
+              if (members.length > cap) {
+                diagnostic.stopReason="work_budget_limited";
+                break;
+              }
+              const sameSource=members.filter(row => keyOf(row) === key);
+              groupCache.set(key, sameSource.map(row => row.id));
+              if (sameSource.some(row => {
+                const meta=isRecord(row.properties.internal_info.trace) ? row.properties.internal_info.trace : undefined;
+                const id=meta?.raw_turn_id ?? row.info.raw_turn_id;
+                return typeof id === "string" && input.excludeTraceRawTurnIds?.has(id);
+              })) recentGroups.add(key);
+            }
+          }
+          for (const id of groupCache.get(key) ?? []) excluded.add(id);
+          if (recentGroups.has(key)) {accepted.delete(key); continue;}
+          const previous = accepted.get(key);
+          if (previous) diagnostic.duplicateHits++;
+          if (previous && hit.channel?.startsWith("vec") && hit.score > previous.score) {
+            accepted.set(key, hit);
+          }
+          if (!previous) {
+            // Text routes are ranked across source groups, never reset at a page boundary.
+            accepted.set(key, {...hit, score: hit.channel === "fts" || hit.channel === "pattern" || hit.channel === "structural"
+              ? 1 / (accepted.size + 1) : hit.score});
+          }
+        }
+        if (diagnostic.stopReason === "work_budget_limited") break;
+        if (accepted.size >= limit) {diagnostic.stopReason="target_met"; break;}
+        if (window && hits.length < size) {
+          for (const id of window) excluded.add(id);
+          // A window with no usable vectors can have more compatible metadata behind it.
+          if (!windowMore) {diagnostic.stopReason="scope_exhausted"; break;}
+          usage.rows += Math.max(0, window.length - hits.length);
+        } else if (!window && hits.length < size) {diagnostic.stopReason="scope_exhausted"; break;}
+        if (excluded.size === before) {diagnostic.stopReason="no_progress"; break;}
+        if (round === 127) diagnostic.stopReason="work_budget_limited";
+        else await yieldToIO();
+      }
+      diagnostic.uniqueCandidates=Math.min(accepted.size,limit);
+      diagnostic.unknownIdentityCount=unknownIdentities.size;
+      diagnostic.durationMs=Date.now()-routeStarted;
+      return [...accepted.values()].slice(0,limit);
+    };
     const queryVector = input.queryVector && input.queryVector.length > 0 ? input.queryVector : undefined;
     const layers = input.layers;
-    const addRoute = (run: () => MemorySearchIdHit[]): void => {
+    const addRoute = (run: () => MemorySearchIdHit[] | Promise<MemorySearchIdHit[]>): void => {
       routeTasks.push(Promise.resolve().then(run));
     };
 
@@ -110,24 +234,28 @@ export class IndexedCandidatePool {
 
       if (queryVector) {
         if (layer === "L1") {
-          addRoute(() => this.searchTraceVectorRoutes(queryVector, filter, vectorPool, input.compiledQuery, input.config));
+          addRoute(async () => {
+            const tags = input.config.tagFilter === "off" ? [] : input.compiledQuery.tags;
+            const search = (field: "vec_summary" | "vec_action", anyOfTags?: string[]) =>
+              refill(filter, vectorPool, field, (scoped, limit, onWindow) =>
+                this.deps.repos.memories.searchVectorIds(queryVector, field, scoped, limit, {anyOfTags, onWindow}));
+            if (!tags.length) return [...await search("vec_summary"), ...await search("vec_action")];
+            const tagged=[...await search("vec_summary", tags), ...await search("vec_action", tags)];
+            return tagged.length || input.config.tagFilter === "on" ? tagged : search("vec_summary");
+          });
         } else {
           addRoute(() => this.deps.repos.memories.searchVectorIds(queryVector, "vec", filter, vectorPool));
         }
       }
 
       if (input.compiledQuery.ftsMatch) {
-        addRoute(() => this.deps.repos.memories.searchFtsIds(input.compiledQuery.ftsMatch, filter, keywordPool));
+        addRoute(() => refill(filter, keywordPool, "fts", (scoped, limit) => this.deps.repos.memories.searchFtsIds(input.compiledQuery.ftsMatch, scoped, limit, true)));
       }
       if (input.compiledQuery.patternTerms.length > 0) {
-        addRoute(() => this.deps.repos.memories.searchPatternIds(input.compiledQuery.patternTerms, filter, keywordPool));
+        addRoute(() => refill(filter, keywordPool, "pattern", (scoped, limit) => this.deps.repos.memories.searchPatternIds(input.compiledQuery.patternTerms, scoped, limit)));
       }
       if (layer === "L1" && input.compiledQuery.structuralFragments.length > 0) {
-        addRoute(() => this.deps.repos.memories.searchStructuralIds(
-          input.compiledQuery.structuralFragments,
-          filter,
-          Math.max(input.config.tier2TopK, 10)
-        ));
+        addRoute(() => refill(filter, Math.max(input.config.tier2TopK, 10), "structural", (scoped, limit) => this.deps.repos.memories.searchStructuralIds(input.compiledQuery.structuralFragments, scoped, limit)));
       }
     }
 
@@ -135,7 +263,7 @@ export class IndexedCandidatePool {
       routeTasks.push(Promise.resolve([{ id: input.targetSkillId, score: 1, channel: "vec" }]));
     }
     if (routeTasks.length === 0) {
-      return { memories: [], channelScoresByMemory: new Map() };
+      return { memories: [], channelScoresByMemory: new Map(), diagnostics };
     }
 
     const routeHits = await Promise.all(routeTasks);
@@ -152,12 +280,13 @@ export class IndexedCandidatePool {
         this.isMemoryReadyForRetrieval(memory) &&
         this.isSkillVisibleToAgent(memory, input.currentAgentId)
       );
-    return deduplicateCrossAccountMemoryCandidates({
+    return {...deduplicateCrossAccountMemoryCandidates({
       memories: readyMemories,
       repos: this.deps.repos,
       preferredUserId: input.userId,
+      resolveSourceKey,
       channelScoresByMemory
-    });
+    }), diagnostics};
   }
 
   private isSkillVisibleToAgent(memory: MemoryRow, currentAgentId?: string): boolean {
@@ -169,31 +298,6 @@ export class IndexedCandidatePool {
       : "";
     if (!sourceAgentId) return false;
     return !currentAgentId || normalizeAgentId(sourceAgentId) !== normalizeAgentId(currentAgentId);
-  }
-
-  private searchTraceVectorRoutes(
-    queryVector: number[],
-    filter: MemoryFilter,
-    vectorPool: number,
-    compiledQuery: CompiledRetrievalQuery,
-    config: {
-      tagFilter: "auto" | "on" | "off";
-    }
-  ): MemorySearchIdHit[] {
-    const tags = config.tagFilter === "off" ? [] : compiledQuery.tags;
-    const search = (anyOfTags?: string[]): MemorySearchIdHit[] => {
-      const summary = this.deps.repos.memories.searchVectorIds(queryVector, "vec_summary", filter, vectorPool, {
-        anyOfTags
-      });
-      const action = this.deps.repos.memories.searchVectorIds(queryVector, "vec_action", filter, vectorPool, {
-        anyOfTags
-      });
-      return [...summary, ...action];
-    };
-    if (tags.length === 0) return search();
-    const tagged = search(tags);
-    if (tagged.length > 0 || config.tagFilter === "on") return tagged;
-    return this.deps.repos.memories.searchVectorIds(queryVector, "vec_summary", filter, vectorPool);
   }
 
   isMemoryReadyForRetrieval(memory: MemoryRow): boolean {

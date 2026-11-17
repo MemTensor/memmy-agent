@@ -571,7 +571,7 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
     const exports = module.exports;
 
     const name = "memmy-memory-client";
-    const inject = ["uiConversation"];
+    const inject = [];
 
     function resolveConversationEventRegistry(ctx) {
       const uiConversation = ctx.uiConversation
@@ -582,11 +582,14 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
       if (conversation && conversation.events) return conversation.events;
       const conversationEvents = typeof ctx.get === "function" ? ctx.get("conversationEvents") : undefined;
       if (conversationEvents) return conversationEvents;
-      throw new Error("memmy-memory requires uiConversation.events or conversationEvents");
+      return null;
     }
 
     function apply(ctx) {
-      resolveConversationEventRegistry(ctx).register({
+      try {
+        const registry = resolveConversationEventRegistry(ctx);
+        if (!registry || typeof registry.register !== "function") return;
+        registry.register({
         kind: "memmy-optimistic-user",
         target: "chat",
         match(event) {
@@ -634,7 +637,12 @@ export const DEEPSEEK_HARNESS_PLUGIN_CLIENT = String.raw`window.__ModuleLoader__
             }
           };
         }
-      });
+        });
+      } catch (error) {
+        if (globalThis.console && typeof globalThis.console.warn === "function") {
+          globalThis.console.warn("memmy-memory optimistic message UI disabled", error);
+        }
+      }
     }
 
     function optimisticMessage(event) {
@@ -666,8 +674,7 @@ export function createDeepseekHarnessPluginPackageManifest(): Record<string, unk
     },
     dsh: {
       client: {
-        platform: "web",
-        inject: ["@deepseek-ai/dsh-client-ui-conversation"]
+        platform: "web"
       }
     },
     peerDependencies: {

@@ -468,6 +468,27 @@ it("removes a file from the list without waiting for delete to finish", async ()
   expect(releaseDelete).toBeDefined();
 });
 
+it("does not render the knowledge list while settings are still loading", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <KnowledgePage
+        connection={{
+          baseUrl: "http://localhost:1234",
+          localToken: "local-test",
+        }}
+      />,
+    );
+  });
+  expect(container.textContent).toContain("正在读取知识库配置…");
+  expect(container.querySelector(".mk-side")).toBeNull();
+  expect(container.querySelector(".mk-resize")).toBeNull();
+});
+
 async function renderKnowledge(state: KnowledgeSettings, onSignIn?: () => void) {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal(
@@ -513,11 +534,10 @@ it("shows a centered sign-in empty state without extra copy", async () => {
     button.textContent?.includes("登录 Memmy"),
   );
   expect(signIn?.className).toContain("mk-primary");
-  expect(container.querySelector<HTMLButtonElement>(".mk-new-btn")?.disabled).toBe(
-    true,
-  );
-  expect(container.querySelector(".mk-new-btn")?.textContent?.trim()).toBe("");
-  expect(container.querySelector(".mk-new-btn")?.getAttribute("aria-label")).toContain("新建");
+  // 未登录时不出现知识库目录侧栏，也不出现分隔条
+  expect(container.querySelector(".mk-side")).toBeNull();
+  expect(container.querySelector(".mk-resize")).toBeNull();
+  expect(container.querySelector(".mk-new-btn")).toBeNull();
   await act(async () => {
     signIn!.click();
   });
@@ -625,6 +645,9 @@ it("shows a centered retry empty state when knowledge is unavailable", async () 
   expect(container.textContent).not.toContain("还没有知识库");
   expect(container.textContent).not.toContain("可创建的知识库");
   expect(container.querySelector(".mk-illust-warn")).not.toBeNull();
+  // 服务不可用时同样不出现目录侧栏
+  expect(container.querySelector(".mk-side")).toBeNull();
+  expect(container.querySelector(".mk-resize")).toBeNull();
   expect(
     [...container.querySelectorAll("button")].find((button) =>
       button.textContent === "重试",

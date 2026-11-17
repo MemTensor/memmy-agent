@@ -32,6 +32,11 @@ export function AppStateProvider(props: { children: ReactNode }) {
   return <AppStateContext.Provider value={value}>{props.children}</AppStateContext.Provider>;
 }
 
+/** The app state, or null where it is not provided — a page rendered on its own in tests. */
+export function useOptionalAppState(): AppStateContextValue | null {
+  return useContext(AppStateContext);
+}
+
 /** Handles use app state. */
 export function useAppState(): AppStateContextValue {
   const value = useContext(AppStateContext);

@@ -137,8 +137,14 @@ function fixture(
   const applyProfile = vi.fn().mockReturnValue({ stale: false });
   const getState = vi.fn().mockReturnValue({ currentScanId: scanId });
   const repos = {
-    projectEnvironments: { getState, applyProfile },
+    projectEnvironments: { getState, applyProfile, isCurrentScan: vi.fn().mockReturnValue(true) },
     l3WorldModels: {
+      effectiveFields: vi.fn().mockReturnValue({fields: {
+        generalRulesAndSafetyConstraints: null,
+        projectEnvironmentProfile: currentProfile,
+        projectContract: null,
+        domainKnowledge: null
+      }, revisions: {projectEnvironmentProfile:"profile-revision"}, memories: []}),
       fields: vi.fn().mockReturnValue({
         generalRulesAndSafetyConstraints: null,
         projectEnvironmentProfile: currentProfile,

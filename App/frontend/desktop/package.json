@@ -40,6 +40,7 @@
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
     "happy-dom": "^20.10.6",
-    "postcss": "8.5.15"
+    "postcss": "8.5.15",
+    "@types/hast": "^3.0.4"
   }
 }

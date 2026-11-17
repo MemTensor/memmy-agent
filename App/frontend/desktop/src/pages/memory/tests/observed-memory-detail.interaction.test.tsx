@@ -8,6 +8,7 @@ import { MemoriesSubPage } from "../memories-sub-page.js";
 import { createMemoryRuntimeClientStub, memoryDetailFixture, panelItemsOutput } from "./fixtures.js";
 import type { GetMemoryOutput, MemoryProcessingRecord } from "@memmy/local-api-contracts";
 import { clearMemoryPanelCache } from "../memory-panel-cache.js";
+import { PanelVisibilityContext } from "../panel-visibility.js";
 
 function detail(state: MemoryProcessingRecord["state"]): GetMemoryOutput {
   const processed = state === "ready";
@@ -52,6 +53,32 @@ describe("open observation processing", () => {
     clearMemoryPanelCache();
   });
 
+  it("stops retry follow-up reads when its page becomes hidden while the retry is in flight", async () => {
+    const failed = detail("failed");
+    let finishRetry!: () => void;
+    const pending = new Promise<void>(resolve => { finishRetry = resolve; });
+    const getMemory = vi.fn(async () => failed);
+    const getMemoryProcessingStatus = vi.fn(async () => ({items:[failed.item.processing!],serverTime:"2026-10-28T00:00:00Z"}));
+    const retryMemoryProcessing = vi.fn(async () => { await pending; return {processing:failed.item.processing!} as never; });
+    const client = createMemoryRuntimeClientStub({ getMemory, getMemoryProcessingStatus, retryMemoryProcessing,
+      listPanelItems: vi.fn(async () => panelItemsOutput([failed.item])) });
+    const request = {id:failed.item.id,requestId:1};
+    const render = async (visible: boolean) => act(async () => root.render(
+      <AppStateProvider><I18nProvider language="zh-CN"><PanelVisibilityContext.Provider value={visible}>
+        <MemoriesSubPage client={client} openRequest={request}/>
+      </PanelVisibilityContext.Provider></I18nProvider></AppStateProvider>
+    ));
+    await render(true);
+    await act(async () => container.querySelector<HTMLButtonElement>(".memory-processing-action--primary")!.click());
+    expect(retryMemoryProcessing).toHaveBeenCalledTimes(1);
+    await render(false); getMemory.mockClear(); getMemoryProcessingStatus.mockClear();
+    await act(async () => finishRetry());
+    expect(getMemoryProcessingStatus).not.toHaveBeenCalled();
+    expect(getMemory).not.toHaveBeenCalled();
+    await render(true);
+    expect(container.textContent).not.toContain("正在重试");
+  });
+
   it("updates an open pending drawer when processing finishes and stops polling", async () => {
     const pending = detail("summary_pending");
     const ready = detail("ready");
@@ -94,14 +121,16 @@ describe("open observation processing", () => {
     const client = createMemoryRuntimeClientStub({ getMemory, listPanelItems: vi.fn(async () => panelItemsOutput([aggregate.item])) });
     await act(async () => root.render(<AppStateProvider><I18nProvider language="zh-CN"><MemoriesSubPage client={client} openRequest={{ id: aggregate.item.id, requestId: 1 }} /></I18nProvider></AppStateProvider>));
     await act(async () => container.querySelector<HTMLButtonElement>(".memory-policy-id--link")?.click());
-    expect(getMemory).toHaveBeenLastCalledWith("observation_parent");
+    expect(getMemory).toHaveBeenLastCalledWith("observation_parent", expect.any(AbortSignal));
     expect(container.querySelector(".memory-drawer")?.textContent).toContain("这是一段对应的来源记忆。");
   });
 
-  it("refreshes a failed open drawer when a changed source or external retry appears in the list", async () => {
+  it("refreshes a failed open drawer after an external retry without reloading the list", async () => {
     let latest = detail("failed");
     const getMemory = vi.fn(async () => latest);
-    const client = createMemoryRuntimeClientStub({ getMemory, listPanelItems: vi.fn(async () => panelItemsOutput([latest.item])) });
+    const listPanelItems = vi.fn(async () => panelItemsOutput([latest.item]));
+    const client = createMemoryRuntimeClientStub({ getMemory, listPanelItems,
+      getMemoryProcessingStatus: vi.fn(async () => ({ items: [latest.item.processing!], serverTime: latest.item.updatedAt })) });
     await act(async () => root.render(<AppStateProvider><I18nProvider language="zh-CN"><MemoriesSubPage client={client} openRequest={{ id: latest.item.id, requestId: 1 }} /></I18nProvider></AppStateProvider>));
     await act(async () => vi.advanceTimersByTimeAsync(180));
     expect(container.querySelector(".memory-drawer")?.textContent).toContain("这段历史摘要尚未整理为记忆");
@@ -111,6 +140,7 @@ describe("open observation processing", () => {
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
     expect(container.querySelector(".memory-drawer")?.textContent).toContain("采购仍有审批事项需要跟进。");
     expect(getMemory).toHaveBeenCalledTimes(2);
+    expect(listPanelItems).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a queued History window pending when an older service flags it for automatic retry", async () => {

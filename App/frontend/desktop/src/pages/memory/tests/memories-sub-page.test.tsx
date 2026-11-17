@@ -26,6 +26,20 @@ import {
 } from "../memory-agent-filter.js";
 
 describe("MemoriesSubPage", () => {
+  it("uses the canonical detail summary when legacy trace metadata still has a placeholder", () => {
+    const detail = { ...memoryDetailFixture, item: { ...memoryDetailFixture.item,
+      summary: "有效存储摘要", processing: undefined,
+      metadata: { ...memoryDetailFixture.item.metadata, traceDetail: {
+        ...(memoryDetailFixture.item.metadata.traceDetail as Record<string, unknown>), summary: "摘要总结中"
+      } }
+    } };
+    const html = renderMemories({ status: "ready", data: panelItemsOutput([]), detail: { status: "ready", data: detail } });
+    expect(html).toContain("有效存储摘要");
+    expect(html).not.toContain("摘要总结中");
+    detail.item.summary = "";
+    const empty = renderMemories({ status: "ready", data: panelItemsOutput([]), detail: { status: "ready", data: detail } });
+    expect(empty).not.toContain("摘要总结中");
+  });
   it("在所有记忆列表明确标注没有提炼为记忆的观察和原因", () => {
     const html = renderMemories({ status: "ready", data: panelItemsOutput([{
       ...memoryListItemFixture,
@@ -38,6 +52,20 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("重复的窗口切换没有提供新上下文。");
     expect(html).not.toContain("memory-card__score");
   });
+
+  it("shows source envelopes and adjacent requests in the user detail block", () => {
+    const detail = { ...memoryDetailFixture, item: { ...memoryDetailFixture.item,
+      metadata: { ...memoryDetailFixture.item.metadata, traceDetail: {
+        ...(memoryDetailFixture.item.metadata.traceDetail as Record<string, unknown>),
+        userQuery: '<in-app-browser-context>\n上下文\n</in-app-browser-context>\n请保留记忆请求。'
+      } }
+    } };
+    const html = renderMemories({ status: "ready", data: panelItemsOutput([memoryListItemFixture]), detail: { status: "ready", data: detail } });
+    expect(html).toContain("请保留记忆请求。");
+    expect(html).toContain("&lt;in-app-browser-context&gt;");
+    expect(html).not.toContain("<in-app-browser-context>");
+  });
+
   it("把搜索转换为只读取原始记忆的 PanelItemsInput", () => {
     expect(buildPanelItemsInput({ query: "偏好" })).toEqual({
       q: "偏好",
@@ -330,7 +358,7 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain('class="memory-card__title">trace_457c41a4ec1e730ecd39');
   });
 
-  it("waiting 列表的 RawTurn 标题不盖过正文里的用户原句", () => {
+  it("waiting 列表缺少 sourceText 时使用 id，不重新提取原始正文", () => {
     const html = renderMemories({
       status: "ready",
       data: panelItemsOutput([{
@@ -345,9 +373,63 @@ describe("MemoriesSubPage", () => {
       }]),
       detail: null
     });
-    expect(html).toContain('class="memory-card__title">请修复自动扫描卡顿');
+    expect(html).toContain('class="memory-card__title">trace_waiting_raw');
+    expect(html).not.toContain('class="memory-card__title">请修复自动扫描卡顿');
     expect(html).toContain("摘要总结中");
     expect(html).not.toContain("RawTurn: raw_pending");
+  });
+
+  it.each(["summary_pending", "summarizing"] as const)("%s 不从正文恢复已过滤的上下文或占位状态", (state) => {
+    for (const sourceText of [undefined, "摘要总结中"]) {
+      const html = renderMemories({
+        status: "ready",
+        data: panelItemsOutput([{
+          ...memoryListItemFixture,
+          id: "trace_context_only", title: "<timestamp>today</timestamp>",
+          generatedTitle: undefined, sourceText, summary: "",
+          body: 'User:\n<in-app-browser-context source="ambient-ui-state">\n页面正文\n</in-app-browser-context>\nAssistant:\nDone',
+          processing: processingRecord("trace_context_only", state, "summary")
+        }]), detail: null
+      });
+      expect(html).toContain('class="memory-card__title">trace_context_only');
+      expect(html).toContain("摘要总结中");
+      expect(html).not.toContain("in-app-browser-context");
+      expect(html).not.toContain("页面正文");
+      expect(html).not.toContain("timestamp");
+    }
+  });
+
+  it.each(["failed", "ready"] as const)("%s 的 trace 使用语义预览或 ID，不能恢复历史标签", (state) => {
+    for (const summary of ["", "摘要总结中"]) {
+      for (const sourceText of ["请修复标题", undefined, "摘要总结中"]) {
+        const html = renderMemories({
+          status: "ready",
+          data: panelItemsOutput([{
+            ...memoryListItemFixture, kind: "trace", id: "trace_context_fallback",
+            title: "<timestamp>today</timestamp>", generatedTitle: undefined, summary, sourceText,
+            body: 'User:\n<in-app-browser-context source="ambient-ui-state">\n页面正文\n</in-app-browser-context>\nAssistant:\nDone',
+            processing: { ...processingRecord("trace_context_fallback", "ready", "summary"), state }
+          }]), detail: null
+        });
+        expect(html).toContain(`class="memory-card__title">${sourceText === "请修复标题" ? sourceText : "trace_context_fallback"}`);
+        expect(html).not.toContain("in-app-browser-context");
+        expect(html).not.toContain("timestamp");
+        expect(html).not.toContain("页面正文");
+      }
+    }
+  });
+
+  it("摘要完成进入 embedding 阶段后使用生成标题，不继续显示预览", () => {
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{
+        ...memoryListItemFixture,
+        generatedTitle: "扫描标题修复", sourceText: "请修复扫描后的记忆标题",
+        processing: processingRecord(memoryListItemFixture.id, "embedding_pending", "embedding")
+      }]), detail: null
+    });
+    expect(html).toContain('class="memory-card__title">扫描标题修复');
+    expect(html).not.toContain('class="memory-card__title">请修复扫描后的记忆标题');
   });
 
   it("waiting 的记忆详情不显示标题，并把记忆摘要固定成摘要总结中", () => {
@@ -606,19 +688,29 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("这条记忆处理失败");
   });
 
-  it("确有后台重试任务时提示稍后自动重试", () => {
+  it.each([
+    ["summary_pending", "summary", false, null],
+    // Older services also set autoRetryScheduled on the first queued attempt.
+    ["summary_pending", "summary", true, null],
+    ["summary_pending", "summary", true, "temporary provider failure"],
+    ["summarizing", "summary", false, "temporary provider failure"],
+    ["embedding_pending", "embedding", true, "temporary provider failure"],
+    ["embedding", "embedding", false, "temporary provider failure"],
+    ["ready", null, true, null],
+    ["ready_text_only", null, false, "input too long"]
+  ] as const)("后台状态 %s / %s / autoRetry=%s 不显示失败卡", (state, stage, autoRetryScheduled, errorMessage) => {
     const processing = {
       memoryId: memoryListItemFixture.id,
-      state: "summary_pending" as const,
-      stage: "summary" as const,
+      state,
+      stage,
       activeJobId: "summary-retry",
-      attemptCount: 1,
+      attemptCount: errorMessage ? 1 : 0,
       manualRetryCount: 0,
       retryAction: "retry" as const,
-      errorCode: "transient_provider_error",
-      errorMessage: "temporary provider failure",
-      failedAt: "2026-06-03T09:30:00.000Z",
-      autoRetryScheduled: true,
+      errorCode: errorMessage ? "transient_provider_error" : null,
+      errorMessage,
+      failedAt: errorMessage ? "2026-06-03T09:30:00.000Z" : null,
+      autoRetryScheduled,
       updatedAt: "2026-06-03T09:30:00.000Z"
     };
     const html = renderMemories({
@@ -633,13 +725,14 @@ describe("MemoriesSubPage", () => {
       }
     });
 
-    expect(html).toContain("记忆处理失败，稍后将自动重试");
-    expect(html).toContain("temporary provider failure");
-    expect(html).toContain("收起详情");
+    expect(html).not.toContain("memory-processing-notice");
+    expect(html).not.toContain("记忆处理失败");
+    expect(html).not.toContain("temporary provider failure");
     expect(html).not.toContain("正在重试");
+    if (stage) expect(html).toContain(stage === "summary" ? "摘要总结中" : "索引建立中");
   });
 
-  it("重试处理中持续展示上次失败原因", () => {
+  it("用户主动重试时展示进度，不再告警上次失败", () => {
     const processing = {
       memoryId: memoryListItemFixture.id,
       state: "embedding_pending" as const,
@@ -665,12 +758,15 @@ describe("MemoriesSubPage", () => {
       }
     }, "zh-CN", {
       onRetryProcessing: vi.fn(),
-      onOpenSettings: vi.fn()
+      onOpenSettings: vi.fn(),
+      retryFeedback: { memoryId: memoryListItemFixture.id, status: "running" }
     });
 
     expect(html).toContain("正在重试");
-    expect(html).toContain("摘要模型未配置");
-    expect(html).toContain("收起详情");
+    expect(html).toContain('role="status"');
+    expect(html).toContain("memory-processing-notice--progress");
+    expect(html).not.toContain("摘要模型未配置");
+    expect(html).not.toContain("收起详情");
     expect(html).not.toContain("上次失败原因");
     expect(html).not.toContain("上次失败时间");
     expect(html).not.toContain("已尝试次数");
@@ -678,10 +774,10 @@ describe("MemoriesSubPage", () => {
     expect(html).not.toContain("立即重试");
   });
 
-  it("重试接口失败时只在上方展示最新错误", () => {
+  it.each(["failed", "summary_pending"] as const)("重试接口失败时在 %s 状态仍展示最新错误", (state) => {
     const processing = {
       memoryId: memoryListItemFixture.id,
-      state: "failed" as const,
+      state,
       stage: "summary" as const,
       activeJobId: null,
       attemptCount: 3,
@@ -1037,7 +1133,7 @@ function renderMemories(
 
 function processingRecord(
   memoryId: string,
-  state: "summary_pending" | "embedding_pending" | "ready",
+  state: "summary_pending" | "summarizing" | "embedding_pending" | "ready",
   stage: "summary" | "embedding" | null
 ) {
   return {

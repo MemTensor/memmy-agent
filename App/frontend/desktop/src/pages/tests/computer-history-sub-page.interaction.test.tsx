@@ -123,6 +123,7 @@ describe("ComputerHistorySubPage", () => {
     const dialog = document.querySelector<HTMLElement>(".ch-source-dialog")!;
     expect(dialog.querySelectorAll(".ch-source-dialog__column")).toHaveLength(2);
     act(() => dialog.querySelector<HTMLButtonElement>(".ch-source-dialog__add")!.click());
+    expect(dialog.querySelector(".ch-source-dialog__list--apps > .ch-source-dialog__app-menu")).not.toBeNull();
     const search = dialog.querySelector<HTMLInputElement>('[aria-label="搜索应用"]')!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "Example");
@@ -1568,7 +1569,23 @@ function snapshot(overrides: Partial<ComputerHistorySnapshot> = {}): ComputerHis
   };
 }
 
-describe("computer history exclusion icons", () => {
+describe("computer history source dialog styles", () => {
+  it("keeps an opaque application picker anchor flush with the list", () => {
+    const styles = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../styles.css"), "utf8");
+    const addAppRule = styles.match(/\.ch-source-dialog__add--app \{[^}]+\}/u)?.[0] ?? "";
+    const appListRule = styles.match(/\.ch-source-dialog__list--apps \{[^}]+\}/u)?.[0] ?? "";
+    expect(addAppRule).toContain("background: var(--ch-surface)");
+    expect(appListRule).toContain("padding-top: 0");
+    expect(appListRule).toContain("overflow: hidden");
+  });
+
+  it("places the application picker in the list flow instead of over selected apps", () => {
+    const styles = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../styles.css"), "utf8");
+    const menuRule = styles.match(/\.ch-source-dialog__app-menu \{[^}]+\}/u)?.[0] ?? "";
+    expect(menuRule).not.toContain("position: absolute");
+    expect(menuRule).toContain("flex: 0 1 220px");
+  });
+
   it("does not let a missing application icon grow with the exclusion row", () => {
     const styles = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../styles.css"), "utf8");
     const nameRule = styles.match(/\.ch-source-dialog__rules li span:not\(\.ch-app-icon\) \{[^}]+\}/u)?.[0] ?? "";

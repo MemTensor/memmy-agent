@@ -9,6 +9,7 @@ import { resolveCursorDataPaths } from "../../../agent-paths.js";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../../workspace-bridge/runtime-loader.js";
 import { renderMemmyResumeHookScript } from "../memmy-resume-hook.js";
 import { renderMemmyResumeHookScript as renderCliHook } from "../../../../../../../../Memory/src/agent-source/integration/templates/memmy-resume-hook.js";
+import { DEVICE_MEMORY_OWNER } from "../../../../../../../../Memory/src/service/namespace/memory-owner.js";
 
 describe("memmy resume hook stop capture", () => {
   let tempDir = "";
@@ -294,7 +295,7 @@ describe("memmy resume hook stop capture", () => {
         workspaceHostId: "a".repeat(64),
         namespace: {
           source,
-          userId: "installed-owner",
+          userId: DEVICE_MEMORY_OWNER,
           sessionKey: `${source}-memory-host-session`,
         },
       });
@@ -355,6 +356,63 @@ describe("memmy resume hook stop capture", () => {
     }
   }, 30000);
 
+  it("still starts a turn for a Codex prompt when the directory has project instructions", async () => {
+    // 项目指令以前插在记忆钩子的提交提示词分支里，取到就 return，Codex 这一轮的登记与召回会整轮失效。
+    // 项目指令搬到项目钩子之后，记忆钩子只负责记忆：这里证明登记照常发生。
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-codex-project-instructions-turn-"));
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+      const body = await requestBody(request);
+      requests.push({ path: request.url ?? "", body });
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/api/v1/health") {
+        response.end(JSON.stringify({ features: { l3WorldModelProtocolVersions: [2] } }));
+        return;
+      }
+      if (request.url === "/api/v1/sessions/open") {
+        response.end(JSON.stringify({ sessionId: "memory-session" }));
+        return;
+      }
+      if (request.url === "/api/v1/turns/start") {
+        response.end(JSON.stringify({ sessionId: body.sessionId, turnId: body.turnId }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+    await listen(server);
+    try {
+      const port = (server.address() as { port: number }).port;
+      const hookScriptPath = installHookFixture(tempDir, "codex", "codex", `http://127.0.0.1:${port}`, runtimeAsset);
+      writeFileSync(join(tempDir, "project-instructions.json"), JSON.stringify({
+        version: 1,
+        projects: {
+          [tempDir]: {
+            text: "本项目约定：提交信息用英文。",
+            origin: "local",
+            cloudProjectId: null,
+            updatedAt: "2026-10-28T12:00:00.000Z"
+          }
+        }
+      }));
+
+      const result = await runHook(hookScriptPath, {
+        hook_event_name: "UserPromptSubmit",
+        session_id: "host-session",
+        prompt: "把这个接口补上测试",
+        cwd: tempDir
+      });
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(requests.some((item) => item.path === "/api/v1/turns/start")).toBe(true);
+      // 记忆钩子不再输出项目指令：它只属于项目钩子。
+      expect(result.stdout).not.toContain("project_instructions");
+    } finally {
+      await close(server);
+    }
+  }, 30000);
+
   it("returns the host's empty success response when short-hook health cannot be parsed", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-cursor-health-failure-"));
     const paths: string[] = [];
@@ -375,6 +433,31 @@ describe("memmy resume hook stop capture", () => {
 
       expect(result).toMatchObject({ status: 0, stdout: "{}" });
       expect(paths).toEqual(["/api/v1/health"]);
+    } finally {
+      await close(server);
+    }
+  }, 30000);
+
+  it("starts a session within the lifecycle budget when the memory service does not answer", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-slow-memory-hook-"));
+    // The memory service accepts the request and never answers: the hook must give up after its budget.
+    const server = createServer(() => undefined);
+    await listen(server);
+    try {
+      const port = (server.address() as { port: number }).port;
+      const hookScriptPath = installHookFixture(tempDir, "claude_code", "claude-code", `http://127.0.0.1:${port}`, runtimeAsset);
+      const startedAt = Date.now();
+      const result = await runHook(hookScriptPath, {
+        hook_event_name: "SessionStart",
+        session_id: "host-session",
+        cwd: tempDir,
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      // Within the 10s kill timer of runHook, and well under the 45s request timeout.
+      expect(elapsedMs).toBeLessThan(8_000);
     } finally {
       await close(server);
     }

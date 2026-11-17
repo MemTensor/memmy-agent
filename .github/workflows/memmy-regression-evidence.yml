@@ -1,0 +1,75 @@
+name: Memmy regression evidence
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/memmy-regression-evidence.yml"
+      - "Memory/tests/service/worker/**"
+      - "Memory/tests/repository/**"
+      - "App/memmy-agent/tests/integrations/channels/websocket-http-routes.test.ts"
+      - "App/memmy-agent/src/**"
+      - "Memory/src/**"
+      - "package.json"
+      - "package-lock.json"
+      - "App/memmy-agent/package.json"
+      - "App/memmy-agent/package-lock.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  targeted-regression:
+    name: Targeted regression and performance proxy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install declared workspace and Agent dependencies
+        run: |
+          npm ci
+          npm install --prefix App/memmy-agent --ignore-scripts --no-audit --no-fund
+      - name: Build shared test dependencies
+        run: |
+          npm run build -w @memmy/migrations
+          npm run build -w @memmy/agent-source-core
+          npm run build -w @memmy/local-api-contracts
+      - name: Build Agent test dependencies
+        run: npm --prefix App/memmy-agent run pretest
+      - name: Run card regression and performance proxy tests
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          App/memmy-agent/tests/integrations/channels/websocket-http-routes.test.ts
+          Memory/tests/service/worker/queue-scheduling-baseline.repro.test.ts
+          Memory/tests/service/worker/embedding-maintenance-reader.test.ts
+          Memory/tests/service/worker/worker-event-loop-yield.test.ts
+          Memory/tests/repository/queue-scheduling-store.test.ts
+          --reporter=default
+          --reporter=json
+          --outputFile=$RUNNER_TEMP/memmy-regression-evidence.json
+      - name: Write evidence scope
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### v1.2.6 targeted regression scope"
+            echo
+            echo "- WebUI empty-session route: no phantom session is synthesized."
+            echo "- Worker queue proxy: 10,000-row import backlog, 50 rounds, 10,000 startup backlog, and 1/10,000/50,000 blocked-row fairness cases."
+            echo "- Embedding maintenance proxy: 60,000-slot health and p95 assertions."
+            echo "- These are deterministic local proxies; installed-package smoke, Office managed-runtime E2E, and third-party live endpoints remain separate gates."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: memmy-regression-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memmy-regression-evidence.json
+          if-no-files-found: warn
+          retention-days: 14

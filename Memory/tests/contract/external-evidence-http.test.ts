@@ -77,7 +77,7 @@ describe("external passive evidence", () => {
     expect(service.getSkill(candidate.id!, { namespace }).procedure).toEqual([
       "Open the editor", "Draft the release note", "Review the draft", "Save the release note"
     ]);
-    const anotherNamespace = { ...namespace, userId: "another-user" };
+    const anotherNamespace = { ...namespace, tenantId: "another-tenant" };
     expect(service.externalEvidenceStatus({ source: evidence.source, sourceRecordIds: [],
       skillIds: [candidate.id!], namespace: anotherNamespace }).skills).toEqual([
       { id: candidate.id, status: "missing" }
@@ -150,7 +150,7 @@ describe("external passive evidence", () => {
     const { service, db } = createTestService();
     const server = createMemoryHttpServer({ service, startAgentSourceAutomation: false, auth: {
       mode: "dev", scopedApiKeys: { "history-token": { namespace: {
-        source: "memmy", profileId: "default", userId: "http-user"
+        source: "memmy", profileId: "default", userId: "http-user", tenantId: "history-tenant"
       }, scopes: ["memory:write", "memory:read"] } }
     } });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -161,12 +161,12 @@ describe("external passive evidence", () => {
       body: JSON.stringify(body)
     });
     try {
-      const foreign = await submit({ ...evidence, namespace: { userId: "another-user" } });
+      const foreign = await submit({ ...evidence, namespace: { tenantId: "another-tenant" } });
       expect(foreign.status).toBe(403);
       const foreignStatus = await fetch(`http://127.0.0.1:${address.port}/api/v1/evidence/status`, {
         method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer history-token" },
         body: JSON.stringify({ source: evidence.source, sourceRecordIds: [evidence.sourceRecordId],
-          namespace: { userId: "another-user" } })
+          namespace: { tenantId: "another-tenant" } })
       });
       expect(foreignStatus.status).toBe(403);
       const deletion = await submit({ action: "delete", source: evidence.source,

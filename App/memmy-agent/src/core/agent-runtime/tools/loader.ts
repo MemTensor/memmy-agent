@@ -24,6 +24,7 @@ import { CreateTaskPlanTool, GetTaskPlanTool, UpdateTaskPlanTool } from "./task-
 import { MessageTool } from "./message.js";
 import { FindFilesTool, GrepTool } from "./search.js";
 import { ExecTool } from "./shell.js";
+import { SetOutputDirectoryTool } from "./output-location.js";
 import { SpawnTool } from "./spawn.js";
 import { WebFetchTool, WebSearchTool } from "./web.js";
 import { BROWSER_TOOL_CLASSES } from "./browser.js";
@@ -73,6 +74,7 @@ const BUILTIN_TOOL_CLASSES: ToolClass[] = [
   GetTaskPlanTool,
   MessageTool,
   ReadFileTool,
+  SetOutputDirectoryTool,
   SpawnTool,
   WebFetchTool,
   WebSearchTool,

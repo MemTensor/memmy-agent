@@ -9,6 +9,17 @@ import { loadTasksData, TasksSubPageView } from "../tasks-sub-page.js";
 import { createMemoryRuntimeClientStub } from "./fixtures.js";
 
 describe("TasksSubPage", () => {
+  it("shows source envelopes and adjacent requests in task chat", () => {
+    const base = createTaskFixture();
+    const task = { ...base, chat: base.chat.map((message) => message.role === "user"
+      ? { ...message, text: '<in-app-browser-context>\n上下文\n</in-app-browser-context>\n请保留任务请求。' }
+      : message) };
+    const html = renderTasks({ status: "ready", data: tasksOutput([task]) }, task);
+    expect(html).toContain("请保留任务请求。");
+    expect(html).toContain("&lt;in-app-browser-context&gt;");
+    expect(html).not.toContain("<in-app-browser-context>");
+  });
+
   it("直接按 episode 任务接口加载，并保留服务端分页", async () => {
     const listPanelTasks = vi.fn(async () => panelTasksOutput([panelTaskFixture()], {
       page: 2,

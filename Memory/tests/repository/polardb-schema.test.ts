@@ -8,8 +8,8 @@ import {
 describe("repository PolarDB schema contract", () => {
   it("publishes migration SQL for the memories table and runtime support tables", () => {
     const sql = polardbMigrationSql().join("\n");
-    expect(POLARDB_MIGRATION_ID).toBe("004_source_turn_captures");
-    expect(POLARDB_SCHEMA_VERSION).toBe("runtime-v4");
+    expect(POLARDB_MIGRATION_ID).toBe("005_pending_episode_assignment");
+    expect(POLARDB_SCHEMA_VERSION).toBe("runtime-v5");
     expect(sql).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS memories");
     expect(sql).toContain("properties JSONB");

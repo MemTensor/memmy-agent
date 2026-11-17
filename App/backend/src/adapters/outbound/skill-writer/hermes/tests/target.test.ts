@@ -507,6 +507,50 @@ print(json.dumps({"missing": missing, "nullOutput": null_output}))
     expect(parsed.nullOutput.toolResults[0]).not.toHaveProperty("output");
   }, 15_000);
 
+  it("reads legacy Hermes turns without cwd without modifying the source database", async () => {
+    const { rootDirectory } = createFixture();
+    const target = createHermesSkillTarget({ rootDirectory, memmyConfigPath: join(rootDirectory, "memmy-config.yaml") });
+    await target.installPlugin?.("hermes");
+    const script = `
+import importlib.util, json, sqlite3, sys, types
+from pathlib import Path
+memory_provider_module = types.ModuleType("agent.memory_provider")
+memory_provider_module.MemoryProvider = type("MemoryProvider", (), {})
+sys.modules["agent"] = types.ModuleType("agent")
+sys.modules["agent.memory_provider"] = memory_provider_module
+spec = importlib.util.spec_from_file_location("memmy_memory", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+path = Path(sys.argv[2]) / "state.db"
+conn = sqlite3.connect(path)
+conn.executescript("""
+CREATE TABLE sessions (id TEXT PRIMARY KEY);
+CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL, finish_reason TEXT);
+INSERT INTO sessions VALUES ('legacy-session');
+INSERT INTO messages VALUES (1, 'legacy-session', 'user', 'Inspect the configuration.', 4070944800, NULL);
+INSERT INTO messages VALUES (2, 'legacy-session', 'assistant', 'The configuration is documented.', 4070944801, 'stop');
+""")
+conn.close()
+before = path.read_bytes()
+turn = module._read_hermes_source_turn("legacy-session", "Inspect the configuration.")
+again = module._read_hermes_source_turn("legacy-session", "Inspect the configuration.")
+print(json.dumps({"turn": turn, "repeatMatches": again == turn, "databaseUnchanged": path.read_bytes() == before}))
+`;
+    const result = spawnSync("python3", ["-", join(rootDirectory, "plugins", "memmy-memory", "__init__.py"), rootDirectory], {
+      input: script,
+      encoding: "utf8",
+      env: { ...process.env, HERMES_HOME: rootDirectory, HERMES_PROFILE: "", PYTHONIOENCODING: "utf-8", PYTHONDONTWRITEBYTECODE: "1" }
+    });
+    if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.turn).toMatchObject({
+      source: "hermes", conversationId: "legacy-session", turnId: "legacy-session:1", status: "succeeded",
+      query: "Inspect the configuration.", answer: "The configuration is documented."
+    });
+    expect(parsed.turn).not.toHaveProperty("workspacePath");
+    expect(parsed).toMatchObject({ repeatMatches: true, databaseUnchanged: true });
+  }, 15_000);
+
   it("detects non-Memmy memory provider conflicts from config.yaml", async () => {
     const { rootDirectory } = createFixture();
     const target = createHermesSkillTarget({ rootDirectory });
@@ -527,6 +571,68 @@ print(json.dumps({"missing": missing, "nullOutput": null_output}))
 
     writeFileSync(join(rootDirectory, "config.yaml"), "memory:\n  provider: builtin\n", "utf8");
     await expect(target.detectMemoryPluginConflict?.()).resolves.toBeNull();
+  });
+});
+
+describe("hermes project skill bootstrap", () => {
+  it("writes the project block next to the memory block and keeps user content", async () => {
+    const { rootDirectory, manifest } = createFixture();
+    const target = createHermesSkillTarget({ rootDirectory });
+    writeFileSync(join(rootDirectory, "SOUL.md"), "自己写的一段说明\n", "utf8");
+
+    await target.install(manifest);
+    await target.writeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content).toContain("自己写的一段说明");
+    expect(content).toContain("<!-- memmy:start v=1 -->");
+    expect(content).toContain("<!-- memmy-project:start v=1 -->");
+    expect(content.indexOf("<!-- memmy:start v=1 -->")).toBeLessThan(content.indexOf("<!-- memmy-project:start v=1 -->"));
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(true);
+  });
+
+  it("replaces the project block instead of adding a second one", async () => {
+    const { rootDirectory } = createFixture();
+    const target = createHermesSkillTarget({ rootDirectory });
+    const filePath = join(rootDirectory, "SOUL.md");
+    writeFileSync(
+      filePath,
+      ["说明", "<!-- memmy-project:start v=1 -->", "旧内容", "<!-- memmy-project:end v=1 -->", "结尾", ""].join("\n"),
+      "utf8"
+    );
+
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(false);
+    await target.writeProjectSkillBootstrap!();
+    await target.writeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content.match(/memmy-project:start/gu)).toHaveLength(1);
+    expect(content).not.toContain("旧内容");
+    expect(content).toContain("说明");
+    expect(content).toContain("结尾");
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(true);
+  });
+
+  it("removes only the project block and creates the file when it is missing", async () => {
+    const { rootDirectory } = createFixture();
+    const target = createHermesSkillTarget({ rootDirectory });
+    rmSync(join(rootDirectory, "SOUL.md"), { force: true });
+
+    await target.writeProjectSkillBootstrap!();
+    expect(readTargetFile(rootDirectory)).toContain("<!-- memmy-project:start v=1 -->");
+
+    writeFileSync(
+      join(rootDirectory, "SOUL.md"),
+      ["说明", "<!-- memmy:start v=1 -->", "# Memmy Memory", "<!-- memmy:end v=1 -->", "", "<!-- memmy-project:start v=1 -->", "块", "<!-- memmy-project:end v=1 -->", "结尾", ""].join("\n"),
+      "utf8"
+    );
+    await target.removeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content).not.toContain("memmy-project:");
+    expect(content).toContain("# Memmy Memory");
+    expect(content).toContain("说明");
+    expect(content).toContain("结尾");
   });
 });
 

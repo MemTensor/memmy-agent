@@ -76,7 +76,7 @@ describe("UserMemoriesSubPage interaction", () => {
       );
     });
 
-    expect(listPanelItems).toHaveBeenCalledWith({ layer: "UserMemory", page: 1 });
+    expect(listPanelItems).toHaveBeenCalledWith({ layer: "UserMemory", page: 1, userSummary: true }, expect.any(AbortSignal));
     act(() => container.querySelector<HTMLButtonElement>(".memory-card")?.click());
     const deleteButton = container.querySelector<HTMLButtonElement>(".memory-delete-button");
     act(() => deleteButton?.click());
@@ -128,6 +128,9 @@ describe("UserMemoriesSubPage interaction", () => {
     expect(drawer?.querySelector(".memory-drawer__title")).toBeNull();
     expect(drawer?.textContent?.split(active.summary).length).toBe(2);
     expect(drawer?.textContent).toContain("表达次数2");
+    for (const label of ["来源轮次", "替代记忆", "被替代为", "归档原因"]) {
+      expect([...drawer!.querySelectorAll("dt")].map(node => node.textContent)).not.toContain(label);
+    }
     act(() => container.querySelector<HTMLButtonElement>(".memory-drawer-backdrop__close")?.click());
     expect(container.querySelector(".memory-drawer")).toBeNull();
   });

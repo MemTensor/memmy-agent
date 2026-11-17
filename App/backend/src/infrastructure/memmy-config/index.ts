@@ -145,6 +145,19 @@ export interface RuntimeProjectionResult {
   memoryConfigAffected: boolean;
 }
 
+export interface CatalogEndpointRequestOptions {
+  apiBase: string;
+  protocol: string;
+  inheritProviderDefaults?: boolean;
+  apiKey?: string;
+  extraHeaders?: Record<string, string>;
+}
+
+export type McpServerConfigWriteOptions = {
+  /** Recheck the writer lifecycle after acquiring the config lock and before publishing the MCP config. */
+  beforeCommit?: (configPath: string) => void | Promise<void>;
+};
+
 export interface MemmyConfigWriter {
   readModelConfig?(): Promise<ModelConfigView>;
 
@@ -155,6 +168,8 @@ export interface MemmyConfigWriter {
   ): Promise<ModelSelectionResolution>;
 
   readEndpointApiKey?(provider: string, endpointId: string): Promise<string | null>;
+
+  readEndpointRequestOptions?(provider: string, endpointId: string): Promise<CatalogEndpointRequestOptions | null>;
 
   /** Atomically persist the active account/BYOK namespace without rewriting the model catalog. */
   writeUserMode?(mode: UserMode): Promise<void>;
@@ -202,7 +217,7 @@ export interface MemmyConfigWriter {
    * @param serverName the MCP server name, e.g. composio.
    * @param serverConfig the full config for this MCP server (fully replaced), e.g. { type, url, headers }.
    */
-  patchMcpServerConfig(serverName: string, serverConfig: Record<string, unknown>): Promise<void>;
+  patchMcpServerConfig(serverName: string, serverConfig: Record<string, unknown>, options?: McpServerConfigWriteOptions): Promise<void>;
 }
 
 export interface CreateMemmyConfigWriterOptions {
@@ -241,6 +256,10 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
 
     async readEndpointApiKey(provider, endpointId) {
       return readCatalogEndpointApiKey(configPath, provider, endpointId);
+    },
+
+    async readEndpointRequestOptions(provider, endpointId) {
+      return readCatalogEndpointRequestOptions(configPath, provider, endpointId);
     },
 
     async writeUserMode(mode) {
@@ -287,8 +306,8 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
       await patchChannelConfigInMemmyConfig(channelName, patch, configPath);
     },
 
-    async patchMcpServerConfig(serverName, serverConfig) {
-      await patchMcpServerConfigInMemmyConfig(serverName, serverConfig, configPath);
+    async patchMcpServerConfig(serverName, serverConfig, writeOptions) {
+      await patchMcpServerConfigInMemmyConfig(serverName, serverConfig, configPath, writeOptions);
     }
   };
 }
@@ -313,7 +332,24 @@ export async function readCatalogEndpointApiKey(
   const provider = asRecord(asRecord(config.providers)?.[providerId]);
   const endpoint = asRecord(asRecord(provider?.endpoints)?.[endpointId]);
   if (!provider || !endpoint) return null;
-  return existingString(endpoint.apiKey) ?? existingString(provider.apiKey) ?? null;
+  return existingString(endpoint.apiKey) ?? (endpoint.inheritProviderDefaults === false ? null : existingString(provider.apiKey)) ?? null;
+}
+
+export async function readCatalogEndpointRequestOptions(
+  configPath: string, providerId: string, endpointId: string
+): Promise<CatalogEndpointRequestOptions | null> {
+  const config = await readCurrentRuntimeConfig(configPath);
+  const provider = asRecord(asRecord(config.providers)?.[providerId]);
+  const endpoint = asRecord(asRecord(provider?.endpoints)?.[endpointId]);
+  if (!provider || !endpoint || !existingString(endpoint.apiBase) || !existingString(endpoint.protocol)) return null;
+  const inherited = endpoint.inheritProviderDefaults === false ? {} : provider;
+  const apiKey = existingString(endpoint.apiKey) ?? existingString(inherited.apiKey);
+  const extraHeaders = Object.fromEntries(Object.entries({
+    ...asRecord(inherited.extraHeaders), ...asRecord(endpoint.extraHeaders)
+  }).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  return { apiBase: existingString(endpoint.apiBase)!, protocol: existingString(endpoint.protocol)!,
+    ...(typeof endpoint.inheritProviderDefaults === "boolean" ? { inheritProviderDefaults: endpoint.inheritProviderDefaults } : {}),
+    ...(apiKey ? { apiKey } : {}), ...(Object.keys(extraHeaders).length ? { extraHeaders } : {}) };
 }
 
 async function readCurrentRuntimeConfig(configPath: string): Promise<Record<string, unknown>> {
@@ -718,7 +754,7 @@ export async function writeAccountModelProjectionToMemmyConfig(
     // inherit agent_chat or retain a stale BYOK memory endpoint.
     roleRouting.summary = "fixed";
     roleRouting.evolution = "fixed";
-    memory.userId = ownerAccountId;
+    delete memory.userId;
     memory.roleRouting = roleRouting;
     memory.summary = {
       ...withoutMemoryConnection(previousMemoryRecord(existingMemory.summary)),
@@ -739,7 +775,6 @@ export async function writeAccountModelProjectionToMemmyConfig(
           mode: "cloud"
         };
     memoryConfigAffected = memoryConfigAffected
-      || existingString(existingMemory.userId) !== ownerAccountId
       || !accountMemoryConnectionMatches(
         existingMemory.summary,
         ACCOUNT_MODELS.memory_summary,
@@ -903,7 +938,8 @@ export async function patchChannelConfigInMemmyConfig(
 export async function patchMcpServerConfigInMemmyConfig(
   serverName: string,
   serverConfig: Record<string, unknown>,
-  configPath = resolveDefaultMemmyConfigPath()
+  configPath = resolveDefaultMemmyConfigPath(),
+  options: McpServerConfigWriteOptions = {}
 ): Promise<void> {
   const normalizedName = normalizeChannelNameForConfig(serverName);
   await mutateRuntimeConfig(configPath, (config) => {
@@ -912,7 +948,7 @@ export async function patchMcpServerConfigInMemmyConfig(
     mcpServers[normalizedName] = { ...omitUndefined(serverConfig) };
     tools.mcpServers = mcpServers;
     config.tools = tools;
-  });
+  }, { beforeCommit: options.beforeCommit });
 }
 
 function accountPresetIds(ownerAccountId: string): AccountPresetIds {
@@ -966,13 +1002,15 @@ function updateAccountAssignment(
     imageGeneration: "image_generation"
   } as const;
   const next: Record<string, unknown> = { ...existing, ownerAccountId, agent };
+  const legacyLocalEmbedding = sameOwner
+    && asRecord(asRecord(config.memmyMemory)?.embedding)?.mode === "local";
   for (const [field, capability] of Object.entries(singles) as Array<[keyof typeof singles, AccountCapability]>) {
     const current = existingString(existing[field]);
     const keepBuiltInLocalEmbedding = field === "embedding"
       && sameOwner
-      && current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID;
+      && (current === BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID || legacyLocalEmbedding);
     next[field] = keepBuiltInLocalEmbedding
-      ? current
+      ? BUILTIN_LOCAL_EMBEDDING_ASSIGNMENT_ID
       : current && assignmentPresetIsUsable(presets, current, capability, ownerAccountId)
         ? current
         : presetIds[capability];

@@ -3,8 +3,19 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import YAML from "yaml";
-import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import {
+  removeMemmyProjectSkillDirectory,
+  removeMemmySkillDirectory,
+  replaceMemmyProjectSkillDirectory,
+  replaceMemmySkillDirectory
+} from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
+import {
+  MEMMY_PROJECT_BOOTSTRAP_START_MARKER,
+  removeMemmyProjectBootstrapBlock,
+  renderMemmyProjectBootstrapBlock,
+  upsertMemmyProjectBootstrapBlock
+} from "../templates/memmy-project-skill.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
@@ -53,6 +64,7 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       const existing = await readTextFile(filePath);
       await writeFileAtomically(filePath, upsertMarkerBlock(existing, manifest));
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
     },
 
     async uninstall(_targetId) {
@@ -69,6 +81,7 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
 
       await writeFileAtomically(filePath, removeMarkerBlock(existing));
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
     },
 
     async isInstalled(_targetId) {
@@ -78,6 +91,36 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       }
 
       return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(START_MARKER);
+    },
+
+    async writeProjectSkillBootstrap() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        throw new Error("Hermes is not installed or its directory is unavailable");
+      }
+
+      const filePath = join(root, TARGET_FILE_NAME);
+      await writeFileAtomically(filePath, upsertMemmyProjectBootstrapBlock(await readTextFile(filePath)));
+    },
+
+    async removeProjectSkillBootstrap() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        return;
+      }
+
+      const filePath = join(root, TARGET_FILE_NAME);
+      const existing = await readTextFile(filePath);
+      if (!existing.includes(MEMMY_PROJECT_BOOTSTRAP_START_MARKER)) {
+        return;
+      }
+      await writeFileAtomically(filePath, removeMemmyProjectBootstrapBlock(existing));
+    },
+
+    async isProjectSkillBootstrapCurrent() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(renderMemmyProjectBootstrapBlock());
     },
 
     async installPlugin(_targetId) {
@@ -106,6 +149,7 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
         upsertMarkerBlock(await readTextFile(filePath), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
       await removeLegacyAgentInstructions(root);
     },
 
@@ -120,6 +164,7 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       await rm(join(root, "plugins", LEGACY_COMMAND_PLUGIN_ID), { recursive: true, force: true });
       await removeHermesMemoryProviderConfig(join(root, CONFIG_FILE_NAME));
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
       await removeLegacyAgentInstructions(root);
     },
 
@@ -1338,7 +1383,7 @@ def _load_runtime() -> Dict[str, str]:
     return {
         "baseUrl": base_url,
         "token": token,
-        "userId": _clean_text(app.get("userId")) or _clean_text(memory.get("userId")) or _clean_text(plugin_config.get("userId")) or "local-user",
+        "userId": "__memmy_device_memory__",
         "workspaceHostId": _clean_text(plugin_config.get("workspaceHostId")),
     }
 
@@ -1449,7 +1494,7 @@ def _runtime_envelope(runtime: Dict[str, Any], session_key: str, project_id: Opt
     namespace = {
         "source": "hermes",
         "profileId": "default",
-        "userId": _clean_text(runtime.get("userId")) or "local-user",
+        "userId": "__memmy_device_memory__",
         "sessionKey": session_key,
     }
     if project_id:
@@ -1546,7 +1591,8 @@ def _read_hermes_source_turn(session_id: str, user_content: str) -> Optional[Dic
             + "FROM messages WHERE session_id = ? ORDER BY id ASC",
             (session_id,),
         ).fetchall()]
-        cwd_row = conn.execute("SELECT cwd FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        session_columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        cwd_row = conn.execute("SELECT cwd FROM sessions WHERE id = ?", (session_id,)).fetchone() if "cwd" in session_columns else None
         cwd = _clean_text(cwd_row["cwd"]) if cwd_row else ""
     finally:
         conn.close()

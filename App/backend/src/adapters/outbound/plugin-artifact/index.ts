@@ -139,7 +139,7 @@ async function downloadArtifact(url: URL, fetchFn: typeof fetch, authHeaders?: R
   const response = await fetchFn(url, {
     headers: { accept: "application/zip, application/octet-stream", ...authHeaders },
     redirect: "error",
-    signal: AbortSignal.timeout(60_000)
+    signal: AbortSignal.timeout(180_000)
   });
   if (response.status === 401 || response.status === 403) {
     throw Object.assign(new Error("Plugin artifact is not available for this account"), {
