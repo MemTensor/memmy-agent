@@ -3763,16 +3763,8 @@ export function AssociateSessionsModal(props: {
       className={demoGuide ? `${styles.pickModal} ${styles.pickModalDemo}` : styles.pickModal}
       backdropClassName={demoGuide ? `${styles.backdrop} ${styles.backdropYield}` : styles.backdrop}
       demoGuideAnchor={demoGuide ? "associate-pick" : undefined}
-      footer={demoGuide ? (
-        // 展示模式的底部没有按钮：只说清现在在做什么、什么也不会被改动。
-        <span>
-          {!accessGranted
-            ? t("collab.pick.demoLocked")
-            : sessions === null && !error
-              ? t("collab.pick.demoScanning")
-              : t("collab.pick.demoNote")}
-        </span>
-      ) : (
+      // 展示模式没有底部：不给按钮，也不留任何说明文字，状态由左边的引导卡片说。
+      footer={demoGuide ? undefined : (
         <>
           {error ? <span className={styles.error} role="alert">{error}</span> : selectedCount > SESSIONS_PER_MEMBER_LIMIT ? (
             <span className={styles.pickLimit} role="status">
@@ -3838,12 +3830,10 @@ export function AssociateSessionsModal(props: {
             );
           })}
         </nav>
-          <button type="button" className={styles.addAgent} onClick={() => { setAddAgentOpen(true); }}>
+          <button type="button" className={styles.addAgent} title={t("collab.pick.addAgentHint")} onClick={() => { setAddAgentOpen(true); }}>
             <span className={styles.addAgentMark} aria-hidden="true"><Plug size={14} /></span>
-            <span className={styles.addAgentText}>
-              <span className={styles.addAgentLabel}>{t("collab.pick.addAgent")}</span>
-              <span className={styles.addAgentHint}>{t("collab.pick.addAgentHint")}</span>
-            </span>
+            {/* 入口只占一行：第二行的说明收进悬停提示，这一列太窄，两行会被挤断 */}
+            <span className={styles.addAgentLabel}>{t("collab.pick.addAgent")}</span>
           </button>
         </div>
         <section className={styles.pickMain}>

@@ -106,11 +106,12 @@ describe("the demo guide preview", () => {
     // 「关联会话」真的摆出了扫到的会话与计数（卡片上的计数在真实客户端里渲染，预览只验弹窗本身）。
     await render("t-associate-pick");
     expect(document.body.textContent).toContain("共 3 个会话");
-    expect(document.body.textContent).toContain("这里只做展示，不会改动任何任务。");
-    // 同一站的未授权样子：弹窗是授权说明，一条会话都不摆。
+    expect(document.body.textContent).not.toContain("这里只做展示");
+    // 同一站的未授权样子：弹窗是授权说明，一条会话都不摆，底部也没有任何文字。
     await render("t-associate-lock");
-    expect(document.body.textContent).toContain("授权后才能读取这台电脑上的会话。");
+    expect(document.body.textContent).toContain("允许 Memmy 读取本机 Agent 的任务？");
     expect(document.body.textContent).not.toContain("共 3 个会话");
+    expect(document.querySelector("[data-demo-guide='associate-pick'] footer")).toBeNull();
     await render("t-board");
     expect(document.querySelector("[data-demo-guide='board-header']")).toBeNull();
   });
@@ -119,16 +120,16 @@ describe("the demo guide preview", () => {
     expect(DEMO_GUIDE_PREVIEW_STEPS["3-running"]).toBe("help-running");
     expect(DEMO_GUIDE_PREVIEW_STEPS["3-done"]).toBe("help-done");
     await render("3-running");
-    // 站在那条任务里：协助条写明是谁的请求、仅这一次、执行中。
-    expect(document.querySelector("[data-collab-assist-bar]")?.textContent).toContain("小饭团的 Memmy 请求 · 仅这一次");
+    // 站在那条任务里：协助 chip 写明是谁的请求、仅这一次、执行中。
+    expect(document.querySelector("[data-collab-assist-chip]")?.textContent).toContain("小饭团的 Memmy 请求 · 仅这一次");
     expect(document.body.textContent).toContain("执行中");
     // 亮区锚点在这个任务页上（看板的「协助」行不是目标）。
     expect(document.querySelector("[data-demo-guide='assist-task']")).toBeTruthy();
     expect(document.querySelector("[data-demo-guide='assist-row']")).toBeNull();
 
     await render("3-done");
-    // 跑完之后：协助条到已完成，底部一行写明结果发给了谁，卡片给出「完成」。
-    expect(document.querySelector("[data-collab-assist-bar]")?.textContent).toContain("已完成");
+    // 跑完之后：协助 chip 到已完成，底部一行写明结果发给了谁，卡片给出「完成」。
+    expect(document.querySelector("[data-collab-assist-chip]")?.textContent).toContain("已完成");
     expect(document.querySelector("[data-collab-assist-dock]")?.textContent).toContain("结果已发给小饭团");
     expect(document.body.textContent).toContain("完成");
   });

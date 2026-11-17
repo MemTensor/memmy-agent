@@ -420,7 +420,7 @@ function SettingsSurface() {
 }
 
 /**
- * 关联会话弹窗：标题、Agent 列与扫出来的会话列表，底部一行写明只做展示。
+ * 关联会话弹窗：标题、Agent 列与扫出来的会话列表；展示模式没有底部。
  *
  * 真实组件还连本机接口真扫；预览只摆布局与亮区锚点，名字与真实弹窗的 `data-demo-guide` 一致。
  */
@@ -483,9 +483,7 @@ function AssociatePickSurface({ locked = false }: { locked?: boolean }) {
           </div>
         </div>
         )}
-        <footer style={{ padding: "10px 18px 14px", fontSize: 11.5, color: "rgba(16,26,25,.45)", borderTop: "1px solid rgba(16,26,25,.06)" }}>
-          {locked ? "授权后才能读取这台电脑上的会话。" : "这里只做展示，不会改动任何任务。"}
-        </footer>
+
       </section>
     </div>
   );
@@ -524,20 +522,30 @@ function AssistDialogSurface() {  return (
 }
 
 /**
- * 任务页：面包屑之下一条协助条（谁的请求、仅这一次、状态），下面是请求卡片与执行过程，
+ * 任务页：请求卡片与执行过程，输入框上方一个协助 chip（谁的请求、仅这一次、状态），
  * 底部「结果已发给谁」。第四步点〔允许〕之后人应该站在这一页上，而不是看板的「协助」里。
  * `done` 为真是执行完成之后的样子，为假时停在执行中。
  */
 function AssistTaskSurface(props: { done: boolean }) {
-  const bar = {
-    display: "flex",
+  const chip = {
+    display: "inline-flex",
     alignItems: "center",
     gap: 8,
-    padding: "8px 20px",
-    background: "color-mix(in srgb, #5cbfae 8%, #fff)",
-    borderBottom: "1px solid rgba(16,26,25,.08)",
+    alignSelf: "flex-start",
+    maxWidth: "100%",
+    padding: "5px 12px 5px 10px",
+    borderRadius: 999,
+    background: "color-mix(in srgb, #5cbfae 11%, #fff)",
+    color: "#3aa893",
     fontSize: 12.5
   } as const;
+  const pulseBar = (height: number, opacity: number): CSSProperties => ({
+    width: 2,
+    height,
+    borderRadius: 1,
+    background: "currentColor",
+    opacity
+  });
   const bubble = (mine: boolean): CSSProperties => ({
     ...card,
     padding: 16,
@@ -553,11 +561,6 @@ function AssistTaskSurface(props: { done: boolean }) {
         <span>新手引导项目</span>
         <span aria-hidden="true">/</span>
         <span>Memmy 任务</span>
-      </div>
-      {/* 执行方的协助条：谁发来的、授权到什么程度、这一次的状态。 */}
-      <div style={bar} data-collab-assist-bar="">
-        <span style={{ display: "inline-flex", width: 20, height: 20, borderRadius: 999, background: "#8fb6ae", color: "#fff", alignItems: "center", justifyContent: "center", fontSize: 11 }} aria-hidden="true">小</span>
-        <span>{`${MEMBER}的 Memmy 请求 · 仅这一次 · ${props.done ? "已完成" : "执行中"}`}</span>
       </div>
       <div style={{ flex: 1, overflow: "auto", padding: "28px 56px", display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={bubble(false)}>
@@ -583,13 +586,22 @@ function AssistTaskSurface(props: { done: boolean }) {
         ) : null}
       </div>
       {/* 任务底部：结果发出去之后写明发给了谁。真实页面上它与输入框一起在居中的那一列里。 */}
-      <div style={{ width: 784, margin: "0 auto", paddingBottom: 28 }}>
+      <div style={{ width: 784, margin: "0 auto", paddingBottom: 28, display: "flex", flexDirection: "column", gap: 8 }}>
         <div
           style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 0 8px", fontSize: 12.5, color: "rgba(16,26,25,.62)" }}
           data-collab-assist-dock=""
         >
           <Send size={13} aria-hidden="true" />
           <span>{props.done ? `结果已发给${MEMBER}` : `执行中，结果会发给${MEMBER}`}</span>
+        </div>
+        {/* 执行方的协助 chip：谁发来的、授权到什么程度、这一次的状态，贴着输入框上方。 */}
+        <div style={chip} data-collab-assist-chip="">
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 2, height: 12 }} aria-hidden="true">
+            <i style={pulseBar(4, 0.55)} />
+            <i style={pulseBar(11, 1)} />
+            <i style={pulseBar(6, 0.75)} />
+          </span>
+          <span>{`${MEMBER}的 Memmy 请求 · 仅这一次 · ${props.done ? "已完成" : "执行中"}`}</span>
         </div>
         <div style={{ ...card, padding: "14px 16px", fontSize: 13, color: "rgba(16,26,25,.4)" }}>
           继续问点什么…
@@ -639,7 +651,7 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
   else if (phase === "reader") surface = (<><BoardSurface withSettings={false} withAssistRow={false} /><ReaderSurface /></>);
   else if (phase === "settings-assist") surface = <SettingsSurface />;
   else if (phase === "help-dialog") surface = <AssistDialogSurface />;
-  // 允许之后人就在那条任务里：协助条、执行过程与「结果已发给谁」都在这一页。
+  // 允许之后人就在那条任务里：协助 chip、执行过程与「结果已发给谁」都在这一页。
   else if (phase === "help-running") surface = <AssistTaskSurface done={false} />;
   else if (phase === "help-done") surface = <AssistTaskSurface done />;
   else surface = <BoardSurface withSettings withAssistRow={phase === "help-running" || phase === "help-done" || phase === "help-rejected"} />;
