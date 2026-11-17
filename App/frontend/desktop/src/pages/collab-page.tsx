@@ -1,4 +1,4 @@
-import { ArrowUpRight, AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Info, Layers, Loader2, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plug, RefreshCw, Search, Settings, Trash2, User, UserPlus, Users, X } from "lucide-react";
+import { ArrowUpRight, AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Layers, Loader2, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plug, RefreshCw, Search, Settings, Trash2, User, UserPlus, Users, X } from "lucide-react";
 import { memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -395,20 +395,6 @@ function writeContextTipSeen(seen: string[]): void {
   }
 }
 
-/**
- * 昵称提示：一句「换个好记的名字」，关掉就不再出现。与项目无关，也不看名字本身。
- * 只记「关过没有」：它不是拦截，不改变任何状态，读失败当没看过。
- */
-const NAME_TIP_STORAGE_KEY = "memmy.collab.nameTipSeen";
-
-function readNameTipSeen(): boolean {
-  try {
-    return window.localStorage.getItem(NAME_TIP_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
 /** 空值常量：wrapper 每次都要读一遍全局状态，不能每次现造空数组把 memo 冲掉。 */
 const NO_PROJECTS: MemmyAgentProject[] = [];
 const NO_TASKS: AgentTaskView[] = [];
@@ -534,8 +520,6 @@ const CollabBoard = memo(function CollabBoard(props: {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   /** 成员首次进入时的单行提示：按项目记录已读，同一个项目只出现一次。 */
   const [contextTipSeen, setContextTipSeen] = useState<string[]>(() => readContextTipSeen());
-  /** 昵称提示：关掉一次就不再出现，与项目无关。 */
-  const [nameTipSeen, setNameTipSeen] = useState<boolean>(() => readNameTipSeen());
   /** Upload progress of a queued association; the list grows while it runs. */
   const [progress, setProgress] = useState<CollabSyncProgress | null>(null);
   /** Bumped when an association is queued, so polling starts without waiting for a filter or page change. */
@@ -1208,16 +1192,6 @@ const CollabBoard = memo(function CollabBoard(props: {
     });
   }
 
-  /** 关掉昵称提示：只记住关过，不改名字、不动其他状态。 */
-  function dismissNameTip() {
-    setNameTipSeen(true);
-    try {
-      window.localStorage.setItem(NAME_TIP_STORAGE_KEY, "1");
-    } catch {
-      // 存不下就只在本次运行里收起。
-    }
-  }
-
   async function confirmDelete() {
     if (!collab || !sharedId || !deleting) return;
     const session = deleting;
@@ -1290,8 +1264,6 @@ const CollabBoard = memo(function CollabBoard(props: {
     && otherSessionCount > 0
     && !demoActive
     && !contextTipSeen.includes(project.id);
-  // 昵称提示只在「任务」里出现一次：它提醒的是名字，与项目数据无关。
-  const showNameTip = !nameTipSeen && !demoActive;
 
   return (
     <AppFrame title={project?.name ?? t("nav.collab")}>
@@ -1501,22 +1473,6 @@ const CollabBoard = memo(function CollabBoard(props: {
                           )}
                       </div>
 
-                      {/* 昵称提示：工具条下方、列表上方，占一整条通栏。只是一句可关闭的提醒，不判断名字、不拦人 */}
-                      {showNameTip ? (
-                        <div className={styles.nameTip} role="status">
-                          <span className={styles.nameTipIcon} aria-hidden="true"><Info size={13} /></span>
-                          <span className={styles.nameTipText}>{t("collab.nameTip.text")}</span>
-                          <button
-                            type="button"
-                            className={styles.nameTipDismiss}
-                            aria-label={t("collab.nameTip.dismiss")}
-                            title={t("collab.nameTip.dismiss")}
-                            onClick={dismissNameTip}
-                          >
-                            <X size={13} aria-hidden="true" />
-                          </button>
-                        </div>
-                      ) : null}
                       {/* 同步进度与成员提示都是关于任务的：只在「任务」里出现 */}
                       {boardTab === "tasks" && progress?.running ? (() => {
                         // 云端每人每项目只留最近 20 个，进度也按这个额度显示，不报会超出上限的条数。

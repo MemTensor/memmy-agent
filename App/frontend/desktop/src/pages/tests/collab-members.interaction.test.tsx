@@ -265,7 +265,8 @@ describe("join project dialog", () => {
     // 一句说明，分号已改逗号；原本讲 @ 引用的第二句按评审删掉了。
     expect(hasText("你在项目中的任务记录同步至云端，对项目成员可见，本地文件不会上传")).toBe(true);
     expect(hasText("项目中已有成员同步的任务")).toBe(false);
-    expect(hasText("任务在该目录中执行。未选择时，任务不访问本地文件。")).toBe(true);
+    // 目录说明已按设计删除：标签里的「可选」与目录名本身已够说明。
+    expect(hasText("任务在该目录中执行。未选择时，任务不访问本地文件。")).toBe(false);
     expect(button("暂不加入")).toBeTruthy();
 
     collab.joinProject.mockResolvedValue({ status: "pending", projectId: "cloud-1", project: null });

@@ -227,7 +227,6 @@ export function JoinProjectModal(props: {
                     {directory ? t("collab.create.dirChange") : t("collab.create.dirPick")}
                   </Button>
                 </div>
-                <small className={styles.fieldHint}>{t("collab.join.dirHint")}</small>
               </div>
             )}
           </>

@@ -747,56 +747,6 @@
   outline-offset: 1px;
 }
 
-/* 昵称提示：一句提醒，中性浅底、无边框、不抢色，右侧只有一个关闭。它不要求用户做什么操作 */
-.nameTip {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-top: 10px;
-  padding: 7px 6px 7px 12px;
-  border-radius: 10px;
-  background: var(--collab-surface);
-  font-size: 12.5px;
-  line-height: 1.6;
-}
-
-.nameTipIcon {
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  color: var(--collab-ter);
-}
-
-.nameTipText {
-  flex: 1;
-  min-width: 0;
-  color: var(--collab-ink-2);
-}
-
-.nameTipDismiss {
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--collab-ter);
-  cursor: pointer;
-}
-
-.nameTipDismiss:hover {
-  background: color-mix(in srgb, var(--color-text-ink, #111d1c) 6%, transparent);
-  color: var(--collab-ink-2);
-}
-
-.nameTipDismiss:focus-visible {
-  outline: 2px solid var(--collab-accent-deep);
-  outline-offset: 1px;
-}
-
 /* 成员首次进入时的单行提示：浅底内联，不遮列表，也不抢标题 */
 .contextTip {
   display: flex;
