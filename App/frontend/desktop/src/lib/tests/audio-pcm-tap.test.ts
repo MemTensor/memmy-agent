@@ -1,9 +1,9 @@
 import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPcmTap } from "../audio-pcm-tap.js";
+import { createPcmTap, PCM_TAP_SAMPLE_RATE } from "../audio-pcm-tap.js";
 
 // Execute the shipped processor module, including its message handling and PCM buffer.
-function audioGraph() {
+function audioGraph(rate = PCM_TAP_SAMPLE_RATE) {
   let module: Blob;
   let Processor: any;
   let processor: any;
@@ -11,7 +11,7 @@ function audioGraph() {
   const disconnect = vi.fn();
   const addModule = vi.fn(async () => {
     runInNewContext(await module.text(), {
-      Int16Array,
+      Int16Array, sampleRate: rate,
       AudioWorkletProcessor: class { port = { onmessage: null, postMessage: null }; },
       registerProcessor(_name: string, ctor: any) { Processor = ctor; }
     });
@@ -29,7 +29,7 @@ function audioGraph() {
   });
   const resume = vi.fn(async () => {});
   class Context {
-    sampleRate = 16000;
+    sampleRate = rate;
     audioWorklet = { addModule };
     destination = {};
     close = close;
@@ -47,6 +47,15 @@ function audioGraph() {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("PCM capture", () => {
+  it.each([8000, 16000])("emits 100 ms PCM blocks at %i Hz", async sampleRate => {
+    const graph = audioGraph(sampleRate); const blocks: Int16Array[] = [];
+    const tap = await createPcmTap({} as MediaStream, { sampleRate, onSamples: block => blocks.push(block) }, graph.bridge);
+    graph.process(new Float32Array(sampleRate / 10 + 1));
+    expect(blocks.map(block => block.length)).toEqual([sampleRate / 10]);
+    await tap.close();
+    expect(blocks.map(block => block.length)).toEqual([sampleRate / 10, 1]);
+  });
+
   it("flushes speech before pausing and excludes paused audio after resuming", async () => {
     const graph = audioGraph();
     const blocks: Int16Array[] = [];

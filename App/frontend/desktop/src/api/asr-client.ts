@@ -11,6 +11,8 @@ import {
 import { requestJson } from "./http.js";
 import type { StreamSocket } from "../lib/asr-stream-transcription.js";
 
+const ASR_SESSION_REQUEST_TIMEOUT_MS = 5_000;
+
 export interface AsrClient {
   prepare(): Promise<AsrSession>;
   release(sessionId: string): Promise<void>;
@@ -28,11 +30,11 @@ export function createHttpAsrClient(config: RuntimeConfig): AsrClient {
   return {
     prepare() {
       return requestJson({ config, path: "/api/asr/sessions", schema: AsrSessionSchema,
-        init: { method: "POST", signal: AbortSignal.timeout(5_000) } });
+        init: { method: "POST", signal: AbortSignal.timeout(ASR_SESSION_REQUEST_TIMEOUT_MS) } });
     },
     async release(sessionId) {
       await requestJson({ config, path: `/api/asr/sessions/${encodeURIComponent(sessionId)}`,
-        schema: AsrSessionHandleSchema, init: { method: "DELETE", signal: AbortSignal.timeout(5_000) } });
+        schema: AsrSessionHandleSchema, init: { method: "DELETE", signal: AbortSignal.timeout(ASR_SESSION_REQUEST_TIMEOUT_MS) } });
     },
     async transcribe(input, signal) {
       return requestJson({

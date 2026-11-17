@@ -43,6 +43,8 @@ export type StreamSocketOpener = () => StreamSocket | Promise<StreamSocket>;
 
 /** `WebSocket.OPEN`, spelled out so the fake in tests need not carry the constant. */
 const OPEN = 1;
+const STREAM_READY_TIMEOUT_MS = 8_000;
+const STREAM_FINISH_TIMEOUT_MS = 10_000;
 
 /**
  * Hands the socket exactly the bytes of one PCM block.
@@ -155,7 +157,7 @@ export function createStreamLiveTranscriber(
   };
   const connect = () => {
     connecting = true;
-    readyTimer = setTimeout(() => fail("Live ASR handshake timed out"), 8_000);
+    readyTimer = setTimeout(() => fail("Live ASR handshake timed out"), STREAM_READY_TIMEOUT_MS);
     try {
       const opened = openSocket();
       if ("then" in opened) void opened.then(attach, (error: unknown) => fail(error instanceof Error ? error.message : String(error)));
@@ -176,7 +178,7 @@ export function createStreamLiveTranscriber(
         finishRequested = true;
         if (!connecting) settle(null, "empty");
         else {
-          finishTimer = setTimeout(() => fail("Live ASR final result timed out"), 10_000);
+          finishTimer = setTimeout(() => fail("Live ASR final result timed out"), STREAM_FINISH_TIMEOUT_MS);
           if (socket?.readyState === OPEN) send(JSON.stringify({ type: "finish" }));
         }
       }

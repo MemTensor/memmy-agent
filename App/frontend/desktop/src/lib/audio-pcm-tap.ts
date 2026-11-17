@@ -28,6 +28,9 @@ export interface PcmTapOptions {
 
 /** Speech sample rate. Upstream ASR models are trained at this rate. */
 export const PCM_TAP_SAMPLE_RATE = 16_000;
+const PCM_BLOCK_DURATION_MS = 100;
+const PCM_FLUSH_TIMEOUT_MS = 1_000;
+const PCM_INITIALIZATION_TIMEOUT_MS = 2_000;
 
 /** Minimal shape of the constructors this module needs, so tests can stand in for them. */
 export interface PcmTapAudioBridge {
@@ -80,7 +83,7 @@ export async function createPcmTap(
         return closing ??= (async () => {
           try {
             await new Promise<void>((resolve, reject) => {
-              const timer = setTimeout(() => reject(new Error("ASR audio flush timed out")), 1_000);
+              const timer = setTimeout(() => reject(new Error("ASR audio flush timed out")), PCM_FLUSH_TIMEOUT_MS);
               flushed = () => { clearTimeout(timer); resolve(); };
               processor.port.postMessage("flush");
             });
@@ -103,7 +106,7 @@ export async function createPcmTap(
 const PCM_WORKLET = `
 class MemmyAsrPcm extends AudioWorkletProcessor {
   constructor() {
-    super(); this.samples = new Int16Array(1600); this.used = 0; this.stopped = false;
+    super(); this.samples = new Int16Array(Math.round(sampleRate * ${PCM_BLOCK_DURATION_MS} / 1000)); this.used = 0; this.stopped = false;
     this.paused = false;
     this.port.onmessage = ({ data }) => {
       if (data === "pause") { this.flush(); this.paused = true; }
@@ -151,7 +154,7 @@ async function audioDeadline(operation: Promise<void>): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([operation, new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error("ASR audio initialization timed out")), 2_000);
+      timer = setTimeout(() => reject(new Error("ASR audio initialization timed out")), PCM_INITIALIZATION_TIMEOUT_MS);
     })]);
   } finally { clearTimeout(timer); }
 }

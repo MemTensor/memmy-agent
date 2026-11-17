@@ -995,10 +995,6 @@ export function HomePage() {
     voiceInput: true,
     emptyAudioMessage: t("home.asrEmptyAudio"),
     live: {
-      onError: (error) => {
-        const scopeKey = liveVoiceScopeRef.current;
-        if (scopeKey) setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t), "asr");
-      },
       onLine: (line) => {
         const scopeKey = liveVoiceScopeRef.current;
         if (!scopeKey) return;

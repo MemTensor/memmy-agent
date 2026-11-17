@@ -1118,7 +1118,7 @@ export const PanelJobsOutputSchema = z.object({
 });
 export type PanelJobsOutput = z.infer<typeof PanelJobsOutputSchema>;
 
-/** Schema for api error code. */
+/** Shared error codes for the entire local API, including Memory, models, and plugins. */
 export const ApiErrorCodeSchema = z.enum([
   "invalid_argument",
   "unauthorized",

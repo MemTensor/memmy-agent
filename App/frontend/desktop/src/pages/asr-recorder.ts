@@ -300,7 +300,7 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
         let stream: MediaStream;
         try {
           stream = await navigator.mediaDevices.getUserMedia({
-            audio: { channelCount: 1, sampleRate: 16_000, echoCancellation: true, noiseSuppression: true }
+            audio: { channelCount: 1, sampleRate: PCM_TAP_SAMPLE_RATE, echoCancellation: true, noiseSuppression: true }
           });
         } catch (mediaError) {
           if (isMicrophonePermissionDenial(mediaError)) throw new MicrophonePermissionError("denied");
