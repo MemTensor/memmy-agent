@@ -1051,6 +1051,16 @@
   --collab-accent-deep: var(--color-accent-deep, #2f8f7f);
 }
 
+/*
+ * Windows 的标题栏是窗口最上面独立的一行（46px），最小化 / 最大化 / 关闭由系统画在这一行最上层。
+ * 面板与遮罩挂在 body 上、从窗口顶端开始，右上角的「继续任务」与关闭正好压在系统按钮下面：
+ * 点了没反应，看起来就是叠在一起。让开这一行，面板跟着矮下来。
+ */
+:global(body.memmy-platform-windows) .readerLayer,
+:global(body:has(.windows-titlebar)) .readerLayer {
+  top: var(--codex-toolbar-height, 46px);
+}
+
 /* 点击面板外关闭。薄雾只有 6%：看得出有一层在上，又不会把看板压成灰底 */
 .readerScrim {
   position: absolute;
