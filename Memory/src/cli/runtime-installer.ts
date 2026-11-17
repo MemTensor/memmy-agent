@@ -223,7 +223,7 @@ export async function installedAgents(home = "~/.memmy"): Promise<string[]> {
     : [];
 }
 
-export async function startInstalledMemoryService(home = "~/.memmy"): Promise<Record<string, unknown>> {
+export async function startInstalledMemoryService(home = "~/.memmy", options?: { skipHealthCheck?: boolean }): Promise<Record<string, unknown>> {
   const resolvedHome = resolveHome(home);
   const serviceHome = join(resolvedHome, "memory-service");
   const installLock = await acquireInstallLock(join(serviceHome, "install.lock"));
@@ -234,6 +234,9 @@ export async function startInstalledMemoryService(home = "~/.memmy"): Promise<Re
     if (process.platform === "win32") await stopInstalledMemoryService(resolvedHome);
     await writeStableLauncher(resolvedHome, serviceHome, pointer.runtimeExecutable ?? process.execPath);
     registerAndStartUserService(resolvedHome, serviceHome);
+    if (!options?.skipHealthCheck) {
+      await waitForRuntimeHealth("http://127.0.0.1:18960", pointer.version, DEFAULT_HEALTH_CHECK_TIMEOUT_MS, pointer.buildId);
+    }
     return { ok: true, action: "start", ...pointer };
   } finally {
     await installLock.release();
@@ -411,8 +414,14 @@ async function waitForMemoryRuntimeStop(
 async function waitForServiceOwnerExit(serviceHome: string): Promise<void> {
   const deadline = Date.now() + SERVICE_STOP_TIMEOUT_MS;
   while (true) {
-    const lock = await readJsonFile<{ pid?: number }>(join(serviceHome, "service.lock"));
+    const lock = await readJsonFile<{ pid?: number; host?: string; port?: number; protocolVersion?: string }>(join(serviceHome, "service.lock"));
     if (!lock || (Number.isInteger(lock.pid) && !isProcessAlive(lock.pid!))) return;
+    // PID is alive but may belong to an unrelated process (PID reuse).
+    // Probe the health endpoint: if the service is not responding, treat the owner as exited.
+    if (lock.host && lock.port) {
+      const probeResult = await probeMemoryRuntime(`http://${lock.host}:${lock.port}`, {}, fetch);
+      if (probeResult === "stopped") return;
+    }
     if (Date.now() >= deadline) throw new Error("Memory service still owns its storage; stop it before activating another runtime");
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
   }

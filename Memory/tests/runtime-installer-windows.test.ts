@@ -372,7 +372,7 @@ describe("Windows standalone Memory service", () => {
     fs.writeFileSync(join(home, "bin", "memmy-memory-service.cjs"), "old visible launcher");
     fs.writeFileSync(join(home, "bin", "memmy-memory-service.cmd"), "old visible command");
     lifecycle.mockClear();
-    if (action === "start") await startInstalledMemoryService(home);
+    if (action === "start") await startInstalledMemoryService(home, { skipHealthCheck: true });
     else if (action === "reuse") await installMemoryRuntime({ home, runtimeDirectory, preferInstalledCompatible: true, skipHealthCheck: true });
     else {
       fs.writeFileSync(join(runtimeDirectory, "memory-runtime.json"), JSON.stringify({ version: "2.2.0", protocolVersion: 1, target: `windows-${process.arch}` }));
@@ -396,6 +396,8 @@ describe("Windows standalone Memory service", () => {
     const request = vi.fn()
       .mockResolvedValueOnce({ ok: true, json: async () => ({ protocolVersion: 1 }) })
       .mockResolvedValueOnce({ ok: true })
+      .mockRejectedValueOnce(new Error("connection refused"))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, protocolVersion: 1, serviceVersion: "2.1.0" }) })
       .mockRejectedValue(new Error("connection refused"));
     vi.stubGlobal("fetch", request);
     await startInstalledMemoryService(home);
