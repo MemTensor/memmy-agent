@@ -66,12 +66,51 @@ const POSIX_LOOKUP_DIRS: readonly string[] = [
 export const LOOKUP_DIRS: readonly string[] = POSIX_LOOKUP_DIRS;
 
 /**
+ * 各 Agent 自己的安装位置：命令行不在 PATH 上，也不在上一层目录里。
+ *
+ * <p>与 {@link lookupDirs} 的“常见目录”分开：那里是一层目录，这里是一个 App 的具体子目录，
+ * 只有协议里认识的 Agent 才需要，不放到通用查找里免得每次找任何命令都多走一串不存在的路径。</p>
+ *
+ * <p>Windows 上的 Codex 来自官方安装脚本 `install.ps1` 的 `$defaultVisibleBinDir`
+ * （`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`，已经实际下载脚本核对），它同时把这一层加进用户 PATH；
+ * 但 Memmy 进程的 PATH 是启动那一刻的快照，装完 Codex 不重启 Memmy 就看不到，所以要显式找一遍。
+ * 安装器自己的释放目录结构是 `%USERPROFILE%\.codex\packages\standalone\{releases,current}`（同一份脚本），
+ * 没有 shim 时那里也有一份 `bin\codex.exe`。</p>
+ *
+ * <p>Cursor 的 CLI 在桌面端包内（`resources\app\bin`）；macOS 对应 `/Applications/Cursor.app`。
+ * Claude Code 的原生安装器把 `claude` 放到 `~/.local/bin`（已在常见目录里），npm 与旧版本另有 `~/.claude/local`。</p>
+ */
+export function agentDirectories(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env
+): string[] {
+  if (platform === "win32") {
+    const path = pathForPlatform("win32");
+    const local = envValue(env, "LOCALAPPDATA") ?? path.join(homedir(), "AppData", "Local");
+    const profile = envValue(env, "USERPROFILE") ?? homedir();
+    return [
+      // Codex 官方 Windows 安装器放 shim 的地方（install.ps1 的 $defaultVisibleBinDir）。
+      path.join(local, "Programs", "OpenAI", "Codex", "bin"),
+      // 没装 shim 时，安装器把真正的 codex.exe 留在自己的 current 目录里。
+      path.join(profile, ".codex", "packages", "standalone", "current", "bin"),
+      // Cursor 桌面端包内的 CLI：cursor-agent.cmd。
+      path.join(local, "Programs", "cursor", "resources", "app", "bin")
+    ];
+  }
+  const home = envValue(env, "HOME") ?? homedir();
+  return [
+    posix.join(home, ".claude", "local"),
+    "/Applications/Cursor.app/Contents/Resources/app/bin"
+  ];
+}
+
+/**
  * Windows 上的查找目录。
  *
  * <p>Windows 没有 `/usr/bin` 这种统一位置：用户级安装器把程序放在 `%LOCALAPPDATA%\Programs`，
  * 全局 npm 把 `.cmd` 放在 `%APPDATA%\npm`，winget 与商店应用的入口是 `WindowsApps`。
- * 程序名之下的层级因应用而异（例如 `Cursor\resources\app\bin`），这里只列到目录一层，
- * 具体子路径由各自的配方负责。没有装在任何一处时由调用方给出失败原因，不猜。</p>
+ * 程序名之下的层级因应用而异（例如 `Cursor\resources\app\bin`），这些都是具体 App 的位置，
+ * 放在 {@link agentDirectories} 里；这里只列到目录一层。没有装在任何一处时由调用方给出失败原因，不猜。</p>
  */
 function windowsLookupDirs(env: NodeJS.ProcessEnv): string[] {
   const path = pathForPlatform("win32");
@@ -180,7 +219,12 @@ export function findExecutable(
   // 带目录的相对写法（`./bin/tool`）也交给文件系统：原来的实现就是按路径处理，不能改成去 PATH 上找。
   if (/[\\/]/u.test(command)) return exists(command) ? command : null;
   // 整条 PATH 不清洗：posix 的目录名里可能有空格，切分那边会处理平台差异。
-  const dirs = [...splitPathList(rawEnvValue(env, "PATH"), platform), ...lookupDirs(platform, env)];
+  const dirs = [
+    ...splitPathList(rawEnvValue(env, "PATH"), platform),
+    ...lookupDirs(platform, env),
+    // Agent 自己的安装位置：命令在 PATH 上找不到时才走这里（Codex 的 Windows 安装器、Cursor 包内的 CLI）。
+    ...agentDirectories(platform, env)
+  ];
   for (const dir of dirs) {
     const full = path.join(dir, command);
     for (const candidate of candidatesFor(full, platform, env)) {

@@ -11,7 +11,7 @@
  * 登录完成后用同样的参数重跑一次，只重试一次。</p>
  */
 import { ACP_TIMEOUT_MS, AcpError, runAcpAgent, type AcpRunOptions } from "./acp-client.js";
-import { ensureAdapter } from "./adapters.js";
+import { adapterFor, adapterLaunch, ensureAdapter } from "./adapters.js";
 import { DEEPSEEK_HARNESS_SOURCE_ID, deepSeekHarnessLaunch } from "./deepseek-harness.js";
 import { signIn, type AssistSignInOutcome } from "./login.js";
 import { MEMMY_SOURCE_ID, assistAgentName, assistRecipe, findExecutable, qwenWorkEngine } from "./recipes.js";
@@ -90,9 +90,19 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
           if (!resolved.ok) throw new AcpError(`${name} 未启动：${resolved.reason}`, "unavailable");
           return { command: resolved.command, args: resolved.args, env: resolved.env };
         }
-        // 自带适配器优先；QwenWork 的引擎在应用包里；其余回到 PATH 上找它自己的程序。
+        // 适配器用自己的运行环境跑包内入口（见 ./adapters 的 adapterLaunch）：
+        // 这台电脑没有 node 也能执行。引擎路径单独传给适配器，用它装在本机的那一份。
+        const adapterSpec = adapterFor(input.agent)
+          ? adapterLaunch(adapterFor(input.agent)!, { env, ...(options.home === undefined ? {} : { home: options.home }) })
+          : null;
         const engine = input.agent === "qwenwork" ? qwenWorkEngine(env, options.qwenWorkAppDirs) : null;
-        const command = adapter?.executable ?? engine ?? findExecutable(recipe.resolved, env);
+        const engineEnv = agentEngineEnv(input.agent, env);
+        // 适配器只带翻译层，引擎用本机那一份：没有引擎时先把话说清楚，
+        // 不要让适配器自己去 require 它没带的引擎包（那会报一句对方看不懂的 module not found）。
+        if (adapterSpec && input.agent === "codex" && !engineEnv.CODEX_PATH) {
+          throw new AcpError(`${name} 未启动：这台电脑上没有找到 Codex，先安装 Codex 再试`, "unavailable");
+        }
+        const command = adapterSpec?.command ?? engine ?? findExecutable(recipe.resolved, env);
         if (!command) {
           throw new AcpError(
             input.agent === "qwenwork"
@@ -103,8 +113,10 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
         }
         return {
           command,
-          args: recipe.args,
-          ...(recipe.env ? { env: recipe.env } : {}),
+          args: [...(adapterSpec?.args ?? []), ...recipe.args],
+          ...(adapterSpec?.env || recipe.env || Object.keys(engineEnv).length
+            ? { env: { ...(recipe.env ?? {}), ...(adapterSpec?.env ?? {}), ...engineEnv } }
+            : {}),
           ...(recipe.sessionConfig ? { sessionConfig: recipe.sessionConfig } : {}),
           ...(recipe.sessionMode ? { sessionMode: recipe.sessionMode } : {})
         };
@@ -148,6 +160,7 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
           ...(options.home === undefined ? {} : { home: options.home }),
           ...(options.qwenWorkAppDirs === undefined ? {} : { qwenWorkAppDirs: options.qwenWorkAppDirs }),
           ...(adapter?.executable ? { adapterExecutable: adapter.executable } : {}),
+          ...(adapter?.entry ? { adapterEntry: adapter.entry } : {}),
           ...(options.loginTimeoutMs === undefined ? {} : { timeoutMs: options.loginTimeoutMs })
         });
         if (outcome === "cancelled") throw new AcpError("执行已停止", "cancelled");
@@ -156,6 +169,20 @@ export function createAcpAssistRunner(options: AcpAssistRunnerOptions = {}): Ass
       }
     }
   };
+}
+
+/**
+ * 要传给适配器的引擎路径：适配器不打包引擎本体，用它自己装在本机的那一份。
+ *
+ * <p>Codex 的适配器读 `CODEX_PATH`（见 codex-acp 的 dist：`process.env["CODEX_PATH"]` 优先，
+ * 没有时才去找它自己依赖里的 `@openai/codex`）。这里指到本机已装的 `codex`，
+ * Windows 上是官方安装器放在 `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` 的那一份
+ * （见 ./executables 的 agentDirectories）。找不到时不传，由适配器报它自己的原因。</p>
+ */
+function agentEngineEnv(sourceId: string, env: NodeJS.ProcessEnv): Record<string, string> {
+  if (sourceId !== "codex") return {};
+  const engine = findExecutable("codex", env);
+  return engine ? { CODEX_PATH: engine } : {};
 }
 
 /** 执行用的环境变量：补好的 PATH 加上配方自己要的那几个变量（值都是确定的字符串）。 */

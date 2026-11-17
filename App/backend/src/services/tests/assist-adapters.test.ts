@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { adapterFor, adaptersDirectory, ensureAdapter, installedAdapterPath } from "../assist/adapters.js";
+import { adapterFor, adapterLaunch, adaptersDirectory, bundledAdapterPath, ensureAdapter, installedAdapterPath } from "../assist/adapters.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -63,7 +63,7 @@ describe("assist adapters", () => {
       onInstalling: () => { announced = true; }
     });
 
-    expect(result).toEqual({ executable: bin, installed: false });
+    expect(result).toMatchObject({ executable: bin, installed: false });
     // 已经装好就不该再打扰界面。
     expect(announced).toBe(false);
     expect(installedAdapterPath(adapterFor("claude_code")!, root)).toBe(bin);
@@ -82,7 +82,7 @@ describe("assist adapters", () => {
       onInstalling: () => { announced = true; }
     });
 
-    expect(result).toEqual({ executable: bin, installed: false });
+    expect(result).toMatchObject({ executable: bin, installed: false });
     expect(announced).toBe(false);
     // 补的是软链接指向的真实文件，不是链接本身。
     expect(statSync(target).mode & 0o111).not.toBe(0);
@@ -105,9 +105,12 @@ describe("assist adapters", () => {
     const root = home();
     let announced = 0;
     // 不同排查的请求会同时执行：两个人恰好都选了这个 Agent 时，不能装两次到同一个 node_modules。
+    // 不联网：注入一个会失败的 fetch，走到「装不上」那条分支，只验证并发合并。
+    const offline: typeof fetch = () => Promise.reject(new Error("offline"));
     const installs = [0, 1, 2].map(() => ensureAdapter("codex", {
       home: root,
       env: { PATH: "" },
+      fetch: offline,
       onInstalling: () => { announced += 1; }
     }));
     const results = await Promise.all(installs);
@@ -117,6 +120,29 @@ describe("assist adapters", () => {
     expect(results[1]).toEqual(results[2]);
     // 只让界面看到一次「准备运行组件」。
     expect(announced).toBe(1);
+  });
+
+  it("runs the adapter with Memmy's own runtime when the package entry is there", () => {
+    // 这台电脑没有 node 也能执行：入口 JS 交给 process.execPath，并带上 ELECTRON_RUN_AS_NODE。
+    const root = home();
+    const entry = join(adaptersDirectory(root), "node_modules", "@agentclientprotocol", "codex-acp", "dist", "index.js");
+    mkdirSync(join(entry, ".."), { recursive: true });
+    writeFileSync(entry, "console.log('acp')\n");
+
+    const spec = adapterLaunch(adapterFor("codex")!, { home: root });
+    expect(spec).toEqual({ command: process.execPath, args: [entry], env: { ELECTRON_RUN_AS_NODE: "1" } });
+  });
+
+  it("uses the copy shipped inside the app before downloading anything", () => {
+    const root = home();
+    const bundled = join(root, "assist-adapters");
+    const entry = join(bundled, "node_modules", "@agentclientprotocol", "codex-acp", "dist", "index.js");
+    mkdirSync(join(entry, ".."), { recursive: true });
+    writeFileSync(entry, "console.log('acp')\n");
+
+    // 内置目录由安装包给出（打包后是 resources/assist-adapters），排障时也可以用环境变量指过去。
+    expect(bundledAdapterPath(adapterFor("codex")!, { MEMMY_ASSIST_ADAPTERS_DIR: bundled } as NodeJS.ProcessEnv)).toBe(entry);
+    expect(adapterLaunch(adapterFor("codex")!, { env: { MEMMY_ASSIST_ADAPTERS_DIR: bundled } as NodeJS.ProcessEnv })?.args).toEqual([entry]);
   });
 
   it("keeps adapters beside the rest of the assist state", () => {

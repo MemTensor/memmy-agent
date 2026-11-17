@@ -11,7 +11,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { adapterFor, installedAdapterPath } from "./adapters.js";
+import { adapterFor, bundledAdapterPath, installedAdapterPath } from "./adapters.js";
 import type { DeepSeekHarnessOptions } from "./deepseek-harness.js";
 import { DEEPSEEK_HARNESS_SOURCE_ID, resolveDeepSeekHarness } from "./deepseek-harness.js";
 import { ASSIST_COMMAND_ENV, findExecutable } from "./executables.js";
@@ -153,8 +153,15 @@ const BODY_COMMANDS: Readonly<Record<string, string>> = Object.freeze({
   pi: "pi"
 });
 
-/** 需要适配器的两个 Agent：它们能不能跑与本体命令行无关（见 {@link BODY_COMMANDS}）。 */
-const ADAPTER_BODY_AGENTS: ReadonlySet<string> = new Set(["claude_code", "codex"]);
+/**
+ * 走适配器的那两个 Agent，真正决定「能不能跑」的是引擎：
+ * Claude Code 的引擎是 {@code claude}，Codex 的是 {@code codex}。
+ * 适配器本身由 Memmy 自己准备（自带或现场装），不看这台电脑有没有 npm / node。
+ */
+const ADAPTER_ENGINE_COMMANDS: Readonly<Record<string, string>> = Object.freeze({
+  claude_code: "claude",
+  codex: "codex"
+});
 
 /** 判断「能不能运行」时可以让测试注入的位置，正式运行按默认位置找。 */
 export interface AssistRunnableOptions extends Pick<DeepSeekHarnessOptions, "appDirs" | "dshHome"> {
@@ -162,6 +169,10 @@ export interface AssistRunnableOptions extends Pick<DeepSeekHarnessOptions, "app
   home?: string;
   /** QwenWork 应用包的位置，按顺序找；测试可注入。 */
   qwenWorkAppDirs?: readonly string[];
+  /** 按哪个平台找命令，默认当前进程；测试里用来验证 Windows 的安装位置。 */
+  platform?: NodeJS.Platform;
+  /** 只在测试里替换「文件在不在」的判断（Windows 的 `C:\…` 在其他平台上打不开）。 */
+  exists?: (path: string) => boolean;
 }
 
 /**
@@ -204,6 +215,14 @@ export function qwenWorkEngine(
  * <p>这里不看「有没有登录」：未登录的 Agent 在执行时由 Memmy 代为发起登录（见 ./login），
  * 从候选里剔掉会让只差一次登录的人找不到它。</p>
  */
+/** 把测试注入的查找条件传给 {@link findExecutable}。 */
+function lookupOptions(options: AssistRunnableOptions): { platform?: NodeJS.Platform; exists?: (path: string) => boolean } {
+  return {
+    ...(options.platform === undefined ? {} : { platform: options.platform }),
+    ...(options.exists === undefined ? {} : { exists: options.exists })
+  };
+}
+
 export function assistRunnable(
   sourceId: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -212,21 +231,24 @@ export function assistRunnable(
   if (sourceId === MEMMY_SOURCE_ID) return true;
   const recipe = assistRecipe(sourceId, env);
   if (!recipe) return false;
-  if (env[ASSIST_COMMAND_ENV(sourceId)]?.trim()) return findExecutable(recipe.resolved, env) !== null;
+  if (env[ASSIST_COMMAND_ENV(sourceId)]?.trim()) return findExecutable(recipe.resolved, env, lookupOptions(options)) !== null;
   // DeepSeek Harness 的入口不止 PATH 上一个命令：桌面版自带的引擎能跑就够（见 ./deepseek-harness）。
   if (sourceId === DEEPSEEK_HARNESS_SOURCE_ID) return resolveDeepSeekHarness({ ...options, env }).ok;
   if (sourceId === "qwenwork") return qwenWorkEngine(env, options.qwenWorkAppDirs) !== null;
   const body = BODY_COMMANDS[sourceId];
-  if (body) return findExecutable(body, env) !== null;
+  if (body) return findExecutable(body, env, lookupOptions(options)) !== null;
   const adapter = adapterFor(sourceId);
   if (adapter) {
+    // 安装包里自带的那份（或之前装好的）：不必联网、也不必等第一次执行。
+    if (bundledAdapterPath(adapter, env) !== null) return true;
     if (installedAdapterPath(adapter, options.home) !== null) return true;
-    // 没装过也能装：npm 与 node 都在就行。npm 是 `#!/usr/bin/env node` 脚本，只有 npm 没有 node 跑不起来。
-    return ADAPTER_BODY_AGENTS.has(sourceId)
-      && findExecutable("npm", env) !== null
-      && findExecutable("node", env) !== null;
+    // 适配器由 Memmy 自己准备，用不到对方的 npm / node（见 ./adapters 的 adapterLaunch）。
+    // 要判断的是引擎在不在：引擎用这台电脑上已经装好的那一份，没有就真的跑不起来。
+    const engine = ADAPTER_ENGINE_COMMANDS[sourceId];
+    if (engine) return findExecutable(engine, env, lookupOptions(options)) !== null;
+    return false;
   }
-  return findExecutable(recipe.command, env) !== null;
+  return findExecutable(recipe.command, env, lookupOptions(options)) !== null;
 }
 
 /** 已知的 Agent 名：失败原因要说清是哪个 Agent 起不来。下线的也留着名字，旧记录里仍然按名字显示。 */

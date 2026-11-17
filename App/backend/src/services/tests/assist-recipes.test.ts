@@ -72,6 +72,22 @@ describe("assistRunnable", () => {
     expect(assistRunnable("codex", env, { home: tempHome() })).toBe(true);
   });
 
+  it("finds Codex where its Windows installer puts it, without npm or node", () => {
+    // 用户装了 Codex（官方 install.ps1 放到 %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe），
+    // 但这台电脑没有 npm / node：以前这里返回 false，执行方列表里就只剩 Memmy。
+    const env = {
+      PATH: "",
+      LOCALAPPDATA: "C:\\Users\\q sun\\AppData\\Local",
+      APPDATA: "C:\\Users\\q sun\\AppData\\Roaming",
+      USERPROFILE: "C:\\Users\\q sun"
+    } as NodeJS.ProcessEnv;
+    const codex = "C:\\Users\\q sun\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe";
+    const exists = (path: string): boolean => path === codex;
+    expect(assistRunnable("codex", env, { platform: "win32", exists, home: tempHome() })).toBe(true);
+    // 适配器由 Memmy 自己准备；没有引擎时仍然不可用，不能凭空列出来。
+    expect(assistRunnable("codex", env, { platform: "win32", exists: () => false, home: tempHome() })).toBe(false);
+  });
+
   it("still needs the pi command itself, because its adapter drives pi", () => {
     expect(assistRunnable("pi", { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv, { home: tempHome() })).toBe(false);
     expect(assistRunnable("pi", { PATH: binWith("pi") } as NodeJS.ProcessEnv, { home: tempHome() })).toBe(true);

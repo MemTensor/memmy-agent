@@ -15,28 +15,67 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { findExecutable, shellLaunch } from "./executables.js";
+import { installPackages, type PackageRequest } from "./npm-install.js";
 
 /** 需要适配器的 Agent：npm 包、要执行的可执行文件名、以及最小可用版本。 */
 export interface AssistAdapter {
   sourceId: string;
   /** 界面上显示的名字，失败原因里要说清是哪个 Agent。 */
   name: string;
+  /** 包名与版本（`@scope/name@1.2.3`）：交给系统 npm 时用的一整串。 */
   package: string;
+  /** 只有包名：拼安装目录、找包内入口都用它。 */
+  packageName: string;
   /** 包提供的可执行文件名；装好后去 node_modules/.bin 里找它。 */
   bin: string;
+  /** 包内真正要跑的那份 JS：用 Memmy 自带的运行环境执行，不依赖对方装 node。 */
+  entry: string;
+  /** 这个适配器自己的代码要装的是哪几个包；引擎本体不在这里（见 {@link ADAPTER_ENGINE_PACKAGES}）。 */
+  packages: readonly PackageRequest[];
+  /** 由本机已装的 Agent 提供的包：不进 Memmy 的目录，避免下载几百 MB。 */
+  enginePackages: readonly string[];
 }
 
-/** 只有原生不支持 ACP 的三个才需要适配器；其余 Agent 直接用它们自己的入口。 */
+/**
+ * 只有原生不支持 ACP 的三个才需要 adapter；其余 Agent 直接用它们自己的入口。
+ *
+ * <p>{@code packages} 为空表示这条还不走「不依赖 npm 的安装」（对子上游版本未核实的依赖树），
+ * 继续用系统 npm，有内置目录时依旧优先用内置的那份。</p>
+ */
 export const ASSIST_ADAPTERS: readonly AssistAdapter[] = [
   {
     sourceId: "claude_code",
     name: "Claude Code",
     package: "@agentclientprotocol/claude-agent-acp@^0.100.0",
+    packageName: "@agentclientprotocol/claude-agent-acp",
     // 包在改名后同时提供了两个可执行名，配方用新的那个。
-    bin: "claude-agent-acp"
+    bin: "claude-agent-acp",
+    entry: "dist/index.js",
+    packages: [],
+    enginePackages: []
   },
-  { sourceId: "codex", name: "Codex", package: "@agentclientprotocol/codex-acp@^2.5.0", bin: "codex-acp" },
-  { sourceId: "pi", name: "Pi", package: "pi-acp@^0.0.34", bin: "pi-acp" }
+  {
+    sourceId: "codex",
+    name: "Codex",
+    package: "@agentclientprotocol/codex-acp@^2.7.0",
+    packageName: "@agentclientprotocol/codex-acp",
+    bin: "codex-acp",
+    entry: "dist/index.js",
+    // 适配器自己的代码只有几 MB；`@openai/codex`（引擎，Windows 包解开 515 MB）由本机已装的
+    // Codex 提供，执行时用 CODEX_PATH 指回去，不再下载。
+    packages: [{ name: "@agentclientprotocol/codex-acp", version: "2.7.0" }],
+    enginePackages: ["@openai/codex"]
+  },
+  {
+    sourceId: "pi",
+    name: "Pi",
+    package: "pi-acp@^0.0.34",
+    packageName: "pi-acp",
+    bin: "pi-acp",
+    entry: "dist/index.js",
+    packages: [],
+    enginePackages: []
+  }
 ];
 
 /** 安装超时：npm 走网络，冷启动可能慢，但也不能让执行一直挂着。 */
@@ -49,6 +88,32 @@ export interface AdapterInstallResult {
   installed: boolean;
   /** 没装成的原因，直接给双方看。 */
   failure?: string;
+  /** 适配器包自己的入口（用 Memmy 的运行环境跑它，而不是系统 node）。 */
+  entry?: string | null;
+}
+
+/**
+ * 能由 Memmy 自己准备的那一份：安装包里预先放好（`<resources>/assist-adapters`），
+ * 或者测试、排障时用环境变量指到别处。
+ */
+export function bundledAdaptersDirectory(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.MEMMY_ASSIST_ADAPTERS_DIR?.trim();
+  if (override) return override;
+  const resources = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  return resources ? join(resources, "assist-adapters") : "";
+}
+
+/** 内置目录里的包入口：打包时把 adapter 包放进去，第一次执行不必联网。 */
+export function bundledAdapterPath(adapter: AssistAdapter, env: NodeJS.ProcessEnv = process.env): string | null {
+  const root = bundledAdaptersDirectory(env);
+  if (!root) return null;
+  return packageEntry(join(root, "node_modules"), adapter);
+}
+
+/** 适配器包里的入口 JS：`node_modules/<package>/<entry>`。 */
+function packageEntry(nodeModules: string, adapter: AssistAdapter): string | null {
+  const candidate = join(nodeModules, adapter.packageName, adapter.entry);
+  return existsSync(candidate) ? candidate : null;
 }
 
 /** 适配器装在哪个目录：与协助的本机状态放在一起，卸载 Memmy 时一起清掉。 */
@@ -108,19 +173,70 @@ function ensureExecutable(path: string): boolean {
 const installing = new Map<string, Promise<AdapterInstallResult>>();
 
 /**
- * 确保这个 Agent 的适配器可用：已经装好就直接用，否则装一次。
+ * 这个 Agent 现在能用哪一份适配器：安装包里自带的那份优先（免下载），其次是之前装好的。
+ * 返回包内入口 JS 的绝对路径；两边都没有时返回 null。
+ */
+export function adapterEntryPath(
+  adapter: AssistAdapter,
+  options: { home?: string; env?: NodeJS.ProcessEnv } = {}
+): string | null {
+  const env = options.env ?? process.env;
+  const bundled = bundledAdapterPath(adapter, env);
+  if (bundled) return bundled;
+  return packageEntry(join(adaptersDirectory(options.home), "node_modules"), adapter);
+}
+
+/**
+ * 拉起适配器要用的命令：用 Memmy 自己的运行环境执行包内入口，不要求这台电脑上有 node。
+ *
+ * <p>打包后的 Memmy 可执行文件在 `ELECTRON_RUN_AS_NODE=1` 时就是一个完整的 Node，
+ * Memory runtime 已经这么做（`App/shell/desktop/src/main/runtime-services.ts`）。
+ * 只有老版本装出来的 `.bin` 脚本（没有包内入口）才直接执行它。</p>
+ */
+export interface AdapterLaunchSpec {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+}
+
+export function adapterLaunch(
+  adapter: AssistAdapter,
+  options: { home?: string; env?: NodeJS.ProcessEnv } = {}
+): AdapterLaunchSpec | null {
+  const entry = adapterEntryPath(adapter, options);
+  if (entry) {
+    return { command: process.execPath, args: [entry], env: { ELECTRON_RUN_AS_NODE: "1" } };
+  }
+  const executable = installedAdapterPath(adapter, options.home);
+  return executable ? { command: executable, args: [] } : null;
+}
+
+/**
+ * 确保这个 Agent 的适配器可用：自带的那份、装好的那份、或者现场装一次。
  * 只有需要适配器的 Agent 才会走到这里；原生 ACP 的 Agent 返回 null 表示不需要。
  */
 export async function ensureAdapter(
   sourceId: string,
-  options: { home?: string; env?: NodeJS.ProcessEnv; onInstalling?: () => void } = {}
+  options: {
+    home?: string;
+    env?: NodeJS.ProcessEnv;
+    onInstalling?: () => void;
+    onProgress?: (message: string) => void;
+    /** 测试注入：不联网时用它给一个会失败的 fetch，走「装不上」那条分支。 */
+    fetch?: typeof fetch;
+    registry?: string;
+  } = {}
 ): Promise<AdapterInstallResult | null> {
   const adapter = adapterFor(sourceId);
   if (!adapter) return null;
-  const existing = installedAdapterPath(adapter, options.home);
-  if (existing) return { executable: existing, installed: false };
-
   const env = options.env ?? process.env;
+  // 之前装好的（包括只有 `.bin` 的老安装）直接用，不再走一次安装。
+  const installed = installedAdapterPath(adapter, options.home);
+  const entry = adapterEntryPath(adapter, { env, ...(options.home === undefined ? {} : { home: options.home }) });
+  if (installed || entry) {
+    return { executable: installed ?? entry, installed: false, entry };
+  }
+
   const directory = adaptersDirectory(options.home);
 
   const key = `${directory}:${adapter.package}`;
@@ -129,26 +245,60 @@ export async function ensureAdapter(
     // 先让界面知道这一刻在做什么：装一次可能要十几秒，静默等待会让人以为卡住了。
     // 只在真的要装时说一次：同时等同一份安装的其余几轮不必重复提示。
     options.onInstalling?.();
-    installation = runInstall(adapter, directory, env, options.home).finally(() => installing.delete(key));
+    installation = runInstall(adapter, directory, env, options)
+      .finally(() => installing.delete(key));
     installing.set(key, installation);
   }
   return await installation;
 }
 
-/** 真正跑一次安装，装完再看一次可执行文件在不在。 */
+/** 真正跑一次安装：先走不依赖 npm 的那条，失败再退回系统 npm。装完重新看一次入口在不在。 */
 async function runInstall(
   adapter: AssistAdapter,
   directory: string,
   env: NodeJS.ProcessEnv,
-  home?: string
+  options: {
+    home?: string;
+    onProgress?: (message: string) => void;
+    fetch?: typeof fetch;
+    registry?: string;
+  }
 ): Promise<AdapterInstallResult> {
-  const failure = await runNpmInstall(adapter, directory, env);
-  const executable = installedAdapterPath(adapter, home);
-  if (executable) return { executable, installed: true };
+  const failures: string[] = [];
+  if (adapter.packages.length) {
+    try {
+      await installPackages({
+        root: directory,
+        packages: adapter.packages,
+        skip: adapter.enginePackages,
+        signal: AbortSignal.timeout(INSTALL_TIMEOUT_MS),
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+        ...(options.registry ? { registry: options.registry } : {}),
+        ...(options.onProgress
+          ? { onInstalled: (name, version) => options.onProgress?.(`准备 ${adapter.name} 的运行组件：${name}@${version}`) }
+          : {})
+      });
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  const entry = adapterEntryPath(adapter, { env, ...(options.home === undefined ? {} : { home: options.home }) });
+  if (entry) {
+    return { executable: installedAdapterPath(adapter, options.home) ?? entry, installed: true, entry };
+  }
+  // 不依赖 npm 的那条没成（例如对方网络要代理）：还有系统 npm 时再试一次，与以前的路径一致。
+  const npmFailure = await runNpmInstall(adapter, directory, env);
+  const executable = installedAdapterPath(adapter, options.home);
+  const entryAfterNpm = adapterEntryPath(adapter, { env, ...(options.home === undefined ? {} : { home: options.home }) });
+  if (executable || entryAfterNpm) {
+    return { executable: executable ?? entryAfterNpm, installed: true, entry: entryAfterNpm };
+  }
+  const reason = [npmFailure, ...failures].filter((item): item is string => Boolean(item)).join("；");
   return {
     executable: null,
     installed: true,
-    failure: failure ?? `没能准备好 ${adapter.name} 的运行组件`
+    entry: null,
+    failure: reason || `没能准备好 ${adapter.name} 的运行组件`
   };
 }
 

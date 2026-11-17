@@ -31,6 +31,8 @@ const LOGIN_STATUS_TIMEOUT_MS = 5_000;
 export interface AssistLoginCommand {
   command: string;
   args: string[];
+  /** 登录进程也要带的环境变量：用 Memmy 自带运行环境跑适配器时要带 `ELECTRON_RUN_AS_NODE`。 */
+  env?: Record<string, string>;
 }
 
 /**
@@ -47,6 +49,11 @@ export interface AssistSignInLookupOptions {
   home?: string;
   /** 已经准备好的适配器可执行文件；有它就不用再去找。 */
   adapterExecutable?: string | null;
+  /**
+   * 适配器包内的入口 JS：有它时用 Memmy 自己的运行环境执行（这台电脑没有 node 也能跑），
+   * 与执行时用的是同一份适配器。
+   */
+  adapterEntry?: string | null;
   /** QwenWork 应用包位置，测试可注入。 */
   qwenWorkAppDirs?: readonly string[];
 }
@@ -72,6 +79,14 @@ export function assistLoginCommand(
     return command ? { command, args } : null;
   }
   if (sourceId === "claude_code") {
+    const entry = options.adapterEntry ?? null;
+    if (entry) {
+      return {
+        command: process.execPath,
+        args: [entry, "--cli", "auth", "login", "--claudeai"],
+        env: { ELECTRON_RUN_AS_NODE: "1" }
+      };
+    }
     const adapter = options.adapterExecutable ?? installedAdapterFor("claude_code", options.home);
     if (adapter) return { command: adapter, args: ["--cli", "auth", "login", "--claudeai"] };
     const cli = findExecutable("claude", env);
@@ -132,13 +147,19 @@ export async function assistSignedIn(
   let command: string | null = null;
   let args: string[] = [];
   if (sourceId === "claude_code") {
-    const adapter = options.adapterExecutable ?? installedAdapterFor("claude_code", options.home);
-    if (adapter) {
-      command = adapter;
-      args = ["--cli", "auth", "status"];
+    const entry = options.adapterEntry ?? null;
+    if (entry) {
+      command = process.execPath;
+      args = [entry, "--cli", "auth", "status"];
     } else {
-      command = findExecutable("claude", env);
-      args = ["auth", "status"];
+      const adapter = options.adapterExecutable ?? installedAdapterFor("claude_code", options.home);
+      if (adapter) {
+        command = adapter;
+        args = ["--cli", "auth", "status"];
+      } else {
+        command = findExecutable("claude", env);
+        args = ["auth", "status"];
+      }
     }
   } else if (sourceId === "qwenwork") {
     // status 输出「Account: Not logged in」或「Logged in as …」。
@@ -257,6 +278,7 @@ function pickLookup(options: AssistSignInLookupOptions): AssistSignInLookupOptio
   return {
     ...(options.home === undefined ? {} : { home: options.home }),
     ...(options.adapterExecutable === undefined ? {} : { adapterExecutable: options.adapterExecutable }),
+    ...(options.adapterEntry === undefined ? {} : { adapterEntry: options.adapterEntry }),
     ...(options.qwenWorkAppDirs === undefined ? {} : { qwenWorkAppDirs: options.qwenWorkAppDirs })
   };
 }
@@ -277,7 +299,7 @@ function waitForLogin(
     // Windows 上登录命令常是 `.cmd`（适配器与 npm 装出来的 CLI），同样要交给 cmd.exe（见 ./executables）。
     const launch = shellLaunch(login.command, login.args, { env });
     const child = spawn(launch.command, launch.args, {
-      env,
+      env: { ...env, ...(login.env ?? {}) },
       stdio: ["ignore", "pipe", "pipe"],
       ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})
     });
