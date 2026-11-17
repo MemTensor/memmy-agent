@@ -367,6 +367,16 @@ export interface CollabJoinRequest {
   createdAt: string | null;
 }
 
+/**
+ * 等自己审核的加入申请，带上项目：邀请人的 Memmy 靠它在屏幕上弹窗。
+ *
+ * <p>一个人可能是多个项目的所有者或管理员，所以列表是跨项目的；云端只返回他能审核的项目。</p>
+ */
+export interface CollabManagedJoinRequest extends CollabJoinRequest {
+  projectId: string;
+  projectName: string;
+}
+
 export interface CollabMembers {
   project: CollabProject;
   joinMode: CollabJoinMode;
@@ -654,6 +664,11 @@ export interface CollabService {
   }): Promise<{ text: string; ok?: true }>;
   /** Who is in the project and how people join it; owners and admins also get the requests waiting for them. */
   listMembers(projectId: string): Promise<CollabMembers>;
+  /**
+   * 等自己审核的加入申请，跨项目一次给出。邀请人的 Memmy 轮询它并在屏幕上弹窗：申请由对方在别的电脑上提交，
+   * 本机没有推送通道。
+   */
+  joinRequests(): Promise<CollabManagedJoinRequest[]>;
   /** The person's own invite link to the project; any member may invite. */
   createInvite(projectId: string): Promise<CollabInvite>;
   setJoinMode(projectId: string, joinMode: CollabJoinMode): Promise<{ joinMode: CollabJoinMode }>;
@@ -2203,6 +2218,12 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       return view;
     },
 
+    async joinRequests() {
+      // 云端只返回调用者是所有者或管理员的项目：成员看不到这些申请，本机也不要自己再筛。
+      const data = await cloud(`/join-requests`);
+      return list(data.requests).map(toManagedJoinRequest);
+    },
+
     async demoHeartbeat(projectId, step) {
       const data = await cloud(`/projects/${encodeURIComponent(projectId)}/demo/heartbeat`, {
         method: "POST",
@@ -3096,6 +3117,15 @@ function toJoinRequest(raw: unknown): CollabJoinRequest {
     name: text(request.name),
     inviterName: text(request.inviterName),
     createdAt: nullableText(request.createdAt)
+  };
+}
+
+function toManagedJoinRequest(raw: unknown): CollabManagedJoinRequest {
+  const request = record(raw);
+  return {
+    ...toJoinRequest(request),
+    projectId: text(request.projectId),
+    projectName: text(request.projectName)
   };
 }
 

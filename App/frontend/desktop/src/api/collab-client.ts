@@ -231,6 +231,12 @@ const MembersResponseSchema = z.object({
   members: z.array(MemberSchema),
   requests: z.array(JoinRequestSchema)
 });
+/** 等自己审核的申请：带上项目，一个人可能是多个项目的所有者或管理员。 */
+const ManagedJoinRequestSchema = JoinRequestSchema.extend({
+  projectId: z.string(),
+  projectName: z.string()
+});
+const JoinRequestsResponseSchema = z.object({ requests: z.array(ManagedJoinRequestSchema) });
 const InviteSchema = z.object({ code: z.string(), link: z.string(), shareText: z.string() });
 const InvitePreviewSchema = z.object({
   code: z.string(),
@@ -290,6 +296,8 @@ export type CollabRole = z.infer<typeof RoleSchema>;
 export type CollabJoinMode = z.infer<typeof JoinModeSchema>;
 export type CollabMember = z.infer<typeof MemberSchema>;
 export type CollabJoinRequest = z.infer<typeof JoinRequestSchema>;
+/** 等自己审核的加入申请，带项目名：邀请人的 Memmy 靠它弹窗。 */
+export type CollabManagedJoinRequest = z.infer<typeof ManagedJoinRequestSchema>;
 export type CollabMembers = z.infer<typeof MembersResponseSchema>;
 export type CollabInvite = z.infer<typeof InviteSchema>;
 export type CollabInvitePreview = z.infer<typeof InvitePreviewSchema>;
@@ -702,6 +710,8 @@ export interface CollabClient {
   syncSessions(options?: { tasksOnly?: boolean; projectId?: string }): Promise<CollabSyncResult>;
   /** Who is in the project; owners and admins also get the join mode's pending requests. */
   listMembers(projectId: string): Promise<CollabMembers>;
+  /** 等自己审核的加入申请，跨项目一次取回。 */
+  joinRequests(): Promise<CollabManagedJoinRequest[]>;
   /** 项目关联的知识库：只读列表，附「能不能管理」。 */
   knowledge(projectId: string): Promise<CollabKnowledgeView>;
   /** 关联一个知识库；云端只接受调用者本来就能访问的库。 */
@@ -1085,6 +1095,10 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
 
     async listMembers(projectId) {
       return requestJson({ config, path: `/api/collab/projects/${encodeURIComponent(projectId)}/members`, schema: MembersResponseSchema });
+    },
+
+    async joinRequests() {
+      return (await requestJson({ config, path: "/api/collab/join-requests", schema: JoinRequestsResponseSchema })).requests;
     },
 
     async knowledge(projectId) {

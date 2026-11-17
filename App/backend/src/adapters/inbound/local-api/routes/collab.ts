@@ -175,6 +175,10 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
   app.get("/api/collab/agents", guard, withErrorEnvelope(async (_request, reply) =>
     reply.send({ agents: await options.collab.listAddedAgents() })));
 
+  // 等自己审核的加入申请，跨项目一次给出：邀请人的 Memmy 轮询它并在屏幕上弹窗。
+  app.get("/api/collab/join-requests", guard, withErrorEnvelope(async (_request, reply) =>
+    reply.send({ requests: await options.collab.joinRequests() })));
+
   app.post("/api/collab/projects", guard, withErrorEnvelope(async (request, reply) => {
     const input = CreateProjectSchema.parse(request.body ?? {});
     return reply.send(await options.collab.createProject(

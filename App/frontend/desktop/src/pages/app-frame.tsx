@@ -78,6 +78,7 @@ import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integ
 import { CollabCreateProjectDialog } from "./collab-create-project-dialog.js";
 import { CollabJoinProjectDialog } from "./collab-join-project-dialog.js";
 import { CollabAssistHost } from "./collab-assist-host.js";
+import { CollabJoinRequestHost } from "./collab-join-request-host.js";
 import { CollabDemoGuideHost } from "../components/collab-demo-guide/collab-demo-guide-host.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
 import { writeMemorySubPage } from "./memory-sub-page-storage.js";
@@ -565,6 +566,37 @@ export function AppFrame(props: AppFrameProps) {
   /** 这次新建是从新功能大卡点进来的体验入口：引导先只亮「创建项目」。 */
   const [createProjectDemo, setCreateProjectDemo] = useState(false);
   const [joinProjectOpen, setJoinProjectOpen] = useState(false);
+  /** 浏览器里的邀请链接经 memmy://invite/<code> 带进来的邀请码：弹窗打开时直接预填并预览。 */
+  const [inviteLinkCode, setInviteLinkCode] = useState<string | null>(null);
+
+  // 浏览器里的邀请链接用 memmy://invite/<code> 拉起桌面端（见 main 的 invite-link）：界面只负责把邀请码交给
+  // 「加入项目」弹窗。先订阅再取走启动前排队的那几条，冷启动与热启动走同一条路。
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.memmy?.onInviteLink) return undefined;
+    const unsubscribe = window.memmy.onInviteLink((code) => setInviteLinkCode(code));
+    void window.memmy.takeInviteLinks?.()
+      .then((codes) => {
+        const [first] = codes;
+        if (first) setInviteLinkCode(first);
+      })
+      .catch(() => undefined);
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (!inviteLinkCode) return;
+    if (!collabEnabled) {
+      // 协作项目只在账号模式存在：API Key 模式下不给一个注定失败的弹窗。
+      showCollabNotice(t("collab.join.needAccount"));
+      setInviteLinkCode(null);
+      return;
+    }
+    // 弹窗挂在应用根部，但界面停在欢迎页时先回到工作区，否则关掉弹窗后是一片空白。
+    if (state.navigation.currentPath !== "/main" && state.navigation.currentPath !== "/collab") {
+      dispatch(appActions.navigate("/main"));
+    }
+    setJoinProjectOpen(true);
+  }, [inviteLinkCode, collabEnabled]);
   /** The online project the person is about to leave, while the confirmation is open. */
   const [leaveOnlineProjectId, setLeaveOnlineProjectId] = useState<string | null>(null);
   const [leavingOnlineProject, setLeavingOnlineProject] = useState(false);
@@ -2120,6 +2152,15 @@ export function AppFrame(props: AppFrameProps) {
         }}
         onOpenBoard={openProjectBoard}
       />
+      {/* 有人申请加入我的项目：邀请方这边直接弹窗，不必等在项目成员里看到。 */}
+      <CollabJoinRequestHost
+        collab={collabClient}
+        enabled={collabEnabled && Boolean(state.account.userId)}
+        onApproved={() => {
+          if (collabClient) void loadCollabProjects(collabClient);
+        }}
+        onNotice={showCollabNotice}
+      />
       {/* 项目协作的新手引导：蒙版、说明卡与结束演示都挂在应用根部，跨看板与对话页工作。 */}
       <CollabDemoGuideHost
         collab={collabClient}
@@ -2132,18 +2173,25 @@ export function AppFrame(props: AppFrameProps) {
       />
       <CollabJoinProjectDialog
         open={joinProjectOpen}
+        // 深链接带进来的邀请码：弹窗打开即预填并预览。
+        initialReference={inviteLinkCode ?? undefined}
         onCreateProject={() => {
           setJoinProjectOpen(false);
+          setInviteLinkCode(null);
           // 从「加入项目」切过来的是普通新建：不预先打开共享。
           setCreateProjectShare(false);
           setCreateProjectOpen(true);
         }}
-        onClose={() => setJoinProjectOpen(false)}
+        onClose={() => {
+          setJoinProjectOpen(false);
+          setInviteLinkCode(null);
+        }}
         onApplied={(application) => {
           addPendingApplication(application);
           if (collabClient) void loadCollabProjects(collabClient);
         }}
         onJoined={(project) => {
+          setInviteLinkCode(null);
           if (project.localProjectId) {
             // Already a member with a project on this computer: just open it.
             openProjectBoard(project.localProjectId);

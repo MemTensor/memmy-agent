@@ -1,5 +1,5 @@
 import { Cloud, Folder, MessageSquare, Sparkles, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createHttpCollabClient, type CollabClient, type CollabInvitePreview, type CollabProject } from "../api/collab-client.js";
 import { useOptionalApiClients } from "../app/providers.js";
 import { Button } from "../components/button.js";
@@ -23,6 +23,8 @@ export function CollabJoinProjectDialog(props: {
   onApplied?: (application: { projectId: string; projectName: string }) => void;
   /** Switches the same dialog to creating a project; both entries live in one place now. */
   onCreateProject?: () => void;
+  /** 深链接带进来的邀请码：打开即预填并预览。 */
+  initialReference?: string;
 }) {
   // Rendered by AppFrame, which also runs in tests and error states without providers.
   const { clients } = useOptionalApiClients();
@@ -42,6 +44,11 @@ export function JoinProjectModal(props: {
   onJoined: (project: CollabProject) => void;
   onApplied?: (application: { projectId: string; projectName: string }) => void;
   onCreateProject?: () => void;
+  /**
+   * 带着邀请码打开：浏览器里的邀请链接经 memmy://invite/<code> 拉起桌面端时用。
+   * 直接预填并预览，用户点开链接就是想加入，不必再粘贴一次。
+   */
+  initialReference?: string;
 }) {
   const { t } = useTranslation();
   const [reference, setReference] = useState("");
@@ -53,13 +60,30 @@ export function JoinProjectModal(props: {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+  /** 预览一条邀请：手动粘贴与深链接带进来走同一条路。 */
+  const loadInvite = useCallback(async (value: string) => {
+    const text = value.trim();
+    if (!text) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setPreview(await props.collab.previewInvite(text));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  }, [props.collab]);
+
+  const initialReference = props.initialReference?.trim() ?? "";
   useEffect(() => {
     if (!props.open) return;
-    setReference("");
+    setReference(initialReference);
     setPreview(null);
     setDirectory(null);
     setError(null);
-  }, [props.open]);
+    if (initialReference) void loadInvite(initialReference);
+  }, [props.open, initialReference, loadInvite]);
 
   useEffect(() => () => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -73,15 +97,7 @@ export function JoinProjectModal(props: {
 
   async function readInvite() {
     if (!reference.trim() || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      setPreview(await props.collab.previewInvite(reference.trim()));
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
+    await loadInvite(reference);
   }
 
   async function chooseDirectory() {
