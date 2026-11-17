@@ -9,9 +9,10 @@
  * 关掉只收起当前这一条（本次运行不再打扰），申请本身还在项目成员列表里等着。</p>
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { UserPlus, X } from "lucide-react";
+import { X } from "lucide-react";
 import type { CollabClient, CollabManagedJoinRequest } from "../api/collab-client.js";
 import { Button } from "../components/button.js";
+import { Memmy } from "../components/mascot/memmy.js";
 import { Modal } from "../components/modal.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { memberColor } from "./collab-member-color.js";
@@ -96,7 +97,6 @@ export function CollabJoinRequestHost(props: {
       if (approve) {
         await props.collab.approveRequest(request.projectId, request.userId);
         props.onApproved?.(request);
-        props.onNotice?.(t("collab.requests.approved", { name: request.name, project: request.projectName }));
       } else {
         await props.collab.rejectRequest(request.projectId, request.userId);
         props.onNotice?.(t("collab.requests.rejected", { name: request.name }));
@@ -136,9 +136,6 @@ export function CollabJoinRequestHost(props: {
         <>
           <span className={styles.hint}>{extra}</span>
           <span className={styles.actions}>
-            <Button variant="ghost" disabled={busy} onClick={() => dismiss(current)}>
-              {t("collab.requests.later")}
-            </Button>
             <Button variant="secondary" disabled={busy} onClick={() => void decide(current, false)}>
               {t("collab.requests.reject")}
             </Button>
@@ -149,6 +146,9 @@ export function CollabJoinRequestHost(props: {
         </>
       )}
     >
+      <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+        <Memmy pose="plead" size={64} />
+      </div>
       <div className={styles.person}>
         <span className={styles.avatar} style={{ background: memberColor(current.name) }} aria-hidden="true">
           {Array.from(current.name.trim())[0] ?? "?"}
@@ -157,7 +157,6 @@ export function CollabJoinRequestHost(props: {
           <strong>{current.name}</strong>
           <span>{t("collab.requests.via", { inviter: current.inviterName })}</span>
         </span>
-        <span className={styles.badge} aria-hidden="true"><UserPlus size={15} /></span>
       </div>
       <p className={styles.note}>{t("collab.requests.note")}</p>
       {error ? <p className={styles.error} role="alert">{error}</p> : null}

@@ -80,7 +80,7 @@ describe("collab join request host", () => {
   it("pops up as soon as a request is waiting, with who and which project", async () => {
     await mount();
 
-    expect(hasText("有人申请加入「Memmy 开发」")).toBe(true);
+    expect(hasText("「Memmy 开发」成员申请")).toBe(true);
     expect(hasText("用户D")).toBe(true);
     expect(hasText("通过 用户A 的邀请链接提交")).toBe(true);
     expect(button("同意加入")).toBeTruthy();
@@ -94,8 +94,7 @@ describe("collab join request host", () => {
 
     expect(collab.approveRequest).toHaveBeenCalledWith("cloud-1", "10");
     expect(onApproved).toHaveBeenCalledWith(request);
-    expect(onNotice).toHaveBeenCalledWith("已同意 用户D 加入「Memmy 开发」");
-    expect(hasText("有人申请加入「Memmy 开发」")).toBe(false);
+    expect(hasText("「Memmy 开发」成员申请")).toBe(false);
   });
 
   it("declines through the cloud and says so", async () => {
@@ -108,27 +107,9 @@ describe("collab join request host", () => {
     expect(onNotice).toHaveBeenCalledWith("已拒绝 用户D 的申请");
   });
 
-  it("stops bothering once dismissed, and says nothing in API Key mode", async () => {
-    await mount();
-    await act(async () => button("稍后处理")!.click());
-    await flush();
-    expect(hasText("有人申请加入「Memmy 开发」")).toBe(false);
-
-    // 关掉之后重新渲染同一份列表，也不再弹：本次运行里已经打扰过一次了。
-    await act(async () => {
-      root.render(
-        <I18nProvider language="zh-CN">
-          <CollabJoinRequestHost collab={collab as never} enabled onApproved={onApproved} onNotice={onNotice} />
-        </I18nProvider>
-      );
-    });
-    await flush();
-    expect(hasText("有人申请加入「Memmy 开发」")).toBe(false);
-  });
-
   it("never asks the cloud when collaboration is off", async () => {
     await mount(false);
     expect(collab.joinRequests).not.toHaveBeenCalled();
-    expect(hasText("有人申请加入「Memmy 开发」")).toBe(false);
+    expect(hasText("「Memmy 开发」成员申请")).toBe(false);
   });
 });
