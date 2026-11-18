@@ -1686,18 +1686,19 @@ export function AppFrame(props: AppFrameProps) {
 
             if (item.action === "record") {
               const status = state.navigation.recordingStatus;
+              const showRecordingView = shouldShowRecordingView(status, props.recordingActive === true, props.recordingViewed === true);
               return <div key={key} className={`app-frame-recording-nav${status === "recording" || status === "paused" ? " app-frame-recording-nav--recording" : ""}`}>
                 {navButton}
                 {status === "transcribing" ? <span className="app-frame-recording-nav__post-status" role="status">
                   {t("recording.page.transcribingShort")}
                 </span> : null}
-                {shouldShowRecordingView(status, props.recordingActive === true, props.recordingViewed === true) ? <button type="button"
+                {showRecordingView ? <button type="button"
                   className="app-frame-recording-nav__post-status app-frame-recording-nav__post-status--view"
                   onClick={() => {
                     handleFirstSidebarInteraction();
                     dispatch(appActions.requestRecordingOpen());
                   }}>{t("recording.page.view")}</button> : null}
-                {status !== "transcribing" && status !== "ready" && status !== "failed" ? <span className="app-frame-recording-nav__controls">
+                {status !== "transcribing" && !showRecordingView ? <span className="app-frame-recording-nav__controls">
                   {status === "recording" || status === "paused" ? <span className="app-frame-recording-nav__signal"
                     role="status" aria-label={t(status === "paused" ? "plugin.ui.audio.paused" : "plugin.ui.audio.recording")}
                   ><SidebarRecordingWave live={status === "recording"} /></span>
