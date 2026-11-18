@@ -1725,7 +1725,7 @@ export function AppFrame(props: AppFrameProps) {
             </div>
           </div>
           <div className="app-frame-sidebar-menu__divider" />
-          {creditAccount.live && (creditAccount.error || (creditAccount.loading && !creditAccount.summary)) && <p role={creditAccount.error ? "alert" : "status"}>{t(creditAccount.error === "auth" ? "credits.live.auth" : creditAccount.error ? creditAccount.summary ? "credits.live.stale" : "credits.live.error" : "credits.live.loading")}</p>}
+          {creditAccount.live && !creditAccount.summary && (creditAccount.error || creditAccount.loading) && <p role={creditAccount.error ? "alert" : "status"}>{t(creditAccount.error === "auth" ? "credits.live.auth" : creditAccount.error ? "credits.live.error" : "credits.live.loading")}</p>}
           {(
             <button type="button" className="app-frame-sidebar-menu__item app-frame-sidebar-menu__quota-upgrade" role="menuitem" onClick={openCreditPlans}>
               <span className="app-frame-sidebar-menu__item-icon"><ArrowUpRight size={13} /></span>

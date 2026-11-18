@@ -202,7 +202,6 @@ export function CreditsSourceDetailPage(props: { source: "reward" }) {
   if (account.live && !account.summary) return <CreditsSettingsShell><CreditAccountStatus account={account} /></CreditsSettingsShell>;
   return <CreditsSettingsShell><div className={`${usageStyles.detailContent} ${usageStyles.commercePage}`}>
     <header className={usageStyles.commerceHeader}><h1>{t("credits.detail.rewardTitle")}</h1></header>
-    {account.error && <p role="status">{t("credits.live.stale")}</p>}
     <div className={usageStyles.creditTabs} role="tablist" aria-label={t("credits.detail.validity")}>
       {(["valid", "expired"] as const).map(value => <button key={value} type="button" role="tab" id={`credits-tab-${value}`} aria-selected={period === value} aria-controls="credits-source-panel" tabIndex={period === value ? 0 : -1} onClick={() => setPeriod(value)} onKeyDown={event => {
         if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
@@ -268,7 +267,7 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
 
   return (
     <div id="credits-balance" className={`${usageStyles.detailContent} ${usageStyles.balancePage}`}>
-      {account.live && account.error && <p role="status">{t(account.error === "auth" ? "credits.live.auth" : "credits.live.stale")}</p>}
+      {account.live && account.error === "auth" && <p role="status">{t("credits.live.auth")}</p>}
       <section className={usageStyles.usageSection}>
         <div className={usageStyles.sectionHead}>
           <h2>
