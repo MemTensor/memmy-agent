@@ -7,6 +7,7 @@ import {
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
 import { readDemoGuideDone } from "../app/collab-demo-guide-store.js";
+import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
 import { prepareProjectDirectory } from "../api/projects-client.js";
 import { useOptionalAgentRuntimeBridge } from "../app/agent-runtime-bridge.js";
 import { useOptionalApiClients } from "../app/providers.js";
@@ -115,8 +116,15 @@ export function CreateProjectModal(props: {
 
   /**
    * 打开那一刻的默认勾选：用 ref 带上，effect 只在打开时读一次，弹窗开着时这个值变化不会重置人的选择。
+   *
+   * 六屏引导还要云端这次真的能演示：项目列表里的 `demoEligible` 就是云端 `eligible()` 的结果，
+   * 与本机「退出过引导」是两套记录。只看本机标记时，云端已经记过这个人体验过（或开关关掉）的机器
+   * 仍会走完六屏，点「创建项目」后云端不启动演示，引导就在进看板的那一刻无声消失。
+   * 旧云端没有这个字段：按不能演示处理，与项目列表的同一套口径一致。
    */
-  const demo = props.demo === true && shareAvailable;
+  const demoEligible = projectsStore.demoEligible === true;
+  const demo = props.demo === true && shareAvailable && demoRequested
+    && (demoEligible || isDesktopPromptPreview("collabLaunch"));
   const defaultShareOnOpen = demo || props.defaultShare === true;
   const shareOnOpenRef = useRef(defaultShareOnOpen && shareAvailable);
   shareOnOpenRef.current = defaultShareOnOpen && shareAvailable;

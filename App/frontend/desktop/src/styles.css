@@ -760,9 +760,8 @@ body.memmy-window-fullscreen {
   }
 }
 
-/* Referenced-session and Goal chips sit in the composer toolbar row, ahead of the leading
-   action group. They used to float over the input, which covered the + button in the home
-   composer and the first line of text. */
+/* Referenced-session and Goal chips: they belong to the + button, so they sit inside the composer action row
+   right after it rather than in the toolbar under the input. */
 .composer-mention-chips {
   display: flex;
   min-width: 0;
@@ -772,14 +771,18 @@ body.memmy-window-fullscreen {
   overflow: hidden;
 }
 
-/* With chips in the row the toolbar flows from the left; `.composer-actions` keeps
-   its `margin-left: auto`, so the right-hand controls stay anchored. */
-.agent-composer-toolbar:has(> .composer-mention-chips),
-.home-composer-toolbar:has(> .composer-mention-chips) {
-  flex-wrap: nowrap;
-  justify-content: flex-start;
+/* + and its chips stay together at the left edge; the rest of the row keeps flowing to the right. */
+.home-composer-leading {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px;
+  margin-right: auto;
 }
 
+/* `agent-composer-toolbar__leading` already groups the + button and the chips, so the row keeps
+   `space-between` and only has to let the group shrink when a task title is long. */
 .composer-mention-chips .composer-command-chip {
   min-width: 0;
   flex: 0 1 auto;
@@ -812,6 +815,36 @@ body.memmy-window-fullscreen {
 .composer-command-chip:focus-within {
   background: color-mix(in srgb, var(--color-canvas-oat) 62%, var(--color-background-paper));
   color: var(--color-text-ink);
+}
+
+/*
+ * 引用任务的 chip 有两个状态，靠悬停 / 聚焦切换：
+ * 常规态只有绿色小图标 + 文字，不画底色；悬停或聚焦后变成灰色胶囊，图标换成 ×，点一下就移除。
+ * 这两段必须写在基础 `.composer-command-chip` 之后：选择器权重相同，写前面会被它的透明底色盖掉。
+ */
+.composer-mention-chip {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 84%, transparent);
+  font-size: 12px;
+}
+
+/* 选中态用中性灰：不能拿 --color-border-stone 混白，那个颜色本身带青，混出来是淡绿底。
+   6% 的 ink 落到白底上就是 rgb(241,241,241)，与本项目其他悬浮控件的灰底一致。 */
+.composer-mention-chip:hover,
+.composer-mention-chip:focus-within {
+  background: color-mix(in srgb, var(--color-text-ink) 6%, var(--color-background-paper));
+  color: var(--color-text-ink);
+}
+
+/* 常规态的绿色气泡图标只靠 `composer-mention-chip__icon` 挂上去（没有 `--target`），
+   所以基础规则不会帮它隐掉；悬停 / 聚焦时要手动换成 ×，否则两个图标会叠在一起。 */
+.composer-mention-chip:hover .composer-mention-chip__icon,
+.composer-mention-chip:focus-within .composer-mention-chip__icon {
+  opacity: 0;
+  transform: scale(0.75);
 }
 
 .composer-command-chip__icon {
@@ -871,6 +904,7 @@ body.memmy-window-fullscreen {
 .agent-composer-toolbar__leading {
   display: flex;
   min-width: 0;
+  flex: 0 1 auto;
   align-items: center;
   gap: 4px;
 }
@@ -904,8 +938,10 @@ body.memmy-window-fullscreen {
   min-width: 0;
 }
 
+/* + no longer pushes the row itself: `.home-composer-leading` wraps it with the chips and carries
+   the auto margin, so a referenced chip lands right beside the + instead of at the far right. */
 .home-composer-add-button {
-  margin-right: auto;
+  flex: 0 0 auto;
 }
 
 .composer-action-btn {

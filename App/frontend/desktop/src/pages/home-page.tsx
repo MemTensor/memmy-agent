@@ -3546,15 +3546,39 @@ export function HomePage() {
                   onPaste={handleComposerPaste}
                 />
                 <div className="composer-actions absolute bottom-3 right-4 z-50">
-                  <button
-                    type="button"
-                    aria-label={t("home.media.menu")}
-                    title={t("home.media.menu")}
-                    onClick={openMediaFilePicker}
-                    className="composer-action-btn home-composer-add-button"
-                  >
-                    <Plus size={15} strokeWidth={2} />
-                  </button>
+                  {/* 首页草稿：+ 与引用任务的 chip 是一组，云图标不在这行（它跟着底部的项目文件夹）。 */}
+                  <div className="home-composer-leading">
+                    <button
+                      type="button"
+                      aria-label={t("home.media.menu")}
+                      title={t("home.media.menu")}
+                      onClick={openMediaFilePicker}
+                      className="composer-action-btn home-composer-add-button"
+                    >
+                      <Plus size={15} strokeWidth={2} />
+                    </button>
+                    {selectedComposerCommand || pendingMentions.length ? (
+                      <div className="composer-mention-chips">
+                        {selectedComposerCommand ? (
+                          <ComposerCommandChip
+                            command={selectedComposerCommand}
+                            label={t("home.command.goalChip")}
+                            removeLabel={t("common.remove")}
+                            onRemove={clearSelectedComposerCommand}
+                          />
+                        ) : null}
+                        {pendingMentions.map((item) => (
+                          <ComposerMentionChip
+                            key={item.id}
+                            label={item.title}
+                            removeLabel={t("common.remove")}
+                            hint={t("home.mention.chipHint")}
+                            onRemove={() => removeMention(chatScopeKey, item.id)}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                   <AgentModelSelector
                     mode={modelWorkspaceMode}
                     scopeKey={modelSelectionScopeKey}
@@ -3583,28 +3607,6 @@ export function HomePage() {
                 </div>
               </div>
               <div className="home-composer-toolbar">
-                {/* 引用会话与 Goal 的 chip 跟着工具行走，不再浮在输入框左下角：那里是 + 按钮的位置。 */}
-                {selectedComposerCommand || pendingMentions.length ? (
-                  <div className="composer-mention-chips">
-                    {selectedComposerCommand ? (
-                      <ComposerCommandChip
-                        command={selectedComposerCommand}
-                        label={t("home.command.goalChip")}
-                        removeLabel={t("common.remove")}
-                        onRemove={clearSelectedComposerCommand}
-                      />
-                    ) : null}
-                    {pendingMentions.map((item) => (
-                      <ComposerMentionChip
-                        key={item.id}
-                        label={item.title}
-                        removeLabel={t("common.remove")}
-                        hint={t("home.mention.chipHint")}
-                        onRemove={() => removeMention(chatScopeKey, item.id)}
-                      />
-                    ))}
-                  </div>
-                ) : null}
                 <ProjectTargetPicker
                   open={projectPickerOpen}
                   target={draftTarget}
@@ -3823,19 +3825,6 @@ export function HomePage() {
                       onPaste={handleComposerPaste}
                     />
                     <div className="agent-composer-toolbar">
-                      {pendingMentions.length ? (
-                        <div className="composer-mention-chips">
-                          {pendingMentions.map((item) => (
-                            <ComposerMentionChip
-                              key={item.id}
-                              label={item.title}
-                              removeLabel={t("common.remove")}
-                              hint={t("home.mention.chipHint")}
-                              onRemove={() => removeMention(chatScopeKey, item.id)}
-                            />
-                          ))}
-                        </div>
-                      ) : null}
                       <div className="agent-composer-toolbar__leading">
                         <button
                           type="button"
@@ -3846,6 +3835,21 @@ export function HomePage() {
                         >
                           <Plus size={15} strokeWidth={2} />
                         </button>
+                        {/* 引用任务的 chip 排在共享开关（云图标）右侧，和首页输入框保持一致。 */}
+                        {shareToggle}
+                        {pendingMentions.length ? (
+                          <div className="composer-mention-chips">
+                            {pendingMentions.map((item) => (
+                              <ComposerMentionChip
+                                key={item.id}
+                                label={item.title}
+                                removeLabel={t("common.remove")}
+                                hint={t("home.mention.chipHint")}
+                                onRemove={() => removeMention(chatScopeKey, item.id)}
+                              />
+                            ))}
+                          </div>
+                        ) : null}
                         {selectedComposerCommand ? (
                           <ComposerCommandChip
                             command={selectedComposerCommand}
@@ -3854,7 +3858,6 @@ export function HomePage() {
                             onRemove={clearSelectedComposerCommand}
                           />
                         ) : null}
-                        {shareToggle}
                       </div>
                       <div className="composer-actions">
                         <AgentModelSelector
