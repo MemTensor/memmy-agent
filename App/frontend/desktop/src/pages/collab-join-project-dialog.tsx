@@ -218,6 +218,7 @@ export function JoinProjectModal(props: {
                   }}
                 />
                 {joinError ? <p className={styles.joinNicknameError} role="alert">{joinError}</p> : null}
+                <small className={styles.fieldHint}>{t("collab.join.nicknameHint")}</small>
               </div>
             )}
             {preview.status === "member" ? null : (

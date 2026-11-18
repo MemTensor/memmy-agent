@@ -95,7 +95,7 @@ describe("project members dialog", () => {
       requests: []
     });
     expect(hasText("邀请成员")).toBe(true);
-    expect(hasText("成员加入后可查看项目中的任务与对话，也可将自身的任务纳入项目；成员的 Agent 均可参考。")).toBe(true);
+    expect(hasText("成员加入后可查看项目中的任务与对话，也可将自身的任务纳入项目，成员的 Agent 均可参考")).toBe(true);
     expect(hasText("用户A（你）")).toBe(true);
     expect(hasText("获得链接者")).toBe(true);
     expect(button("申请后加入")).toBeTruthy();
