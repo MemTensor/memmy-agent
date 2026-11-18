@@ -237,11 +237,13 @@ export function JoinProjectModal(props: {
             )}
           </>
         ) : (
+          // 第一步只给一个输入框：标题已经说了是加入项目，再写一行「邀请链接」是重复标签。
+          // 可访问名由 aria-label 提供，不靠视觉标签。
           <label className={styles.field}>
-            <span>{t("collab.join.linkLabel")}</span>
             <input
               ref={inputRef}
               value={reference}
+              aria-label={t("collab.join.linkLabel")}
               placeholder={t("collab.join.pastePlaceholder")}
               onChange={(event) => setReference(event.target.value)}
               onKeyDown={(event) => {

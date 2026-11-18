@@ -1450,8 +1450,8 @@
 }
 
 /*
- * 目录字段里的小按钮（2026-11-18 用户要求「这里不要有框线」）：
- * 就是一段干净的文字按钮，不描边也不铺底色，只靠薄荷色和悬停反馈说明它能点。
+ * 目录字段里的小按钮（2026-11-18 用户要求）：不描边、不铺底色，就是一段灰字，
+ * 只靠悬停反馈说明它能点。文案颜色跟线框一样收起来，不再用薄荷色抢注意力。
  */
 :global(.button).dirPickButton {
   flex: none;
@@ -1460,15 +1460,15 @@
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--collab-accent-deep);
+  color: var(--collab-muted);
   font-size: 13px;
   font-weight: 400;
   box-shadow: none;
 }
 
 :global(.button).dirPickButton:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 12%, transparent);
-  color: var(--collab-accent-deep);
+  background: color-mix(in srgb, var(--collab-ink) 6%, transparent);
+  color: var(--collab-ink);
 }
 
 .error {
@@ -2687,16 +2687,14 @@
   background: var(--collab-surface);
 }
 
+/* 项目图标只留一个云 logo：不画方块、不铺白底，颜色也跟着线框改用中性灰（2026-11-18 两次要求） */
 .joinCardIcon {
   display: grid;
   flex: none;
   place-items: center;
-  width: 44px;
-  height: 44px;
-  border: 1px solid var(--collab-line);
-  border-radius: 11px;
-  background: var(--color-background-paper, #fff);
-  color: var(--collab-accent-deep);
+  width: 24px;
+  height: 24px;
+  color: var(--collab-muted);
 }
 
 .joinCardName {
@@ -2781,6 +2779,22 @@
 /* 两个按钮之间照知识库留 10px */
 :global(.modal).createModal.joinModal :global(.modal-footer) .footerButtons {
   gap: 10px;
+}
+
+/*
+ * 线框统一用中性灰（2026-11-18 用户要求「线框全部改为灰色，和会话页面的输入框对齐」）：
+ * 项目卡片、昵称输入框、目录字段不再用带薄荷调的 --collab-line。颜色取 ink 的 9%，
+ * 与 .agent-composer-shell 的 --border-content-panel 同属一档浅灰，但在白底弹窗里不会淡到看不出轮廓。
+ */
+:global(.modal).createModal.joinModal .joinCard,
+:global(.modal).createModal.joinModal .field input,
+:global(.modal).createModal.joinModal .dirField {
+  border-color: color-mix(in srgb, var(--collab-ink) 9%, transparent);
+}
+
+/* 卡片底色也跟着从薄荷底换成白底，否则灰线包着一块淡绿 */
+:global(.modal).createModal.joinModal .joinCard {
+  background: var(--color-background-paper, #fff);
 }
 
 /* 项目配置：卡片式列表，宽 300px，可收起（PRD 3.8） */
