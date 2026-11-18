@@ -265,7 +265,7 @@ describe("browser History bridge to canonical event stream", () => {
   }, 20_000);
 
   it("rejects delayed browser events across a real segment rotation and records a reauthorized sensor in the new segment", async () => {
-    let h!: Awaited<ReturnType<typeof harness>>, initialGeneration!: string;
+    let h!: Awaited<ReturnType<typeof harness>>;
     let releaseOldEvent!: () => void, oldPublished!: () => void;
     let receiveOldEvent!: (capture: { event: BrowserSemanticHistoryEvent; enabled: boolean; generation: string | null }) => void;
     const release = new Promise<void>(resolve => { releaseOldEvent = resolve; });
@@ -301,7 +301,7 @@ describe("browser History bridge to canonical event stream", () => {
     // Finish cold Chromium/navigation/binding setup before arming the real three-second rotation.
     try { h = await harness("chrome", { rotateSegments: true, startBeforeBoundaryMs: 3_000 }); }
     finally { orderBrowserCleanup(); }
-    initialGeneration = h.service.getBrowserCaptureIntent().generation!;
+    const initialGeneration = h.service.getBrowserCaptureIntent().generation!;
     const nextIntent = nextSocketMessage(h.socket, message => {
       const current = h.service.getBrowserCaptureIntent();
       if (message.type !== "browser_history_intent" || message.enabled !== true || !message.generation
