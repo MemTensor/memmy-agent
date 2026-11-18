@@ -76,13 +76,13 @@ describe("CollabShareToggle", () => {
     });
     expect(collab.taskSharing).toHaveBeenCalledWith("cloud-1", "chat-1");
     expect(button.getAttribute("aria-checked")).toBe("false");
-    expect(button.textContent).toContain("共享给成员");
+    expect(button.getAttribute("aria-label")).toContain("共享给成员");
 
     await act(async () => button.click());
     await flush();
     expect(collab.setTaskSharing).toHaveBeenCalledWith("cloud-1", "chat-1", true);
     expect(container.querySelector("button")!.getAttribute("aria-checked")).toBe("true");
-    expect(container.textContent).toContain("已共享给成员");
+    expect(container.querySelector("button")!.getAttribute("aria-label")).toContain("已共享给成员");
   });
 
   it("starts a new task as shared without touching the local record", async () => {
@@ -97,8 +97,8 @@ describe("CollabShareToggle", () => {
     // 还没有会话，不能直接写本机记录；草稿默认开启，但还没有共享任何内容，所以不写「已共享」。
     expect(collab.taskSharing).not.toHaveBeenCalled();
     expect(button.getAttribute("aria-checked")).toBe("true");
-    expect(button.textContent).toBe("共享给成员");
-    expect(button.getAttribute("title")).toBe("发送第一条消息后，这条任务会共享给项目成员");
+    expect(button.getAttribute("aria-label")).toBe("共享给成员");
+    expect(button.getAttribute("title")).toBe("共享给项目成员");
     expect(takeDraftShareIntent("draft-7", true)).toBe(true);
   });
 
@@ -151,7 +151,7 @@ describe("CollabShareToggle", () => {
       onError: vi.fn()
     });
     expect(button.getAttribute("aria-checked")).toBe("true");
-    expect(button.textContent).toBe("已共享给成员");
+    expect(button.getAttribute("aria-label")).toBe("已共享给成员");
     await act(async () => finish({ shared: true, synced: false, started: 0 }));
     await handed;
     expect(isSharePending("chat-9")).toBe(false);
