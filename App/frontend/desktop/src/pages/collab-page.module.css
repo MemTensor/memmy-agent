@@ -587,6 +587,7 @@
 
 .stream .rowSummary {
   font-size: 13px;
+  color: var(--collab-muted);
 }
 
 .stream .meta {
@@ -680,11 +681,19 @@
 
 /* 没有标题与引导句的空状态：直接从第一条说明开始，不要空出来的段落间距 */
 .guideBare {
-  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 60px;
+  text-align: center;
 }
 
 .guideBare .guideList {
   margin-top: 12px;
+}
+
+.guideBare .guideItem:hover .guideIcon {
+  background: color-mix(in srgb, var(--collab-active) 80%, var(--collab-accent) 20%);
 }
 
 .guideList {
@@ -757,7 +766,8 @@
   display: flex;
   align-items: center;
   gap: 9px;
-  margin-top: 10px;
+  margin-top: 16px;
+  margin-bottom: 8px;
   padding: 8px 8px 8px 12px;
   border: 1px solid color-mix(in srgb, var(--collab-accent) 30%, transparent);
   border-radius: 10px;
@@ -2833,7 +2843,7 @@
 
 .configCard {
   min-width: 0;
-  border: 1px solid var(--collab-line);
+  border: 1px solid color-mix(in srgb, var(--color-text-ink, #111d1c) 9%, transparent);
   border-radius: 12px;
   background: var(--color-background-paper, #fff);
   /* 面板与卡片同为白底，靠这条极轻的投影把卡片托起来，不靠色差 */
@@ -2987,6 +2997,15 @@
     flex-basis: auto;
     background: var(--color-content-bg, #fff);
     box-shadow: -12px 0 32px rgba(17, 29, 28, 0.12);
+  }
+
+  .iconAction:not(.dangerGhost) {
+    display: none;
+  }
+
+  .searchBox {
+    max-width: 140px;
+    min-width: 80px;
   }
 }
 

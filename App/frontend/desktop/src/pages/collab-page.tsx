@@ -1464,6 +1464,14 @@ const CollabBoard = memo(function CollabBoard(props: {
                               <Button
                                 size="sm"
                                 variant="primary"
+                                onClick={() => onContinueTask(project.id, null)}
+                              >
+                                <MessageSquarePlus size={14} aria-hidden="true" />
+                                {t("collab.sessions.empty.task.title")}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="primary"
                                 data-demo-guide="board-associate"
                                 onClick={() => setPickOpen(true)}
                               >
