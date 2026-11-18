@@ -84,7 +84,7 @@ export class ProjectMemoryService {
   }
 
   async search(a: Account, s: ProjectSearch) {
-    this.scope.open(a.id, s);
+    this.scope.open(a.id, s, true);
     const ids = this.scope.projects(a.id, s, s.turn_id, true);
     const trajectory = s.view === "trajectory";
     const wantIndex = s.include_index && !trajectory && this.scope.needsIndex(a.id, s);

@@ -45,7 +45,11 @@ export async function apply(ctx, config) {
   async function sessionFor(agent) {
     const key = agentSessionKey(agent);
     if (sessions.has(key)) return sessions.get(key);
-    const opened = await request("/sessions/open", profileId, { sessionId: `dsh:${key}`, meta: { host: "dsh" } });
+    const opened = await request("/sessions/open", profileId, {
+      sessionId: `dsh:${key}`,
+      workspacePath: agent?.session?.header?.cwd,
+      meta: { host: "dsh" }
+    });
     sessions.set(key, opened.sessionId);
     return opened.sessionId;
   }

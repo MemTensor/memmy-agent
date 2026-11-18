@@ -5,7 +5,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { registerProjectMemoryRoutes } from "../../../adapters/inbound/local-api/routes/project-memory.js";
 import { ProjectMemoryService } from "../service.js";
 
-const migration = readFileSync(new URL("../../../infrastructure/app-state-store/migrations/0031-project-memory.sql", import.meta.url), "utf8");
+const migration = ["0031-project-memory.sql", "0032-project-memory-workspace-roots.sql"]
+  .map(name => readFileSync(new URL("../../../infrastructure/app-state-store/migrations/" + name, import.meta.url), "utf8")).join("\n");
 const origin = { source: "codex", conversation_id: "s", cwd: "/work/repo/src" };
 const query = { ...origin, turn_id: "t", query: "409" };
 const add = { ...origin, turn_id: "t", submission_id: "submission", messages: [{ role: "user", content: "Fix 409" },
@@ -66,6 +67,20 @@ it("isolates accounts, unbound folders and workspaces, including a binding remov
   account = null;
   expect((await post("search", query)).statusCode).toBe(401);
   expect((await app.inject({ url: "/api/project-memory/bindings?project_id=A" })).statusCode).toBe(401);
+});
+
+it("accepts a startup folder on the first prompt and keeps that scope on later prompts", async () => {
+  bind("A");
+  for (const [conversation, firstFolder, laterFolder, expected] of [
+    ["bound", "/work/repo/src", "/elsewhere", ["A"]],
+    ["unknown", undefined, "/work/repo/src", []],
+  ] as const) {
+    const s = { source: "openclaw", conversation_id: conversation };
+    await post("sessions/open", s);
+    await post("search", { ...query, ...s, cwd: firstFolder });
+    const later = await post("search", { ...query, ...s, cwd: laterFolder, turn_id: "next" });
+    expect(later.json().topics.map(t => t.id)).toEqual(expected);
+  }
 });
 
 it("recovers unknown acceptance without sending a duplicate and persists only outstanding payloads", async () => {

@@ -756,9 +756,7 @@ async function routeRequest(
       contextHints: request.contextHints,
       contextBudget: request.contextBudget
     };
-    const recall = (turnId: string) => projects?.call("search", {
-      ...projects.session(request, request.sessionId), turn_id: turnId, query: request.query, include_index: true
-    });
+    const recall = (turnId: string) => projects?.searchTurn(request, turnId);
     const cloud = request.turnId ? recall(request.turnId) : undefined;
     const local = trackExternalHookRecall(pluginRuntimeAnalytics, request, () =>
       service.idempotent("turn.start", publicRequest, { request: publicRequest }, () =>
@@ -826,7 +824,7 @@ async function routeRequest(
       )
       : await completeSourceTurn();
     if (result.result) scheduleAutoWorkerForEvolution(result.result, autoWorker);
-    if (projects && request.channel === "hook" && request.sessionId && request.status !== "cancelled"
+    if (projects && service.memoryAddEnabled() && request.channel === "hook" && request.sessionId && request.status !== "cancelled"
         && (result.status === "stored" || result.status === "existing")) {
       const startId = typeof input.recallTurnId === "string" ? input.recallTurnId : request.sourceTurn.turnId;
       const project = await projects.capture({ ...request, sessionId: request.sessionId }, startId, request.sourceTurn);
@@ -876,7 +874,7 @@ async function routeRequest(
     );
     scheduleAutoWorkerForEvolution(result, autoWorker);
     const response = publicCompleteTurnResponse(result);
-    if (projects && request.status !== "cancelled" && result.l1MemoryIds.length) {
+    if (projects && request.status !== "cancelled" && service.memoryAddEnabled()) {
       const added = await projects.capture(request, turnId);
       if (added.submissions || added.degraded) return { ...response, projectMemory: added };
     }

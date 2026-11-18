@@ -1,6 +1,10 @@
 # Memmy 客户端项目记忆接口
 
-项目管理页把协作项目绑定到本机工作区或文件夹。Memmy 和已经接入轮次钩子的第三方 Agent 共用这份绑定。一个目录可以绑定多个项目，子目录继承绑定。会话中切换工作目录不改变归属。每轮开始记录命中的绑定，新增绑定在下一轮生效。解绑、切换账号或权限失效后，后续读写重新核对范围。未绑定的目录沿用普通本地检索。
+项目管理页通过本机 Backend 保存工作区或文件夹与项目的绑定。Memmy 内置 Agent、第三方插件和 hook 都只上报会话的启动位置。绑定清单由 Backend 按账号保存在 SQLite 中。
+
+Backend 按启动目录及其上级目录查找绑定。例如，只把 `/repo/api` 绑定到项目 A 和 B 后，在 `/repo/api/src` 开启会话，每轮都会检索两个项目的记忆，并在完成时向两个项目分别写入一次。在 `/repo/web` 开启的会话只使用普通本地记忆。会话中执行 `cd` 不改变归属。
+
+对于工作区绑定，Backend 也会用桌面工作区登记的目录匹配第三方会话。宿主提供具体启动目录时，以该目录为准。编辑器只提供多个已打开的工作区根目录时，合并这些目录命中的项目。没有可识别的启动位置时，只使用普通本地记忆。每轮开始确定项目范围，新增绑定在下一轮生效。解绑、切换账号或权限失效后，后续读写重新核对范围。
 
 ## 项目管理页和主题页
 
@@ -19,11 +23,13 @@
 
 ## 宿主与轮次事件
 
-已接入 Memory 的宿主继续使用现有的 `/api/v1/sessions/open`、`/api/v1/turns/start` 和完成事件。直接接 Backend 的调用方可使用下表。以下接口均为 POST，公共参数是 `source, conversation_id`。会话首次事件传 `cwd` 或 `workspace_id`。同一轮的检索和写入使用相同的 `turn_id`。原生宿主的完成事件 ID 与检索 ID 不同时，钩子另传 `recallTurnId`。
+已接入 Memory 的宿主继续使用现有的 `/api/v1/sessions/open`、`/api/v1/turns/start` 和完成事件。打开会话时用 `meta.launchFolder` 传启动目录，只有工作区目录列表时传 `meta.workspaceRoots`。部分宿主要到首条提问时才能读到启动目录，可以在该轮的 `contextHints.workspaceDir` 中补传。首轮检索后，会话位置固定。
+
+直接接 Backend 的调用方可使用下表。以下接口均为 POST，公共参数是 `source, conversation_id`。同一轮的检索和写入使用相同的 `turn_id`。原生宿主的完成事件 ID 与检索 ID 不同时，钩子另传 `recallTurnId`。
 
 | 路径 | 专用参数 | 响应 |
 | --- | --- | --- |
-| `/sessions/open` | 启动位置 | 固定会话归属，返回 `ok` |
+| `/sessions/open` | `cwd?` 为宿主报告的启动绝对路径，`workspace_id?` 为 Memmy 工作区 ID。只有工作区根目录列表时可传 `workspace_roots[]` | 固定会话归属，返回 `ok` |
 | `/index` | `size?`，每个项目默认 8 | `projects[], degraded[]` |
 | `/search` | `turn_id, query, domains?, limit?, view?, include_index?`。默认查主题，取 9 条，最多 25 条。查原文用 `view="trajectory"` | `topics[]` 或 `trajectories[]`，另有 `degraded[]`。自动检索在首轮和压缩后的检索中附最近主题索引 |
 | `/add` | `turn_id, submission_id, messages[], domains?`。目标取本轮开始时确定且仍有效的绑定 | `submissions[]`，含 `project_id, submission_id, status`，受理后含 `task_id`。受理状态未知时 HTTP 202 |

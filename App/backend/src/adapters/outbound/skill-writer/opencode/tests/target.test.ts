@@ -134,7 +134,8 @@ describe("opencode skill target", () => {
       memmyConfigPath: join(rootDirectory, "missing-memmy-config.yaml")
     });
     await target.installPlugin?.("opencode");
-    const hooks = await loadPluginHooks(rootDirectory);
+    const launchFolder = join(rootDirectory, "packages", "api");
+    const hooks = await loadPluginHooks(rootDirectory, launchFolder);
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -199,6 +200,9 @@ describe("opencode skill target", () => {
       await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-1" } } });
       await hooks.dispose();
 
+      expect(requests.find(request => request.path === "/api/v1/sessions/open")?.body).toMatchObject({
+        workspacePath: rootDirectory, meta: { launchFolder }
+      });
       expect(requests.find((request) => request.path === "/api/v1/turns/start")?.body).toMatchObject({
         query: "请检查 README",
         source: "opencode",
@@ -366,7 +370,7 @@ interface OpencodePluginHooks {
   dispose(): Promise<void>;
 }
 
-async function loadPluginHooks(rootDirectory: string): Promise<OpencodePluginHooks> {
+async function loadPluginHooks(rootDirectory: string, directory = rootDirectory): Promise<OpencodePluginHooks> {
   const pluginDirectory = join(rootDirectory, "plugins");
   const pluginSource = readFileSync(join(pluginDirectory, "memmy-memory.js"), "utf8");
   const runtimePath = join(pluginDirectory, `memmy-memory-runtime-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`);
@@ -380,7 +384,7 @@ async function loadPluginHooks(rootDirectory: string): Promise<OpencodePluginHoo
   };
   return module.default.server({
     client: { app: { async log() { return undefined; } } },
-    directory: rootDirectory,
+    directory,
     worktree: rootDirectory
   });
 }

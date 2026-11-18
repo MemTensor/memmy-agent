@@ -361,7 +361,8 @@ export type MemoryReloadConfigOutput = z.infer<typeof MemoryReloadConfigOutputSc
 
 const LegacyOpenSessionInputSchema = RuntimeRequestFieldsSchema.extend({
   sessionId: NonEmptyStringSchema.optional(),
-  workspacePath: z.string().optional()
+  workspacePath: z.string().optional(),
+  meta: UnknownRecordSchema.optional()
 }).strict();
 
 const V2OpenSessionInputSchema = L3WorldModelRequestEnvelopeSchema.safeExtend({

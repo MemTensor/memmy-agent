@@ -23,7 +23,7 @@ async function ensureSession(ctx) {
   if (sessions.has(key)) return sessions.get(key);
   const opened = await request("/sessions/open", {
     method: "POST", profileId: profile(ctx),
-    body: { sessionId: `openclaw:${key}`, workspacePath: ctx.workspaceDir || ctx.agentDir, meta: { host: "openclaw" } }
+    body: { sessionId: `openclaw:${key}`, workspacePath: ctx.workspaceDir, meta: { host: "openclaw" } }
   });
   sessions.set(key, opened.sessionId);
   return opened.sessionId;
@@ -69,9 +69,13 @@ function register(api) {
       const sessionId = await ensureSession(ctx);
       const query = String(event?.prompt || event?.message || "").trim();
       if (!query) return;
-      const started = await request("/turns/start", { method: "POST", profileId: profile(ctx), body: { sessionId, query } });
+      const started = await request("/turns/start", {
+        method: "POST", profileId: profile(ctx), body: { sessionId, query, contextHints: { workspaceDir: ctx.workspaceDir } }
+      });
       turns.set(contextKey(ctx), { turnId: started.turnId, query, sessionId });
-      if (started.injectedContext) return { prependContext: started.injectedContext };
+      const context = started.injectedContext;
+      const markdown = typeof context === "string" ? context : context?.markdown;
+      if (markdown) return { prependContext: markdown };
     } catch (error) { api.logger?.warn?.(`memmy-memory recall unavailable: ${error.message}`); }
   });
   api.on("agent_end", (event, ctx) => {

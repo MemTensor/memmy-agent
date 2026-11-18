@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { isAbsolute } from "node:path";
 import { readRuntimeConfig, resolveDefaultRuntimeConfigPath } from "../model/token-usage.js";
 import { countSummaryTokens } from "../model/llm.js";
-import type { InjectedContext, RecallHit, SessionOpenRequest, TurnCompleteRequest, SourceTurnIdentity, RequestEnvelope } from "../types.js";
+import type { InjectedContext, RecallHit, SessionOpenRequest, TurnStartRequest, TurnCompleteRequest, SourceTurnIdentity, RequestEnvelope } from "../types.js";
 import { createMemoryLogger } from "../logging/logger.js";
 
 type Row = Record<string, unknown>;
@@ -44,13 +44,21 @@ export class DesktopProjectMemory {
   }
 
   open(request: SessionOpenRequest, sessionId: string) {
-    let cwd = request.workspacePath ?? string(request.meta?.launchFolder ?? request.namespace?.workspacePath);
-    if (!cwd && request.workspaceUri) {
-      try { cwd = fileURLToPath(request.workspaceUri); } catch { /* Non-file workspace. */ }
+    const meta = request.meta ?? {};
+    const roots = Array.isArray(meta.workspaceRoots)
+      ? meta.workspaceRoots.filter((root): root is string => typeof root === "string" && isAbsolute(root))
+      : undefined;
+    let cwd = string(meta.launchFolder);
+    if (!Object.hasOwn(meta, "launchFolder") && roots === undefined) {
+      cwd = string(request.workspacePath ?? request.namespace?.workspacePath);
+      if (!cwd && request.workspaceUri) {
+        try { cwd = fileURLToPath(request.workspaceUri); } catch { /* Non-file workspace. */ }
+      }
     }
     return this.call("sessions/open", {
       ...this.session(request, sessionId), cwd: isAbsolute(cwd) ? cwd : undefined,
-      workspace_id: request.meta?.launchWorkspaceId ?? request.workspaceId ?? request.namespace?.workspaceId
+      workspace_roots: roots,
+      workspace_id: meta.launchWorkspaceId ?? request.workspaceId ?? request.namespace?.workspaceId
     });
   }
 
@@ -61,6 +69,14 @@ export class DesktopProjectMemory {
         { role: "user", content: request.query, chat_time: native?.startedAt },
         { role: "assistant", content: request.answer, chat_time: native?.completedAt }
       ]
+    });
+  }
+
+  searchTurn(request: TurnStartRequest, turnId: string) {
+    const cwd = string(request.contextHints?.workspaceDir);
+    return this.call("search", {
+      ...this.session(request, request.sessionId), turn_id: turnId, query: request.query,
+      cwd: isAbsolute(cwd) ? cwd : undefined, include_index: true
     });
   }
 }

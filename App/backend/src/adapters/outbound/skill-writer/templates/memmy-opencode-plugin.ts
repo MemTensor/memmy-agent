@@ -40,11 +40,15 @@ export default {
     return hooks;
   },
   async setup(ctx) {
-    const resolveAgent = async (sessionID) => {
-      const session = await ctx.session.get({ sessionID });
+    const resolveAgent = async (sessionID, knownSession) => {
+      const session = knownSession || await ctx.session.get({ sessionID });
       return resolveOpencodeAgent(session.agent, undefined, session.agent ? undefined : await ctx.agent.list());
     };
-    const hooks = await createMemmyHooks({ directory: ctx.location.directory, resolveAgent, modelContextL3: true });
+    const getSessionDirectory = async (sessionID) => {
+      const session = await ctx.session.get({ sessionID });
+      return session.location?.directory || session.directory || ctx.location.directory;
+    };
+    const hooks = await createMemmyHooks({ directory: ctx.location.directory, getSessionDirectory, resolveAgent, modelContextL3: true });
     const controller = new AbortController();
     const registrations = [];
     let events;
@@ -76,7 +80,7 @@ export default {
           const session = await ctx.session.get({ sessionID: event.sessionID });
           if (session.parentID) return;
           await hooks["chat.message"](
-            { sessionID: event.sessionID, messageID: event.messageID, agent: await resolveAgent(event.sessionID) },
+            { sessionID: event.sessionID, messageID: event.messageID, agent: await resolveAgent(event.sessionID, session) },
             { message: { id: event.messageID }, parts }
           );
           event.prompt.text = extractUserText(parts);
@@ -134,7 +138,7 @@ export default {
   }
 };
 
-const createMemmyHooks = async ({ client, directory, worktree, resolveAgent, modelContextL3 = false }) => {
+const createMemmyHooks = async ({ client, directory, worktree, getSessionDirectory, resolveAgent, modelContextL3 = false }) => {
   const sessionCache = new Map();
   const l3States = new Map();
   const sessionAgents = new Map();
@@ -183,15 +187,22 @@ const createMemmyHooks = async ({ client, directory, worktree, resolveAgent, mod
     if (cached) {
       return cached;
     }
-    const opening = openRuntimeSession({
-      configUrl: CONFIG_URL,
-      source: SOURCE,
-      adapterId: "memmy-opencode-plugin",
-      profileId,
-      sessionKey: "opencode-memory-" + externalSessionId,
-      workspaceRoot: worktree || directory || null,
-      transition: "allow_legacy_rollover"
-    }).then((opened) => {
+    const open = async () => {
+      const launchFolder = getSessionDirectory
+        ? await getSessionDirectory(externalSessionId).catch(() => null)
+        : directory || worktree;
+      return openRuntimeSession({
+        configUrl: CONFIG_URL,
+        source: SOURCE,
+        adapterId: "memmy-opencode-plugin",
+        profileId,
+        sessionKey: "opencode-memory-" + externalSessionId,
+        workspaceRoot: worktree || directory || null,
+        launchFolder: launchFolder || null,
+        transition: "allow_legacy_rollover"
+      });
+    };
+    const opening = open().then((opened) => {
       if (!opened) throw new Error("Memmy session unavailable");
       return opened;
     }).catch((error) => { sessionCache.delete(cacheKey); throw error; });

@@ -1000,7 +1000,7 @@ class MemmyMemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._session_id = session_id or "default"
         try:
-            state = self._ensure_runtime_session(self._session_id)
+            state = self._ensure_runtime_session(self._session_id, kwargs.get("cwd"), kwargs.get("agent_workspace"))
             context = self._load_l3(state)
             if context:
                 with self._lock:
@@ -1029,11 +1029,13 @@ class MemmyMemoryProvider(MemoryProvider):
         try:
             state = self._ensure_runtime_session(active_session)
             memory_session_id = state["sessionId"]
-            turn = _session_post(state, "/api/v1/turns/start", {
-                "sessionId": memory_session_id,
-                "turnId": "hermes-turn-" + uuid.uuid4().hex,
-                "query": text,
-            })
+            start = {"sessionId": memory_session_id, "turnId": "hermes-turn-" + uuid.uuid4().hex, "query": text}
+            if "startupWorkspace" in state:
+                # Hermes can create its session row after the provider initializes.
+                cwd = _hermes_session_location(active_session).get("cwd") or state["startupWorkspace"]
+                start["contextHints"] = {"workspaceDir": cwd}
+            turn = _session_post(state, "/api/v1/turns/start", start)
+            state.pop("startupWorkspace", None)
             turn_id = str(turn.get("turnId") or "")
             if turn_id:
                 with self._lock:
@@ -1163,7 +1165,8 @@ class MemmyMemoryProvider(MemoryProvider):
     def _ensure_session(self, external_session_id: str) -> str:
         return str(self._ensure_runtime_session(external_session_id)["sessionId"])
 
-    def _ensure_runtime_session(self, external_session_id: str) -> Dict[str, Any]:
+    def _ensure_runtime_session(self, external_session_id: str, cwd: Optional[str] = None,
+                                agent_workspace: Optional[str] = None) -> Dict[str, Any]:
         with self._lock:
             cached = self._memory_sessions.get(external_session_id)
         if cached:
@@ -1173,8 +1176,9 @@ class MemmyMemoryProvider(MemoryProvider):
         features = health.get("features") if isinstance(health.get("features"), dict) else {}
         versions = features.get("l3WorldModelProtocolVersions") if isinstance(features, dict) else []
         supports_v2 = isinstance(versions, list) and 2 in versions
-        launch_folder = _hermes_workspace_root(external_session_id)
-        workspace_root = launch_folder
+        location = _hermes_session_location(external_session_id)
+        launch_folder = _clean_text(location.get("cwd")) or _clean_text(cwd) or None
+        workspace_root = _hermes_workspace_root(_clean_text(location.get("git_repo_root")) or launch_folder)
         if workspace_root and not re.fullmatch(r"[a-f0-9]{64}", _clean_text(runtime.get("workspaceHostId"))):
             workspace_root = None
         session_key = "hermes-memory-" + external_session_id
@@ -1185,8 +1189,7 @@ class MemmyMemoryProvider(MemoryProvider):
                 "l3WorldModelProtocolVersion": 2,
                 "l3WorldModelTransition": "allow_legacy_rollover",
             }
-            if launch_folder:
-                body["meta"] = {"launchFolder": launch_folder}
+            body["meta"] = {"launchFolder": launch_folder}
             if workspace_root:
                 body["workspaceUri"] = Path(workspace_root).as_uri()
                 body["workspaceHostId"] = runtime.get("workspaceHostId")
@@ -1210,6 +1213,8 @@ class MemmyMemoryProvider(MemoryProvider):
             "workspaceRoot": workspace_root,
             "runtime": runtime,
         }
+        if not launch_folder:
+            state["startupWorkspace"] = _clean_text(agent_workspace)
         with self._lock:
             self._memory_sessions[external_session_id] = state
         return state
@@ -1801,17 +1806,22 @@ def _hermes_epoch_iso(value: Any) -> str:
     return datetime.fromtimestamp(millis / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{millis % 1000:03d}Z"
 
 
-def _hermes_workspace_root(session_id: str) -> Optional[str]:
+def _hermes_session_location(session_id: str) -> Dict[str, Any]:
     try:
         from hermes_state import SessionDB
         db = SessionDB(read_only=True)
         try:
-            row = db.get_session(session_id) or {}
+            return dict(db.get_session(session_id) or {})
         finally:
             close = getattr(db, "close", None)
             if callable(close):
                 close()
-        raw = _clean_text(row.get("git_repo_root")) or _clean_text(row.get("cwd"))
+    except Exception:
+        return {}
+
+
+def _hermes_workspace_root(raw: Optional[str]) -> Optional[str]:
+    try:
         if not raw:
             return None
         path = Path(raw).expanduser().resolve(strict=True)

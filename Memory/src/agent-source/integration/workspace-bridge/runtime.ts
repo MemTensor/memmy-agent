@@ -68,6 +68,8 @@ export interface OpenRuntimeSessionInput {
   source: string;
   sessionKey: string;
   workspaceRoot?: string | null;
+  launchFolder?: string | null;
+  workspaceRoots?: string[];
   transition: "allow_legacy_rollover" | "resume_only";
   pinnedOwner?: boolean;
   adapterId?: string;
@@ -105,7 +107,9 @@ export async function openRuntimeSession(input: OpenRuntimeSessionInput): Promis
   const supportsV2 = numberArray(features.l3WorldModelProtocolVersions).includes(2);
   const adapterId = input.adapterId || `memmy-${input.source}-adapter`;
   const profileId = input.profileId || "default";
-  if (!supportsV2) return openLegacyRuntimeSession(client, config, input, adapterId, profileId);
+  const launchFolder = input.launchFolder === undefined ? input.workspaceRoot : input.launchFolder;
+  const meta = launchFolder !== undefined || input.workspaceRoots ? { launchFolder, workspaceRoots: input.workspaceRoots } : undefined;
+  if (!supportsV2) return openLegacyRuntimeSession(client, config, input, adapterId, profileId, meta);
 
   const resolvedWorkspaceRoot = input.workspaceRoot ? await canonicalWorkspaceRoot(input.workspaceRoot) : null;
   const workspaceRoot = resolvedWorkspaceRoot && config.workspaceHostId ? resolvedWorkspaceRoot : null;
@@ -117,13 +121,13 @@ export async function openRuntimeSession(input: OpenRuntimeSessionInput): Promis
       ...envelope,
       l3WorldModelProtocolVersion: 2,
       l3WorldModelTransition: input.transition,
-      meta: resolvedWorkspaceRoot ? { launchFolder: resolvedWorkspaceRoot } : undefined,
+      meta,
       workspaceUri: workspaceUri || undefined,
       workspaceHostId: workspaceUri ? config.workspaceHostId : undefined,
     })));
   } catch (error) {
     if (input.transition !== "resume_only" || !isV2ResumeConflict(error)) throw error;
-    return openLegacyRuntimeSession(client, config, input, adapterId, profileId);
+    return openLegacyRuntimeSession(client, config, input, adapterId, profileId, meta);
   }
   const sessionId = text(opened.sessionId);
   if (!sessionId) return null;
@@ -146,6 +150,7 @@ async function openLegacyRuntimeSession(
   input: OpenRuntimeSessionInput,
   adapterId: string,
   profileId: string,
+  meta: { launchFolder?: string | null; workspaceRoots?: string[] } | undefined,
 ): Promise<RuntimeSession> {
   const externalSessionId = input.sessionKey;
   const opened = objectValue(await client.post("/api/v1/sessions/open", {
@@ -153,6 +158,7 @@ async function openLegacyRuntimeSession(
     source: input.source,
     profileId: profileId !== "default" ? profileId : undefined,
     workspacePath: input.workspaceRoot || undefined,
+    meta,
   }));
   return {
     protocol: "legacy",

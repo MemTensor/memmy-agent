@@ -65,21 +65,31 @@ export class ProjectMemoryScope {
     return this.bindings(account, project);
   }
 
-  open(account: string, s: Session) {
-    this.db.prepare("INSERT OR IGNORE INTO project_memory_sessions(account,source,conversation,workspace,folder) VALUES(?,?,?,?,?)")
-      .run(account, s.source, s.conversation_id, s.workspace_id ?? null, s.cwd ? canonical(s.cwd) : null);
+  open(account: string, s: Session, firstTurn = false) {
+    // Some hosts report their workspace on the first prompt, after session_start.
+    if (!firstTurn && !s.cwd && !s.workspace_id && !s.workspace_roots?.length) return;
+    const roots = !s.cwd && s.workspace_roots?.length ? [...new Set(s.workspace_roots.map(canonical))] : null;
+    this.db.prepare("INSERT OR IGNORE INTO project_memory_sessions(account,source,conversation,workspace,folder,workspace_roots) VALUES(?,?,?,?,?,?)")
+      .run(account, s.source, s.conversation_id, s.workspace_id ?? null, s.cwd ? canonical(s.cwd) : null, roots ? JSON.stringify(roots) : null);
   }
 
   private matches(account: string, s: Session) {
-    const session = this.db.prepare("SELECT workspace,folder FROM project_memory_sessions WHERE account=? AND source=? AND conversation=?")
+    const session = this.db.prepare("SELECT workspace,folder,workspace_roots FROM project_memory_sessions WHERE account=? AND source=? AND conversation=?")
       .get(account, s.source, s.conversation_id);
     if (!session) return [];
     const bindings = this.db.prepare("SELECT binding_id, project, kind, location FROM project_memory_bindings WHERE account=? ORDER BY project,binding_id").all(account);
-    const roots = bindings.some(row => row.kind === "workspace") ? workspaceFolders() : undefined;
+    if (!bindings.length) return [];
+    const folders: string[] = session.folder ? [String(session.folder)] : JSON.parse(String(session.workspace_roots ?? "[]"));
+    const workspaceOnly = !folders.length && !!session.workspace;
+    const registry = workspaceOnly || bindings.some(row => row.kind === "workspace") ? workspaceFolders() : undefined;
+    if (workspaceOnly) {
+      const root = registry?.get(String(session.workspace));
+      if (root) folders.push(root);
+    }
     return bindings.filter(row => {
       if (row.kind === "workspace" && session.workspace === row.location) return true;
-      const folder = row.kind === "workspace" ? roots?.get(String(row.location)) : String(row.location);
-      return !!session.folder && !!folder && contains(folder, String(session.folder));
+      const folder = row.kind === "workspace" ? registry?.get(String(row.location)) : String(row.location);
+      return folder && folders.some(cwd => contains(folder, cwd));
     });
   }
 

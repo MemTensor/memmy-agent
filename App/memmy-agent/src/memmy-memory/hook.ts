@@ -772,7 +772,7 @@ export class MemmyMemoryHook extends AgentHook implements MemmyMemoryToolRuntime
       ...openEnvelope,
       l3WorldModelProtocolVersion: 2,
       l3WorldModelTransition: "allow_legacy_rollover",
-      ...(workspacePath ? { meta: { launchFolder: workspacePath, launchWorkspaceId: workspaceIdFromPath(workspacePath) } } : {}),
+      ...(workspacePath ? { meta: { launchFolder: workspacePath } } : {}),
       workspaceUri: workspaceUri ?? undefined,
       workspaceHostId: workspaceHostId ?? undefined,
     } : {

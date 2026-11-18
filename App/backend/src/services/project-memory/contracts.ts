@@ -5,7 +5,10 @@ export const id = z.string().trim().min(1).max(1024);
 const folder = z.string().max(8192).refine(value => isAbsolute(value) && !value.includes("\0"), "Expected an absolute folder path");
 export const project = z.object({ project_id: id });
 export const bindings = project.extend({ workspace_ids: z.array(id), folder_paths: z.array(folder) }).strict();
-export const session = z.object({ source: id, conversation_id: id, workspace_id: id.optional(), cwd: folder.optional() });
+export const session = z.object({
+  source: id, conversation_id: id, workspace_id: id.optional(), cwd: folder.optional(),
+  workspace_roots: z.array(folder).optional()
+});
 export const index = session.extend({ size: z.number().int().min(1).max(50).default(8) });
 export const search = session.extend({
   turn_id: id, query: z.string().trim().min(1), domains: z.array(id).nonempty().optional(),

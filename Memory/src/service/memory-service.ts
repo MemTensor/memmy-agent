@@ -1203,7 +1203,7 @@ export class MemoryService {
     return this.modelTasks.run(operation);
   }
 
-  private memoryAddEnabled(): boolean {
+  memoryAddEnabled(): boolean {
     return this.config.algorithm.enableMemoryAdd;
   }
 
