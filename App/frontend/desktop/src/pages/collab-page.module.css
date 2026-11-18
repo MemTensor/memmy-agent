@@ -93,12 +93,16 @@
 }
 
 :global(.button-ghost).boardAction:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--collab-accent) 14%, transparent);
+  /*
+   * 悬停底色要用能看见的薄荷：--collab-accent 指向的 --color-accent-mint 是 #c8f0e0 这种很浅的填充色，
+   * 拿它做 14% 半透明叠在白底上只剩几个色阶，鼠标移上去等于没反馈。这里改用 --color-action-sky(#5cbfae) 混白。
+   */
+  background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 20%, #fff);
   color: var(--collab-accent-deep);
 }
 
 :global(.button).boardAction:active:not(:disabled) {
-  background: color-mix(in srgb, var(--collab-accent) 20%, transparent);
+  background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 30%, #fff);
 }
 
 .boardIcon {
@@ -1378,8 +1382,9 @@
 
 .field > span {
   color: var(--collab-ink-2);
-  font-size: 12.5px;
-  font-weight: 700;
+  font-size: 13px;
+  /* 标签用标准字重：这里原先是 700，比正文和输入内容都粗，读起来像强调 */
+  font-weight: 400;
 }
 
 .field input {
@@ -1442,6 +1447,28 @@
 
 .dirPlaceholder {
   color: var(--collab-ter);
+}
+
+/*
+ * 目录字段里的小按钮（2026-11-18 用户要求「这里不要有框线」）：
+ * 就是一段干净的文字按钮，不描边也不铺底色，只靠薄荷色和悬停反馈说明它能点。
+ */
+:global(.button).dirPickButton {
+  flex: none;
+  min-height: 30px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--collab-accent-deep);
+  font-size: 13px;
+  font-weight: 400;
+  box-shadow: none;
+}
+
+:global(.button).dirPickButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 12%, transparent);
+  color: var(--collab-accent-deep);
 }
 
 .error {
@@ -2716,6 +2743,44 @@
 :global(.modal-body).joinBody {
   gap: 12px;
   padding: 0 24px 4px;
+}
+
+/*
+ * 加入项目的按钮：照知识库弹窗（创建个人知识库）那一套。
+ * 34px 高、8px 圆角、13px / 400，中间留 10px；取消是白底描边，主操作是实心薄荷配白字、不要阴影。
+ */
+:global(.modal).createModal.joinModal :global(.modal-footer) :global(.button) {
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--collab-line);
+  border-radius: 8px;
+  background: var(--color-background-paper, #fff);
+  color: var(--collab-ink);
+  font-size: 13px;
+  font-weight: 400;
+  box-shadow: none;
+}
+
+:global(.modal).createModal.joinModal :global(.modal-footer) :global(.button-ghost):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--collab-line) 40%, #fff);
+  color: var(--collab-ink);
+}
+
+:global(.modal).createModal.joinModal :global(.modal-footer) :global(.button-primary) {
+  border-color: transparent;
+  background: var(--color-action-sky);
+  color: #fff;
+}
+
+:global(.modal).createModal.joinModal :global(.modal-footer) :global(.button-primary):hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--color-action-sky-hover);
+  color: #fff;
+}
+
+/* 两个按钮之间照知识库留 10px */
+:global(.modal).createModal.joinModal :global(.modal-footer) .footerButtons {
+  gap: 10px;
 }
 
 /* 项目配置：卡片式列表，宽 300px，可收起（PRD 3.8） */

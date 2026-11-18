@@ -229,7 +229,7 @@ export function JoinProjectModal(props: {
                   <span className={`${styles.dirPath} ${directory ? "" : styles.dirPlaceholder}`}>
                     {directory ?? t("collab.create.dirUnset")}
                   </span>
-                  <Button size="sm" variant="ghost" disabled={pending} onClick={() => void chooseDirectory()}>
+                  <Button size="sm" variant="ghost" className={styles.dirPickButton} disabled={pending} onClick={() => void chooseDirectory()}>
                     {directory ? t("collab.create.dirChange") : t("collab.create.dirPick")}
                   </Button>
                 </div>
