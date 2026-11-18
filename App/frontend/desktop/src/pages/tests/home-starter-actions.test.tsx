@@ -38,7 +38,7 @@ describe("home starter actions", () => {
     ));
   }
 
-  it("shows four generic prompts without active plugin scenarios", async () => {
+  it("restores the literature review when the legal diagnosis is unavailable", async () => {
     await render([]);
     const buttons = [...container.querySelectorAll<HTMLButtonElement>(".home-prompt-suggestions button")];
     expect(buttons.map((button) => button.textContent)).toEqual([
@@ -47,17 +47,21 @@ describe("home starter actions", () => {
       zhCNMessages["home.suggestion.one"],
       zhCNMessages["home.suggestion.three"]
     ]);
-    await act(async () => buttons[0]?.click());
-    expect(onSelect).toHaveBeenCalledWith(zhCNMessages["home.suggestionPrompt.four"]);
+    await act(async () => buttons[2]?.click());
+    expect(onSelect).toHaveBeenCalledWith(zhCNMessages["home.suggestionPrompt.one"]);
   });
 
-  it("replaces generic prompts with the installed plugin's scenarios", async () => {
+  it("prioritizes the legal diagnosis over literature review while keeping four prompts", async () => {
     await render(legalScenarios);
-    expect(container.querySelector(".home-prompt-suggestions")).toBeNull();
-    const buttons = [...container.querySelectorAll<HTMLButtonElement>(".home-scenario-card")];
-    expect(buttons.map((button) => button.querySelector(".home-scenario-card__title")?.textContent))
-      .toEqual(["用工风险诊断", "用工体系设计"]);
-    await act(async () => buttons[1]?.click());
-    expect(onSelect).toHaveBeenCalledWith("设计用工体系");
+    expect(container.querySelector(".home-scenario-cards")).toBeNull();
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>(".home-prompt-suggestions button")];
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      zhCNMessages["home.suggestion.legalDiagnosis"],
+      zhCNMessages["home.suggestion.four"],
+      zhCNMessages["home.suggestion.two"],
+      zhCNMessages["home.suggestion.three"]
+    ]);
+    await act(async () => buttons[0]?.click());
+    expect(onSelect).toHaveBeenCalledWith("生成诊断报告");
   });
 });

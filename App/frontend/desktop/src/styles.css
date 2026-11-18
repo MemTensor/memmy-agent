@@ -195,12 +195,14 @@ body.memmy-window-fullscreen {
 
 .home-empty-screen {
   --agent-conversation-track: min(832px, 100cqw);
+  --home-mascot-width: 216px;
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) auto auto auto;
   justify-items: center;
   padding-bottom: 36px;
+  overflow-y: auto;
 }
 
 .home-empty-brand {
@@ -222,6 +224,35 @@ body.memmy-window-fullscreen {
 .home-empty-title__project {
   padding-bottom: 1px;
   border-bottom: 1px dashed color-mix(in srgb, var(--color-text-ink) 38%, transparent);
+}
+
+/* Memmy sets an inline width; keep the home illustration responsive without changing other uses. */
+.home-empty-brand-mascot img {
+  width: var(--home-mascot-width) !important;
+  height: auto !important;
+}
+
+@media (max-height: 760px) {
+  .home-empty-screen { --home-mascot-width: 160px; padding-bottom: 12px; }
+  .home-empty-brand { top: 0; }
+  .home-empty-title { font-size: 28px; }
+}
+
+@container agent-workspace (max-width: 620px) {
+  .home-empty-screen { --home-mascot-width: 136px; padding-bottom: 16px; }
+  .home-empty-brand { top: 0; }
+  .home-empty-title { font-size: 26px; }
+}
+
+@media (max-height: 580px) {
+  .home-empty-screen {
+    grid-template-rows: auto auto auto auto;
+    align-content: start;
+    padding-top: calc(var(--codex-toolbar-height) + 4px);
+  }
+  .home-empty-brand { align-self: start; margin-bottom: 12px; }
+  .home-empty-brand-mascot { display: none; }
+  .home-empty-title { font-size: 20px; }
 }
 
 .home-empty-suggestions {
@@ -1804,7 +1835,11 @@ body.memmy-window-fullscreen {
 }
 
 .home-empty-screen .home-empty-column {
-  width: calc(var(--agent-conversation-track) - 48px);
+  width: clamp(
+    min(100%, 20rem),
+    calc(100cqw - 2 * var(--agent-column-min-gap, 80px)),
+    var(--home-column-max, 50rem)
+  );
   max-width: 100%;
 }
 
@@ -1818,6 +1853,14 @@ body.memmy-window-fullscreen {
 
 @container agent-workspace (width > 2000px) {
   .home-empty-screen { --agent-conversation-track: min(55cqw, 1400px); }
+}
+
+@media (max-height: 760px) {
+  .home-empty-composer textarea { max-height: 96px; }
+}
+
+@media (max-height: 580px) {
+  .home-empty-composer textarea { max-height: 88px; }
 }
 
 /* The conversation track is 832px up to a 1200px workspace, then 65% / 60% /

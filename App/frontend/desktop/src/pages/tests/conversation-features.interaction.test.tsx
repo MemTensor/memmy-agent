@@ -129,6 +129,18 @@ describe("conversation feature integration", () => {
     expect(features.scenarios).toEqual([]);
   });
 
+  it("removes the legal home recommendation as soon as the plugin changes", async () => {
+    const scenario = { id: "labor-risk-diagnosis", name: "用工风险诊断", description: "生成诊断报告",
+      icon: "scale", prompt: "帮我生成诊断报告" };
+    mocks.list.mockResolvedValueOnce([{ ...plugin, manifest: { ...plugin.manifest, scenarios: [scenario] } }])
+      .mockResolvedValueOnce([]);
+    await act(async () => render());
+    expect(features.scenarios).toEqual([{ ...scenario, pluginId: "legal-labor" }]);
+
+    await act(async () => window.dispatchEvent(new Event("memmy:plugin-change")));
+    expect(features.scenarios).toEqual([]);
+  });
+
   it("publishes an idle interview for the shared right task panel", async () => {
     mocks.chatId = "legal-chat";
     await act(async () => render());
