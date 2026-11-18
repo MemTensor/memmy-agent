@@ -1,6 +1,7 @@
+import { SearchField } from "../components/search-field.js";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { BookOpen, Check, Clock3, FileText, Loader2, LogIn, MessageSquare, MoreHorizontal, Plus, Puzzle, RefreshCw, Scale, Search, X } from "lucide-react";
+import { BookOpen, Check, Clock3, FileText, Loader2, LogIn, MessageSquare, MoreHorizontal, Plus, Puzzle, RefreshCw, Scale, X } from "lucide-react";
 import type { InstalledPlugin, PluginEligibility } from "@memmy/local-api-contracts";
 import { Button } from "../components/button.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
@@ -239,12 +240,8 @@ export function PluginMarketplaceSection(props: PluginMarketplaceSectionProps) {
             </button>
           ))}
         </div>
-        <label className="extension-catalog-search">
-          <Search size={15} aria-hidden="true" />
-          <input type="search" value={query}
-            aria-label={t("plugins.ui.searchTaskPlugins")} placeholder={t("plugins.ui.searchTaskPlugins")}
-            onChange={(event) => { setQuery(event.target.value); setMenuId(null); }} />
-        </label>
+        <SearchField className="extension-catalog-search" value={query} label={t("plugins.ui.searchTaskPlugins")}
+          onChange={(value) => { setQuery(value); setMenuId(null); }} />
       </div>
 
       {props.error ? <p role="alert" className="mb-4 rounded-card border border-status-error/20 bg-status-error/5 p-3 text-sm text-status-error">{props.error}</p> : null}

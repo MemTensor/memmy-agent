@@ -61,6 +61,7 @@ describe("RecordingPlayer", () => {
   let root: Root;
 
   beforeEach(() => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Test audio has no network source"));
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -69,6 +70,7 @@ describe("RecordingPlayer", () => {
   afterEach(() => {
     act(() => root.unmount());
     document.body.replaceChildren();
+    vi.restoreAllMocks();
   });
 
   const render = (durationMs: number) => act(() => {
@@ -98,13 +100,32 @@ describe("RecordingPlayer", () => {
     const scrubber = container.querySelector<HTMLInputElement>(".recording-panel__player-scrubber")!;
     expect(scrubber.max).toBe("3000");
     expect(scrubber.value).toBe("1500");
-    expect(scrubber.style.background).toContain("50%");
+    expect(scrubber.style.getPropertyValue("--recording-playback-progress")).toBe("50%");
 
     Object.defineProperty(audio, "currentTime", { configurable: true, value: 9 });
     act(() => audio.dispatchEvent(new Event("timeupdate")));
     expect(scrubber.value).toBe("3000");
-    expect(scrubber.style.background).toContain("100%");
-    expect(scrubber.style.background).not.toContain("300%");
+    expect(scrubber.style.getPropertyValue("--recording-playback-progress")).toBe("100%");
+  });
+
+  it("seeks the audio and keeps playback events from pulling the thumb back while dragging", () => {
+    render(3000);
+    const audio = container.querySelector("audio")!;
+    const scrubber = container.querySelector<HTMLInputElement>(".recording-panel__player-scrubber")!;
+    act(() => scrubber.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(scrubber, "1500");
+      scrubber.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(audio.currentTime).toBe(1.5);
+    expect(scrubber.value).toBe("1500");
+    audio.currentTime = .1;
+    act(() => audio.dispatchEvent(new Event("timeupdate")));
+    expect(scrubber.value).toBe("1500");
+    act(() => scrubber.dispatchEvent(new Event("pointerup", { bubbles: true })));
+    audio.currentTime = 1.6;
+    act(() => audio.dispatchEvent(new Event("timeupdate")));
+    expect(scrubber.value).toBe("1600");
   });
 
   it("finishes at 100% when the playable media ends before the measured duration", () => {
@@ -117,7 +138,7 @@ describe("RecordingPlayer", () => {
     const scrubber = container.querySelector<HTMLInputElement>(".recording-panel__player-scrubber")!;
     expect(scrubber.max).toBe("4250");
     expect(scrubber.value).toBe("4250");
-    expect(scrubber.style.background).toContain("100%");
+    expect(scrubber.style.getPropertyValue("--recording-playback-progress")).toBe("100%");
   });
 });
 

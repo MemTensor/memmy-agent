@@ -6,15 +6,13 @@
  * finished it switches to the diarized transcript and lets the user play the
  * audio back against it.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { ChevronLeft, Pause, Play, Square } from "lucide-react";
 import type { AsrTranscriptSegment } from "@memmy/local-api-contracts";
 import type { AsrLiveLine } from "../lib/asr-live-transcription.js";
 import { useTranslation } from "../i18n/use-translation.js";
-import { SidebarResizeHandle, useResizableSidebar } from "./sidebar-resize.js";
-
-/** Shared with the workspace preview so both panels reopen at the same width. */
-const RECORDING_PANEL_WIDTH_STORAGE_KEY = "memmy.interviewRecordingPanel.width";
+import { repairWebmDuration } from "../lib/webm-duration.js";
+import { SidebarResizeHandle, useResizableSidebar, WORKSPACE_PREVIEW_WIDTH_STORAGE_KEY } from "./sidebar-resize.js";
 
 /** The finished transcript of a recording. */
 export interface RecordingPanelTranscript {
@@ -75,8 +73,8 @@ export function InterviewRecordingPanel(props: InterviewRecordingPanelProps): Re
   const heading = props.title ?? session?.title ?? t("recording.page.title");
   const close = props.onClose ?? session?.onClose;
   const resize = useResizableSidebar({
-    storageKey: RECORDING_PANEL_WIDTH_STORAGE_KEY,
-    defaultWidth: 480,
+    storageKey: WORKSPACE_PREVIEW_WIDTH_STORAGE_KEY,
+    defaultWidth: 520,
     minWidth: 360,
     maxWidth: 760,
     resizeDirection: -1,
@@ -238,10 +236,43 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
   const [currentMs, setCurrentMs] = useState(0);
   const fallbackDurationMs = validDurationMs(props.durationMs);
   const [durationMs, setDurationMs] = useState(fallbackDurationMs);
-  useEffect(() => { setPlaying(false); setCurrentMs(0); setDurationMs(fallbackDurationMs); }, [props.src, fallbackDurationMs]);
+  const [playbackSrc, setPlaybackSrc] = useState(props.src);
+  const [repairRequest, setRepairRequest] = useState<{ src: string; durationMs: number } | null>(null);
+  const repairAttempted = useRef(false);
+  const scrubbing = useRef(false);
+  const requestedSeek = useRef<number | null>(null);
+  const restorePlayback = useRef<{ ms: number; playing: boolean } | null>(null);
+  useEffect(() => {
+    setPlaying(false); setCurrentMs(0); setDurationMs(fallbackDurationMs); setPlaybackSrc(props.src);
+    setRepairRequest(null); repairAttempted.current = false; requestedSeek.current = null;
+    restorePlayback.current = null; scrubbing.current = false;
+  }, [props.src, fallbackDurationMs]);
+
+  useEffect(() => {
+    if (!repairRequest || repairRequest.src !== props.src) return;
+    const abort = new AbortController();
+    let disposed = false;
+    let repairedUrl: string | undefined;
+    void (async () => {
+      const response = await fetch(repairRequest.src, { signal: abort.signal });
+      if (!response.ok) return;
+      const blob = await response.blob();
+      const repaired = await repairWebmDuration(blob, repairRequest.durationMs);
+      if (disposed || repaired === blob) return;
+      const audio = audioRef.current;
+      restorePlayback.current = { ms: requestedSeek.current ?? (audio?.currentTime ?? 0) * 1000, playing: audio ? !audio.paused : false };
+      repairedUrl = URL.createObjectURL(repaired);
+      setPlaybackSrc(repairedUrl);
+    })().catch(() => { /* Keep the original playable source when it cannot be repaired. */ });
+    return () => { disposed = true; abort.abort(); if (repairedUrl) URL.revokeObjectURL(repairedUrl); };
+  }, [repairRequest, props.src]);
 
   const updateMediaDuration = (audio: HTMLAudioElement) => {
     const mediaDurationMs = validDurationMs(audio.duration * 1_000);
+    if (!repairAttempted.current && fallbackDurationMs > 0 && mediaDurationMs < fallbackDurationMs * .5) {
+      repairAttempted.current = true;
+      setRepairRequest({ src: props.src, durationMs: fallbackDurationMs });
+    }
     if (mediaDurationMs === 0) return;
     // MediaRecorder WebM metadata is sometimes finite but implausibly short.
     // Never let it shorten the independently measured capture duration; for
@@ -254,6 +285,7 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
     if (!audio || !props.seek) return;
     const nextMs = Math.min(Math.max(0, props.seek.ms), durationMs || props.seek.ms);
     audio.currentTime = nextMs / 1000;
+    requestedSeek.current = nextMs;
     setCurrentMs(nextMs);
     void audio.play().catch(() => setPlaying(false));
   }, [props.seek]);
@@ -263,7 +295,7 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
     let frame = 0;
     const followPlayback = () => {
       const audio = audioRef.current;
-      if (audio) setCurrentMs(validCurrentTimeMs(audio.currentTime));
+      if (audio && !scrubbing.current && !audio.seeking) setCurrentMs(validCurrentTimeMs(audio.currentTime));
       frame = window.requestAnimationFrame(followPlayback);
     };
     frame = window.requestAnimationFrame(followPlayback);
@@ -274,13 +306,25 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
     <div className="recording-panel__player">
       <audio
         ref={audioRef}
-        src={props.src}
+        src={playbackSrc}
         preload="metadata"
-        onTimeUpdate={(event) => setCurrentMs(validCurrentTimeMs(event.currentTarget.currentTime))}
+        onTimeUpdate={(event) => { if (!scrubbing.current && !event.currentTarget.seeking) setCurrentMs(validCurrentTimeMs(event.currentTarget.currentTime)); }}
+        onSeeked={(event) => {
+          const actual = validCurrentTimeMs(event.currentTarget.currentTime);
+          if (requestedSeek.current != null && Math.abs(actual - requestedSeek.current) < 500) requestedSeek.current = null;
+          if (!scrubbing.current) setCurrentMs(actual);
+        }}
         // A MediaRecorder blob can report an unknown or provisional duration,
         // so metadata only extends the independently measured fallback.
         onLoadedMetadata={(event) => {
           updateMediaDuration(event.currentTarget);
+          const restore = restorePlayback.current;
+          if (restore) {
+            restorePlayback.current = null;
+            event.currentTarget.currentTime = restore.ms / 1000;
+            setCurrentMs(restore.ms);
+            if (restore.playing) void event.currentTarget.play().catch(() => setPlaying(false));
+          }
         }}
         onDurationChange={(event) => updateMediaDuration(event.currentTarget)}
         onPlay={() => setPlaying(true)}
@@ -311,7 +355,7 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
           else void audio.play().catch(() => setPlaying(false));
         }}
       >
-        {playing ? <Pause size={14} aria-hidden="true" /> : <Play size={14} aria-hidden="true" />}
+        {playing ? <Pause size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
       </button>
       <span className="recording-panel__player-time">{formatClock(currentMs)}</span>
       <input
@@ -322,10 +366,15 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
         value={durationMs > 0 ? Math.min(Math.max(currentMs, 0), durationMs) : 0}
         disabled={durationMs <= 0}
         aria-label={t("plugin.ui.audio.seek")}
-        style={{ background: `linear-gradient(to right, var(--color-action-sky) ${playbackProgress(currentMs, durationMs) * 100}%, var(--color-border-stone) 0%)` }}
+        style={{ "--recording-playback-progress": `${playbackProgress(currentMs, durationMs) * 100}%` } as CSSProperties}
+        onPointerDown={() => { scrubbing.current = true; }}
+        onPointerUp={() => { scrubbing.current = false; }}
+        onPointerCancel={() => { scrubbing.current = false; }}
+        onBlur={() => { scrubbing.current = false; }}
         onChange={(event) => {
           const audio = audioRef.current;
           const nextMs = Number(event.target.value);
+          requestedSeek.current = nextMs;
           setCurrentMs(nextMs);
           if (audio) audio.currentTime = nextMs / 1_000;
         }}

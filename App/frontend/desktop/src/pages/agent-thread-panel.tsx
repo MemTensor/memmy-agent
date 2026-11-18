@@ -70,7 +70,10 @@ function readStoredWidths(): StoredWidths {
     const parsed = JSON.parse(window.localStorage.getItem(THREAD_PANEL_WIDTH_STORAGE_KEY) ?? "null") as Partial<StoredWidths> | null;
     return {
       sidebar: typeof parsed?.sidebar === "number" && Number.isFinite(parsed.sidebar) ? parsed.sidebar : THREAD_PANEL_MIN_WIDTH,
-      content: typeof parsed?.content === "number" && Number.isFinite(parsed.content) ? parsed.content : null,
+      // An earlier open before the workspace measured could save the 360px
+      // fallback as the preview preference. Let the measured layout choose its width.
+      content: typeof parsed?.content === "number" && Number.isFinite(parsed.content)
+        && parsed.content > THREAD_PANEL_MIN_WIDTH ? parsed.content : null,
     };
   } catch {
     return { sidebar: THREAD_PANEL_MIN_WIDTH, content: null };
@@ -207,12 +210,17 @@ export function useAgentThreadPanel(options: { scopeKey: string; containerRef: R
   }, [ownerKey, updateSession, cancelCloseTimer]);
 
   const ensureContentWidth = useCallback(() => {
+    if (containerWidthRef.current <= 0) return;
     const minimum = threadPanelContentWidth(containerWidthRef.current);
     setWidths((current) => {
       const content = Math.max(current.content ?? 0, minimum);
       return content === current.content ? current : { ...current, content };
     });
   }, []);
+
+  useEffect(() => {
+    if (hasContent && widths.content === null && containerWidth > 0) ensureContentWidth();
+  }, [hasContent, widths.content, containerWidth, ensureContentWidth]);
 
   const openTab = useCallback((tab: ThreadPanelTab) => {
     cancelCloseTimer();

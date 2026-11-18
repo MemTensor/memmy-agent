@@ -185,7 +185,7 @@ describe("independent interview recording entries", () => {
     await act(async () => current.session.back());
     await click('.recording-page__more-trigger');
     await click('.recording-page__more-menu button:has(.lucide-pencil)');
-    const field = container.querySelector<HTMLInputElement>('.recording-page__rename input')!;
+    const field = container.querySelector<HTMLInputElement>('.recording-name-editor input')!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(field, "企业现场访谈");
       field.dispatchEvent(new Event("input", { bubbles: true }));

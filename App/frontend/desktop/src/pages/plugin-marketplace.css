@@ -64,37 +64,10 @@
 }
 
 .extension-catalog-search {
-  display: flex;
   flex: 1 1 230px;
-  align-items: center;
-  gap: 8px;
   max-width: 300px;
-  min-width: 0;
-  height: 34px;
   margin-left: auto;
-  padding: 0 10px;
-  box-sizing: border-box;
-  border: 1px solid var(--border-content-panel);
-  border-radius: var(--radius-input);
-  background: var(--color-background-paper);
-  color: color-mix(in srgb, var(--color-text-ink) 50%, transparent);
 }
-.extension-catalog-search svg { flex: none; }
-.extension-catalog-search input {
-  width: 100%;
-  min-width: 0;
-  height: 100%;
-  border: 0;
-  outline: 0;
-  margin: 0;
-  padding: 0;
-  background: transparent;
-  color: var(--color-text-ink);
-  font: inherit;
-  font-size: 12px;
-}
-.extension-catalog-search input::placeholder { color: color-mix(in srgb, var(--color-text-ink) 45%, transparent); }
-.extension-catalog-search:focus-within { border-color: var(--color-action-sky); }
 .extension-catalog-category { display: flex; align-items: center; gap: 6px; font-size: 12px; color: color-mix(in srgb, var(--color-text-ink) 60%, transparent); }
 .extension-catalog-category select {
   height: 34px;

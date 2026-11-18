@@ -132,6 +132,8 @@ export interface AppFrameProps {
   recordingActive?: boolean;
   /** The current finished recording has already been opened for reading. */
   recordingViewed?: boolean;
+  /** Called before the sidebar switches to a new task. */
+  onNewTask?: () => void;
   /** When set, replaces the main app sidebar with settings section navigation. */
   settingsNav?: SettingsSidebarNav;
   children: ReactNode;
@@ -935,6 +937,7 @@ export function AppFrame(props: AppFrameProps) {
   }
 
   function openNewAgent(target?: WebuiSessionTarget) {
+    props.onNewTask?.();
     const nextDraftRequestId = shouldCreateNewAgentDraft(state.agent)
       ? state.agent.newChatRequestId + 1
       : state.agent.newChatRequestId;

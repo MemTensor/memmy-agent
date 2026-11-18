@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   stopInFlightByChatId: {} as Record<string, boolean>,
   stageFiles: vi.fn(async () => undefined),
   stageExistingFiles: vi.fn(async () => undefined),
+  draft: vi.fn(),
   recordingDeliver: undefined as undefined | ((file: File, mode: "summarize" | "attach", persisted?: unknown) => void),
 }));
 vi.mock("../../app/providers.js", () => ({ useApiClients: () => ({ clients: clients }) }));
@@ -57,7 +58,7 @@ describe("conversation feature integration", () => {
   let features: ReturnType<typeof useConversationFeatures>;
   function Harness() {
     ui = usePluginUi();
-    features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: vi.fn(),
+    features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: mocks.draft,
       onStageFiles: mocks.stageFiles, onStageExistingFiles: mocks.stageExistingFiles, onOpenArtifact: mocks.openArtifact,
       onSend: mocks.send, onOpenRecording: mocks.openRecording, onEnsureConversation: mocks.ensureConversation });
     return <>{features.recorders}<nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
@@ -191,6 +192,48 @@ describe("conversation feature integration", () => {
     await act(async () => mocks.recordingDeliver?.(generated, "attach"));
     expect(mocks.stageExistingFiles).not.toHaveBeenCalled();
     expect(mocks.stageFiles).toHaveBeenCalledWith([generated]);
+  });
+
+  it("sends a summary with the persisted transcript without changing the composer", async () => {
+    await act(async () => render());
+    const persisted = { kind: "file" as const, path: "/workspace/recordings/transcript.txt", name: "transcript.txt",
+      mime: "text/plain" as const, bytes: 34, url: "/text" };
+    await act(async () => mocks.recordingDeliver?.(new File(["words"], "transcript.txt"), "summarize", persisted));
+    expect(mocks.send).toHaveBeenCalledWith(expect.any(String), [persisted]);
+    expect(clients.memmyAgent.uploadAgentMedia).not.toHaveBeenCalled();
+    expect(mocks.draft).not.toHaveBeenCalled();
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+    expect(mocks.stageExistingFiles).not.toHaveBeenCalled();
+  });
+
+  it("waits for a legacy transcript upload and ignores repeat summary clicks while pending", async () => {
+    const persisted = { kind: "file" as const, path: "/workspace/recordings/legacy.txt", name: "legacy.txt",
+      mime: "text/plain" as const, bytes: 34, url: "/text" };
+    let finishUpload!: (files: typeof persisted[]) => void;
+    clients.memmyAgent.uploadAgentMedia.mockImplementationOnce(() => new Promise((resolve) => { finishUpload = resolve; }));
+    await act(async () => render());
+    const file = new File(["words"], "legacy.txt", { type: "text/plain" });
+    act(() => { mocks.recordingDeliver?.(file, "summarize"); mocks.recordingDeliver?.(file, "summarize"); });
+    expect(clients.memmyAgent.uploadAgentMedia).toHaveBeenCalledTimes(1);
+    expect(mocks.send).not.toHaveBeenCalled();
+    await act(async () => finishUpload([persisted]));
+    expect(mocks.send).toHaveBeenCalledExactlyOnceWith(expect.any(String), [persisted]);
+    expect(mocks.draft).not.toHaveBeenCalled();
+  });
+
+  it("does not send an incomplete summary when upload fails and allows retry", async () => {
+    clients.memmyAgent.uploadAgentMedia.mockRejectedValueOnce(new Error("Upload failed"));
+    await act(async () => render());
+    const file = new File(["words"], "legacy.txt", { type: "text/plain" });
+    await act(async () => mocks.recordingDeliver?.(file, "summarize"));
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Upload failed");
+    expect(mocks.draft).not.toHaveBeenCalled();
+    const persisted = { kind: "file" as const, path: "/workspace/recordings/legacy.txt", name: "legacy.txt",
+      mime: "text/plain" as const, bytes: 34, url: "/text" };
+    clients.memmyAgent.uploadAgentMedia.mockResolvedValueOnce([persisted]);
+    await act(async () => mocks.recordingDeliver?.(file, "summarize"));
+    expect(mocks.send).toHaveBeenCalledWith(expect.any(String), [persisted]);
   });
 
   it("opens a staged transcript in the shared task file preview", async () => {

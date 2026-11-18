@@ -16,6 +16,7 @@ import {
 } from "../agent-thread-panel.js";
 import { THREAD_TEXT_PREVIEW_MAX_BYTES, THREAD_OFFICE_PREVIEW_MAX_BYTES, type ThreadPreviewContext } from "../agent-thread-panel-preview.js";
 import type { RecordingPanelSession } from "../interview-recording-panel.js";
+import type { RecordingEntrySession } from "../recording-entry.js";
 import { requestBrowserNewTab, takePendingBrowserNewTab } from "../browser-panel.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -28,6 +29,7 @@ type HarnessProps = {
   scopeKey?: string; keepMounted?: boolean; onController?: (controller: AgentThreadPanelController) => void;
   onRecordingVisibleChange?: (visible: boolean) => void;
   pluginRecordingSession?: RecordingPanelSession | null;
+  recordingSession?: RecordingEntrySession;
   onClosePluginRecording?: () => void;
 };
 function Harness(props: HarnessProps) {
@@ -47,6 +49,8 @@ function Harness(props: HarnessProps) {
           previewContext={props.context}
           onRecordingVisibleChange={props.onRecordingVisibleChange}
           pluginRecordingSession={props.pluginRecordingSession}
+          recordingSession={props.recordingSession}
+          recordingAuthenticated={Boolean(props.recordingSession)}
           onClosePluginRecording={props.onClosePluginRecording}
         />
       ) : null}
@@ -112,6 +116,7 @@ describe("AgentThreadPanel", () => {
   afterEach(() => {
     act(() => root.unmount());
     while (takePendingBrowserNewTab()) { /* Drain requests left by failed assertions. */ }
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     Reflect.deleteProperty(window, "memmy");
     document.body.replaceChildren();
@@ -138,6 +143,26 @@ describe("AgentThreadPanel", () => {
     expect(panel.offset).toBe(0);
     expect(container.querySelector(".thread-panel--overlay")).not.toBeNull();
     expect(container.querySelector(".thread-panel__sash")).toBeNull();
+  });
+
+  it("uses the measured preview width when recording opens before layout is ready", () => {
+    vi.stubGlobal("ResizeObserver", undefined);
+    layoutWidth = 0;
+    let panel!: AgentThreadPanelController;
+    render({ messages: [], context: emptyContext(), onController: (value) => { panel = value; } }, false);
+    act(() => panel.openTab({ id: "recording:main", type: "recording", name: "录音" }));
+    expect(panel.width).toBe(360);
+    layoutWidth = LAYOUT_WIDTH;
+    act(() => window.dispatchEvent(new Event("resize")));
+    expect(panel.width).toBe(624);
+  });
+
+  it("recovers a narrow preview width saved before the workspace was measured", () => {
+    window.localStorage.setItem(THREAD_PANEL_WIDTH_STORAGE_KEY, JSON.stringify({ sidebar: 360, content: 360 }));
+    let panel!: AgentThreadPanelController;
+    render({ messages: [], context: emptyContext(), onController: (value) => { panel = value; } }, false);
+    act(() => panel.openTab({ id: "recording:main", type: "recording", name: "录音" }));
+    expect(panel.width).toBe(624);
   });
 
   it("opens a plugin interview beside file previews in the same task tab strip", () => {
@@ -445,6 +470,31 @@ describe("AgentThreadPanel", () => {
     expect(document.querySelectorAll('.thread-tabs [data-browser-tab]')).toHaveLength(0);
     expect(currentGuest.isConnected).toBe(true);
     expect(selected).toHaveBeenLastCalledWith(null);
+  });
+
+  it('keeps the recording detail and its tab when a summary promotes the draft to a chat', () => {
+    let panel!: AgentThreadPanelController;
+    const entry = { id: 'recording-summary', title: '录音详情保留', recordedAt: '2026-11-18T09:00:00Z',
+      durationMs: 5000, speakerCount: 1, audioUrl: null, transcript: { text: '本周讨论', segments: [] } };
+    const recordingSession: RecordingEntrySession = {
+      view: 'transcript', status: 'idle', elapsedMs: 0, lines: [], live: entry, recordings: [entry], opened: entry,
+      deliverables: [], error: null, start: vi.fn(), pause: vi.fn(), resume: vi.fn(), finish: vi.fn(),
+      back: vi.fn(), showLive: vi.fn(), open: vi.fn(), upload: vi.fn(), reset: vi.fn(),
+      deliver: () => panel.promoteScope('draft-summary', 'created-summary'),
+    };
+    const props = { messages: [], context: emptyContext(), recordingSession,
+      onController: (value: AgentThreadPanelController) => { panel = value; } };
+    render({ ...props, scopeKey: 'draft-summary' });
+    act(() => panel.openTab({ id: 'recording:main', type: 'recording', name: '录音' }));
+    const detail = container.querySelector('.recording-page')!;
+    expect(detail.textContent).toContain('录音详情保留');
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="总结"]')!.click());
+    render({ ...props, scopeKey: 'created-summary' }, false);
+    expect(panel.phase).toBe('open');
+    expect(panel.tabState.activeId).toBe('recording:main');
+    expect(container.querySelector('.recording-page')).toBe(detail);
+    expect(detail.textContent).toContain('录音详情保留');
+    expect(recordingSession.back).not.toHaveBeenCalled();
   });
 
   it('explicitly promotes a draft after the new-chat ack without remounting its browser or losing file tabs', async () => {

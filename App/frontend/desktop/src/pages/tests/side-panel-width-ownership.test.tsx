@@ -47,10 +47,14 @@ it("lets only the visible file or recording pane position the conversation contr
     await act(async () => root.render(<I18nProvider language="zh-CN"><Layout /></I18nProvider>));
     expect(width()).toBe(520);
     expect(recordedWidths.mock.calls.every(([value]) => value === 520)).toBe(true);
+    await act(async () => container.querySelector('[role="separator"]')!.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "ArrowRight", bubbles: true
+    })));
+    expect(width()).toBe(504);
     await click('[data-pane="recording"]');
-    expect(width()).toBe(480);
+    expect(width()).toBe(504);
     await click('[data-pane="files"]');
-    expect(width()).toBe(520);
+    expect(width()).toBe(504);
     recordedWidths.mockClear();
     await click("[data-resize]");
     expect(width()).toBe(320);
@@ -61,10 +65,10 @@ it("lets only the visible file or recording pane position the conversation contr
     expect(recordedWidths).not.toHaveBeenCalled();
     expect(width()).toBe(320);
     await click('[data-pane="recording"]');
-    expect(width()).toBe(480);
-    expect(recordedWidths).toHaveBeenCalledWith(480);
+    expect(width()).toBe(504);
+    expect(recordedWidths).toHaveBeenCalledWith(504);
     await click('[data-pane="files"]');
-    expect(width()).toBe(520);
+    expect(width()).toBe(504);
   } finally {
     act(() => root.unmount()); container.remove();
     if (originalStorage) Object.defineProperty(window, "localStorage", originalStorage);

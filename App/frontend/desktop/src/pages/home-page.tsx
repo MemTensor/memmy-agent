@@ -1292,9 +1292,11 @@ export function HomePage() {
       threadPanel.openTab({ id: "recording:main", type: "recording", name: t("recording.page.title") });
     },
     onEnsureConversation: ensurePluginConversation,
-    onSend: (text) => submitAgentComposerMessage({
+    onSend: (text, files = []) => submitAgentComposerMessage({
       chatId: state.agent.currentChatId, target: state.agent.currentChatId ? null : draftTarget,
-      connection, ensureChatSubscription, content: text, pendingAttachments: [], language,
+      scopeKey: chatScopeKey,
+      onChatResolved: (chatId) => threadPanel.promoteScope(chatScopeKey, chatId),
+      connection, ensureChatSubscription, content: text, pendingAttachments: files.map(uploadedMediaToPendingAttachment), language,
       dispatch, track, uploadAgentMedia: (files) => clients!.memmyAgent.uploadAgentMedia(files), clearComposer: () => {},
       setCreatingChat: setIsCreatingChat, modelPreset: resolvedConversationModel.candidateId ?? undefined,
       chatSelectionEpoch: state.agent.chatSelectionEpoch, getChatSelectionEpoch: () => chatSelectionEpochRef.current,
@@ -3403,6 +3405,11 @@ export function HomePage() {
       title={t("home.title")}
       recordingActive={recordingTabActive}
       recordingViewed={Boolean(currentRecording && viewedRecordingId === currentRecording.id)}
+      onNewTask={() => {
+        if (threadPanel.tabState.tabs.some((tab) => tab.id === "recording:main")) {
+          threadPanel.closeTab("recording:main");
+        }
+      }}
       topBar={hasConversationShell ? (
         <AgentThreadToolbar
           key={chatScopeKey}

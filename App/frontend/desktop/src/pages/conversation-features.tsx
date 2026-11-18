@@ -65,7 +65,7 @@ export function useConversationFeatures(options: {
   /** Stages files that already have a gateway/workspace path without uploading them again. */
   onStageExistingFiles?(files: UploadedAgentMedia[]): Promise<unknown>;
   onOpenArtifact?(artifact: PluginArtifactRef): boolean;
-  onSend(text: string): Promise<boolean>;
+  onSend(text: string, files?: UploadedAgentMedia[]): Promise<boolean>;
   onOpenRecording(): void;
   onEnsureConversation?(title: string): Promise<string | null>;
 }) {
@@ -126,6 +126,7 @@ export function useConversationFeatures(options: {
   const recordingAuthenticated = canUseAccountRecording(state.bootstrap?.app.userMode, state.account.userId);
   const latest = useRef(options);
   latest.current = options;
+  const recordingSummaryFlights = useRef(new Set<string>());
 
   useEffect(() => {
     let active = true;
@@ -159,13 +160,34 @@ export function useConversationFeatures(options: {
   }, [ui?.addRecordingMaterials]);
   const recording = useRecordingEntry(clients?.asr,
     clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined,
-    (file, mode, persistedTranscript) => {
-      if (persistedTranscript && latest.current.onStageExistingFiles) {
-        void latest.current.onStageExistingFiles([persistedTranscript]);
-      } else {
-        void latest.current.onStageFiles([file]);
+    async (file, mode, persistedTranscript) => {
+      // Capture the destination before uploading so a navigation during the
+      // upload cannot send this recording into a different conversation.
+      const destination = latest.current;
+      if (mode === "attach") {
+        if (persistedTranscript && destination.onStageExistingFiles) {
+          await destination.onStageExistingFiles([persistedTranscript]);
+        } else {
+          await destination.onStageFiles([file]);
+        }
+        return;
       }
-      if (mode === "summarize") latest.current.onDraft(t("recording.summaryPrompt"));
+      const key = `${conversationId}:${persistedTranscript?.path ?? file.name}`;
+      if (recordingSummaryFlights.current.has(key)) return;
+      recordingSummaryFlights.current.add(key);
+      setError(null);
+      try {
+        const transcript = persistedTranscript ?? (await clients?.memmyAgent.uploadAgentMedia([{
+          blob: file, name: file.name, kind: "file", mime: "text/plain", target: "recordings"
+        }]))?.[0];
+        if (!transcript || !await destination.onSend(t("recording.summaryPrompt"), [transcript])) {
+          throw new Error(t("home.media.error.sendFailed"));
+        }
+      } catch (cause) {
+        setError({ conversationId, message: cause instanceof Error ? cause.message : String(cause) });
+      } finally {
+        recordingSummaryFlights.current.delete(key);
+      }
     }, {
       scope: String(state.account.userId ?? "local"),
       ...(state.agent.currentChatId ? { sessionKey: conversationId } : {}),

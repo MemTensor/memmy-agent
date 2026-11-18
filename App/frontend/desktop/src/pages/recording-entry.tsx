@@ -13,7 +13,11 @@
  * on its row. Agent-requested recording cards remain separate inputs.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, Check, MoreHorizontal, Pencil, Mic, Pause, Play, Plus, RotateCw, Sparkles, Square, Trash2, Upload, X } from "lucide-react";
+import { createPortal } from "react-dom";
+import { ChevronLeft, FileText, Loader2, MessageSquareShare, MoreHorizontal, Pencil, Mic, Pause, Play, RotateCw, Square, Trash2, Upload, X } from "lucide-react";
+import { ConfirmDialog } from "../components/confirm-dialog.js";
+import { Tooltip } from "../components/tooltip.js";
+import { SearchField } from "../components/search-field.js";
 import type { AsrTranscriptSegment } from "@memmy/local-api-contracts";
 import type { AsrClient } from "../api/asr-client.js";
 import type { UploadAgentMediaInput, UploadedAgentMedia } from "../api/memmy-agent-client.js";
@@ -26,7 +30,7 @@ import type { RecordingPanelTranscript } from "./interview-recording-panel.js";
 import { formatClock, RecordingPlayer, TranscriptTurns } from "./interview-recording-panel.js";
 import { blobToAudioBase64, isLiveAsrTimeout, useAsrRecorder } from "./asr-recorder.js";
 import { pushWaveformLevel } from "../lib/audio-pcm-tap.js";
-import { persistRecording } from "../lib/recording-deliverables.js";
+import { persistRecording, persistRecordingAudio } from "../lib/recording-deliverables.js";
 import { removeRecordingArchiveEntry, saveRecordingArchiveEntry, useRecordingArchive } from "../lib/recording-archive.js";
 import { handOverRecording } from "../lib/recording-handover.js";
 import { usePluginTranscriptions } from "../app/plugin-ui-context.js";
@@ -35,8 +39,8 @@ import { RecordingWaveform, WAVE_BARS } from "./recording-waveform.js";
 /**
  * Where a finished recording is sent.
  *
- * `summarize` opens a new task with the transcript attached, which is what the
- * design's 总结 does; `attach` adds it to the conversation already on screen,
+ * `summarize` sends a summary request with the transcript attached;
+ * `attach` stages it in the conversation already on screen,
  * which is what 添加到会话 does.
  */
 export type RecordingDelivery = "summarize" | "attach";
@@ -72,7 +76,9 @@ export interface RecordingArchiveEntry {
    */
   handedOver?: boolean;
   /** The row can exist before ASR has finished, or when ASR failed. */
-  status?: "transcribing" | "ready" | "failed";}
+  status?: "transcribing" | "ready" | "failed";
+  transcriptionError?: string;
+}
 
 /** Everything the recording page renders. */
 export interface RecordingEntrySession {
@@ -212,6 +218,7 @@ export function useRecordingEntry(
   const [lines, setLines] = useState<AsrLiveLine[]>([]);
   const [live, setLive] = useState<RecordingArchiveEntry | null>(null);
   const [recordings, setRecordings] = useState<RecordingArchiveEntry[]>([]);
+  const [finishPending, setFinishPending] = useState(false);
   const archived = useRecordingArchive(archiveOptions?.scope);
   const recordingOrigin = useRef<{ sessionKey?: string } | null>(null);
   const archive = useCallback((entry: RecordingArchiveEntry) => {
@@ -227,14 +234,16 @@ export function useRecordingEntry(
     .map((row) => {
       const job = row.status !== "ready" && row.audioPath ? jobStates?.get(row.audioPath) : undefined;
       if (job?.status === "transcribing") return { ...row, status: "transcribing" as const };
-      if (job?.status === "failed" || job?.status === "skipped") return { ...row, status: "failed" as const };
+      if (job?.status === "failed") return { ...row, status: "failed" as const, transcriptionError: job.message };
+      if (job?.status === "skipped") return { ...row, status: "failed" as const };
       // Saved mid-transcription and the app has since restarted: nothing is
       // transcribing it any more, so offer the row's retry instead of a
       // spinner that never ends.
-      if (!job && row.status === "transcribing" && row.audioPath && archived.includes(row)) return { ...row, status: "failed" as const };
+      if (!job && row.status === "transcribing" && row.audioPath && archived.includes(row)
+        && !(finishPending && row.id === live?.id)) return { ...row, status: "failed" as const };
       return row;
     })
-    .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt)), [recordings, archived, jobStates]);
+    .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt)), [recordings, archived, jobStates, finishPending, live?.id]);
   const [opened, setOpened] = useState<RecordingArchiveEntry | null>(null);
   const lastScope = useRef(archiveOptions?.scope);
   useEffect(() => {
@@ -244,7 +253,6 @@ export function useRecordingEntry(
   }, [archiveOptions?.scope]);
   const [deliverables, setDeliverables] = useState<UploadedAgentMedia[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [finishPending, setFinishPending] = useState(false);
   /** Rows whose transcription is being tried again, by row id. */
   const [retrying, setRetrying] = useState<ReadonlySet<string>>(() => new Set());
   // Guards a second click before React has re-rendered with the row marked.
@@ -330,6 +338,7 @@ export function useRecordingEntry(
       throw caught;
     });
     setRecordings((current) => current.map((row) => row.id === id ? { ...row, audioPath: audio.path } : row));
+    archive({ ...pending, audioPath: audio.path, files: [audio] });
     archiveOptions?.onHandedOver?.({ audio, transcriptName });
     // The microphone is free again; the next interview need not wait for this
     // one's transcript.
@@ -370,11 +379,14 @@ export function useRecordingEntry(
       const recordedAt = new Date().toISOString();
       const title = `${t("recording.page.defaultTitle")} ${formatRecordingTitleTimestamp(recordedAt)}`;
       let audioUrl: string | null = null;
+      let pendingEntry: RecordingArchiveEntry | undefined;
+      let storedAudio: UploadedAgentMedia | undefined;
+      let audioPersistence: Promise<void> | undefined;
       let transcriptionCompleted = false;
       try {
         const result = await recorder.finishAndTranscribe({
           diarization: true,
-          onRecordingReady: (recording, _recordingMimeType, durationMs) => {
+          onRecordingReady: (recording, recordingMimeType, durationMs) => {
             audioUrl = URL.createObjectURL(recording);
             audioUrlsRef.current.push(audioUrl);
             const pending = buildEntry({
@@ -386,30 +398,42 @@ export function useRecordingEntry(
               title,
               recordedAt
             });
+            pendingEntry = pending;
             setLive(pending);
             setRecordings((current) => [pending, ...current.filter((row) => row.id !== id)]);
+            audioPersistence = persistRecordingAudio({ recording, recordingMimeType, transcribedAt: recordedAt }, t, uploadFiles)
+              .then((audio) => {
+                if (!audio || !pendingEntry) return;
+                storedAudio = audio;
+                pendingEntry = { ...pendingEntry, audioPath: audio.path, files: [audio] };
+                archive(pendingEntry);
+                setRecordings((current) => current.map((row) => row.id === id ? { ...row, audioPath: audio.path, files: [audio] } : row));
+                setLive((current) => current?.id === id ? { ...current, audioPath: audio.path, files: [audio] } : current);
+              }).catch(() => { /* The blob remains playable; successful transcription retries persistence below. */ });
           }
         });
+        await audioPersistence;
         if (!audioUrl) {
           audioUrl = URL.createObjectURL(result.recording);
           audioUrlsRef.current.push(audioUrl);
         }
         const transcript: RecordingPanelTranscript = { text: result.text, segments: result.segments ?? [] };
-        const entry = buildEntry({
+        const entry: RecordingArchiveEntry = { ...buildEntry({
           id,
           transcript,
           durationMs: result.durationMs ?? lastOffset(transcript.segments),
           audioUrl,
           title,
           recordedAt
-        });
+        }), ...(storedAudio ? { audioPath: storedAudio.path, files: [storedAudio] } : {}) };
         setLive(entry);
+        if (storedAudio) archive(entry);
         setRecordings((current) => current.some((row) => row.id === id)
           ? current.map((row) => row.id === id ? entry : row)
           : [entry, ...current]);
         transcriptionCompleted = true;
         if (viewRef.current === "live") setView("transcript");
-        const files = await persistRecording(result, t, uploadFiles);
+        const files = await persistRecording(result, t, uploadFiles, storedAudio);
         const keptFiles = [files.audio, files.transcript].filter((item): item is UploadedAgentMedia => item !== undefined);
         setDeliverables(keptFiles);
         const kept = { ...entry, audioUrl: files.audio?.url ?? entry.audioUrl, files: keptFiles,
@@ -423,10 +447,15 @@ export function useRecordingEntry(
         // the page shows. Keep the stopped audio in the list so returning to
         // the page cannot make a recording disappear just because ASR failed.
         if (!transcriptionCompleted) {
-          setRecordings((current) => current.map((row) => row.id === id ? { ...row, status: "failed" } : row));
-          setLive((current) => current?.id === id ? { ...current, status: "failed" } : current);
+          await audioPersistence;
+          const transcriptionError = caught instanceof Error ? caught.message : t("recording.page.transcriptionFailed");
+          if (pendingEntry) archive({ ...pendingEntry, status: "failed", transcriptionError });
+          setRecordings((current) => current.map((row) => row.id === id ? { ...row, status: "failed", transcriptionError } : row));
+          setLive((current) => current?.id === id ? { ...current, status: "failed", transcriptionError } : current);
+          if (audioUrl && viewRef.current === "live") setView("transcript");
         }
-        setError(caught instanceof Error ? caught.message : null);
+        // Once a file exists, its row owns the ASR failure rather than the list header.
+        setError(!audioUrl || transcriptionCompleted ? caught instanceof Error ? caught.message : null : null);
       } finally {
         finishInFlight.current = false;
         setFinishPending(false);
@@ -550,7 +579,8 @@ export function useRecordingEntry(
           transcript,
           durationMs: lastSegmentMs > 0 ? lastSegmentMs : entry.durationMs,
           speakerCount: Math.max(new Set(transcript.segments.map((segment) => segment.speakerId ?? 0)).size, 1),
-          status: "ready"
+          status: "ready",
+          transcriptionError: undefined
         };
         archive(updated);
         setRecordings((current) => current.map((row) => row.id === entry.id ? updated : row));
@@ -558,9 +588,12 @@ export function useRecordingEntry(
         setOpened((current) => current?.id === entry.id ? updated : current);
         archiveOptions?.onArchived?.(updated);
       } catch (caught) {
-        // The row goes back to "failed" on its own, since it was never moved
-        // out of that status. Only the message needs saying.
-        setError(caught instanceof Error ? caught.message : null);
+        const failed: RecordingArchiveEntry = { ...entry, status: "failed",
+          transcriptionError: caught instanceof Error ? caught.message : t("recording.page.transcriptionFailed") };
+        archive(failed);
+        setRecordings((current) => current.map((row) => row.id === entry.id ? failed : row));
+        setLive((current) => current?.id === entry.id ? failed : current);
+        setOpened((current) => current?.id === entry.id ? failed : current);
       } finally {
         finish();
         setRetrying((current) => {
@@ -646,9 +679,10 @@ export function useRecordingEntry(
     levels,
     live,
     recordings: allRecordings,
-    opened,
+    opened: opened ? { ...(allRecordings.find((row) => row.id === opened.id) ?? opened),
+      audioUrl: opened.audioUrl ?? allRecordings.find((row) => row.id === opened.id)?.audioUrl ?? null } : null,
     deliverables,
-    error: !asrClient ? t("plugin.ui.audio.unavailable") : error ?? recorder.error?.message ?? null,
+    error: !asrClient ? t("plugin.ui.audio.unavailable") : error ?? (status !== "idle" ? recorder.error?.message : null) ?? null,
     start,
     pause: () => recorder.pause(),
     resume: () => recorder.resume(),
@@ -759,6 +793,11 @@ export function RecordingEntryCard(props: {
  * @param props The live session and the panel chrome it shares with the preview.
  * @returns The page.
  */
+function recordingButtonLabelHidden(button: HTMLElement): boolean {
+  const label = button.querySelector("span");
+  return Boolean(label && window.getComputedStyle(label).display === "none");
+}
+
 export function RecordingEntryPage(props: {
   session: RecordingEntrySession;
   onStart?: () => void;
@@ -769,15 +808,16 @@ export function RecordingEntryPage(props: {
   const session = props.session;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const openMenuRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!openMenuId) return;
     const closeOutside = (event: PointerEvent) => {
-      if (!openMenuRef.current?.contains(event.target as Node)) setOpenMenuId(null);
+      if (!openMenuRef.current?.contains(event.target as Node)) {
+        setOpenMenuId(null);
+      }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpenMenuId(null);
@@ -789,18 +829,14 @@ export function RecordingEntryPage(props: {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [openMenuId]);
-  const finishRename = (entry: RecordingArchiveEntry) => { session.rename?.(entry, renameValue); setRenaming(null); };
-  const confirmDelete = async (entry: RecordingArchiveEntry) => {
-    if (!session.remove || deleting) return;
-    setDeleting(entry.id);
-    try { if (await session.remove(entry)) setConfirmingDelete(null); }
-    finally { setDeleting(null); }
-  };
-  // While ASR is pending, the active row above is the single source of truth.
-  // Hide its archive copy until the final transcript replaces it, so returning
-  // to the list never produces two rows for the same recording.
-  const archiveRows = session.recordings.filter((row) => !(row.status === "transcribing" && session.status === "transcribing"));
+  const archiveRows = session.recordings;
+  // Once the pending file has an archive row, that row owns its progress.
+  const showActiveRow = session.status !== "idle" && !(session.status === "transcribing"
+    && archiveRows.some((row) => row.status === "transcribing" && (!session.live || row.id === session.live.id)));
+  const normalizedQuery = searchQuery.trim().toLocaleLowerCase();
+  const filteredRows = archiveRows.filter((row) => recordingDisplayTitle(row).toLocaleLowerCase().includes(normalizedQuery));
   const failedCurrentRecording = session.live?.status === "failed";
+  const listEmpty = session.status === "idle" && !props.externalRecording && archiveRows.length === 0;
 
   if (session.view === "live") return <LiveView session={session} />;
   const entry = session.opened ?? session.live;
@@ -808,24 +844,24 @@ export function RecordingEntryPage(props: {
 
   return (
     <div className="recording-page">
-      <header className="recording-page__bar">
+      <header className="recording-page__bar recording-page__bar--list">
         <h2 className="recording-page__title">{t("recording.page.list")}</h2>
-        <div className="recording-page__controls">
-          <button type="button" className="recording-panel__action" disabled={session.status !== "idle" || props.uploadBlocked || Boolean(props.externalRecording)} onClick={() => fileInputRef.current?.click()}>
-            <Upload size={13} aria-hidden="true" />
-            <span>{t("recording.page.upload")}</span>
-          </button>
-          <button
-            type="button"
-            className="recording-panel__action recording-panel__action--primary"
-            disabled={session.status !== "idle" || Boolean(props.externalRecording)}
-            onClick={props.onStart ?? session.start}
-          >
-            <Mic size={13} aria-hidden="true" />
-            <span>{t("plugin.ui.audio.start")}</span>
-          </button>
-        </div>
       </header>
+      {!listEmpty ? <div className="recording-page__list-toolbar">
+          <SearchField className="recording-page__search" value={searchQuery} label={t("recording.page.search")}
+            onChange={(value) => { setSearchQuery(value); setOpenMenuId(null); }} />
+          <Tooltip content={t("recording.page.upload")} shouldShow={recordingButtonLabelHidden}><button type="button" className="recording-page__toolbar-action"
+            aria-label={t("recording.page.upload")}
+            disabled={session.status !== "idle" || props.uploadBlocked || Boolean(props.externalRecording)}
+            onClick={() => fileInputRef.current?.click()}>
+            <Upload size={16} aria-hidden="true" /><span>{t("recording.page.upload")}</span>
+          </button></Tooltip>
+          <Tooltip content={t("plugin.ui.audio.start")} shouldShow={recordingButtonLabelHidden}><button type="button" className="recording-page__toolbar-action recording-page__toolbar-action--start"
+            aria-label={t("plugin.ui.audio.start")}
+            disabled={session.status !== "idle" || Boolean(props.externalRecording)} onClick={props.onStart ?? session.start}>
+            <Mic size={16} aria-hidden="true" /><span>{t("plugin.ui.audio.start")}</span>
+          </button></Tooltip>
+        </div> : null}
       <input
         ref={fileInputRef}
         className="sr-only"
@@ -838,114 +874,92 @@ export function RecordingEntryPage(props: {
         }}
       />
       {session.error && !failedCurrentRecording ? <p className="recording-page__error" role="alert">{session.error}</p> : null}
-      {props.externalRecording ? <ul className="recording-page__list"><li className="recording-page__list-row recording-page__list-row--active">
-        <button type="button" className="recording-page__list-open" onClick={props.externalRecording.onOpen}>
-          <span className="recording-page__list-icon"><Mic size={15} /></span>
-          <span className="recording-page__list-body"><span className="recording-page__list-title">{props.externalRecording.title}</span>
-            <span className="recording-page__list-meta">{t(props.externalRecording.status === "paused" ? "plugin.ui.audio.paused" : props.externalRecording.status === "transcribing" ? "plugin.ui.audio.transcribing" : "plugin.ui.audio.recording")} · {formatClock(props.externalRecording.elapsedMs)}</span>
-          </span>
-        </button>
-      </li></ul> : null}
-      {session.status !== "idle" ? (
-        <ul className="recording-page__list" aria-label={t("recording.page.title")}>
-          <li className="recording-page__list-row recording-page__list-row--active">
-            <button type="button" className="recording-page__list-open" onClick={session.showLive}>
-              <span className="recording-page__list-icon" aria-hidden="true"><Mic size={15} /></span>
-              <span className="recording-page__list-body">
-                <span className="recording-page__list-title">{t("recording.page.title")}</span>
-                <span className="recording-page__list-meta">
-                  <span>{session.status === "paused" ? t("plugin.ui.audio.paused") : session.status === "transcribing" ? t("plugin.ui.audio.transcribing") : t("plugin.ui.audio.recording")}</span>
-                  <span>{t("recording.page.duration", { time: formatClock(session.elapsedMs) })}</span>
-                </span>
-              </span>
+      {listEmpty ? (
+        <div className="recording-page__empty">
+          <div className="recording-page__empty-icon" aria-hidden="true"><Mic size={40} strokeWidth={1.5} /></div>
+          <h3>{t("recording.page.emptyTitle")}</h3>
+          <p>{t("recording.page.hint")}</p>
+          <div className="recording-page__empty-actions">
+            <button type="button" className="recording-panel__action recording-panel__action--primary" onClick={props.onStart ?? session.start}>
+              <Mic size={14} aria-hidden="true" />{t("plugin.ui.audio.start")}
             </button>
-            <div className="recording-page__list-actions">
-              <button type="button" className="recording-page__list-action" onClick={session.showLive}>
-                <ChevronRight size={13} aria-hidden="true" />
-                <span>{t("recording.page.view")}</span>
-              </button>
-            </div>
+            <button type="button" className="recording-panel__action" disabled={props.uploadBlocked} onClick={() => fileInputRef.current?.click()}>
+              <Upload size={14} aria-hidden="true" />{t("recording.page.upload")}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <ul className="recording-page__list recording-page__list--table">
+          <li className="recording-page__table-head" aria-hidden="true">
+            <span>{t("recording.page.name")}</span><span>{t("recording.page.durationLabel")}</span>
           </li>
-        </ul>
-      ) : null}
-      {session.status === "idle" && !props.externalRecording && archiveRows.length === 0 ? (
-        <p className="recording-page__empty">{t("recording.page.hint")}</p>
-      ) : archiveRows.length > 0 ? (
-        <ul className="recording-page__list">
-          {archiveRows.map((row) => {
+          {props.externalRecording ? <RecordingActiveRow title={props.externalRecording.title}
+            status={props.externalRecording.status} elapsedMs={props.externalRecording.elapsedMs} onOpen={props.externalRecording.onOpen} /> : null}
+          {showActiveRow ? <RecordingActiveRow title={session.status === "transcribing" && session.live ? recordingDisplayTitle(session.live) : t("recording.page.title")}
+            status={session.status} elapsedMs={session.elapsedMs} onOpen={session.showLive}
+            onPause={session.pause} onResume={session.resume} onFinish={session.finish} /> : null}
+          {filteredRows.map((row) => {
             // A retry is in flight for this row, whether or not the row itself
             // carries the status (archived rows are not in `recordings`).
             const busy = session.retrying?.has(row.id) === true;
             const pending = row.status === "transcribing" || busy;
             const failed = row.status === "failed" && !busy;
-            const recordedAt = formatRecordedAt(row.recordedAt);
             const displayTitle = recordingDisplayTitle(row);
-            const titleContainsRecordedAt = displayTitle.endsWith(` ${formatRecordingTitleTimestamp(row.recordedAt)}`);
+            const body = <span className="recording-page__list-body">
+              <span className="recording-page__list-name">
+                {renaming === row.id ? <RecordingNameEditor title={displayTitle}
+                  onSave={(name) => { session.rename?.(row, name); setRenaming(null); }} onCancel={() => setRenaming(null)} />
+                  : <span className="recording-page__list-title">{displayTitle}</span>}
+                {pending || failed ? <span className="recording-page__list-status" data-recording-status={pending ? "transcribing" : "failed"}>
+                  {pending ? t("plugin.ui.audio.transcribing") : t("recording.page.transcriptionFailed")}
+                </span> : null}
+              </span>
+              <span className="recording-page__list-meta">{formatClock(row.durationMs)}</span>
+            </span>;
             return (
-              <li key={row.id} className={`recording-page__list-row${!pending && !failed ? " recording-page__list-row--ready" : ""}`} data-busy={busy ? "true" : undefined}>
-                <button type="button" className="recording-page__list-open" onClick={() => session.open(row)}>
-                  <span className="recording-page__list-icon" aria-hidden="true"><Play size={15} /></span>
-                  <span className="recording-page__list-body">
-                    <span className="recording-page__list-title">{renaming === row.id ? renameValue : displayTitle}</span>
-                    <span className="recording-page__list-meta">
-                      {pending || failed || !titleContainsRecordedAt ? <span data-recording-status={busy ? "transcribing" : undefined}>
-                        {pending ? t("plugin.ui.audio.transcribing") : failed ? t("recording.page.transcriptionFailed") : recordedAt}
-                      </span> : null}
-                      <span>{t("recording.page.duration", { time: formatClock(row.durationMs) })}</span>
-                      {!pending && !failed ? <><span>{t("recording.page.speakers", { count: row.speakerCount })}</span><span>{t("recording.page.transcribed")}</span></> : null}
-                    </span>
-                  </span>
-                </button>
-                {renaming === row.id ? <div className="recording-page__rename">
-                  <input autoFocus maxLength={80} aria-label={t("common.rename")} value={renameValue} onChange={(event) => setRenameValue(event.target.value)}
-                    onKeyDown={(event) => { if (event.key === "Enter") finishRename(row); if (event.key === "Escape") setRenaming(null); }} />
-                  <button type="button" aria-label={t("plugin.ui.submit")} onClick={() => finishRename(row)}><Check size={14} /></button>
-                  <button type="button" aria-label={t("common.close")} onClick={() => setRenaming(null)}><X size={14} /></button>
-                </div> : null}
-                {confirmingDelete === row.id && session.remove ? (
-                  <div className="recording-page__delete-confirm">
-                    <span>{t("recording.page.deleteLocalConfirm")}</span>
-                    <button type="button" className="recording-page__delete-confirm-action" disabled={deleting === row.id}
-                      onClick={() => void confirmDelete(row)}>{t("common.delete")}</button>
-                    <button type="button" disabled={deleting === row.id} onClick={() => setConfirmingDelete(null)}>{t("recording.page.cancelDelete")}</button>
-                  </div>
-                ) : failed && (session.retry || session.remove) ? (
+              <li key={row.id} className={`recording-page__list-row recording-page__list-row--table${!pending && !failed ? " recording-page__list-row--ready" : ""}`} data-busy={busy ? "true" : undefined}>
+                {renaming === row.id ? <div className="recording-page__list-open">{body}</div>
+                  : <button type="button" className="recording-page__list-open" title={displayTitle} onClick={() => session.open(row)}>{body}</button>}
+                {failed && (session.retry || session.remove || session.rename) ? (
                   <div className="recording-page__list-actions">
-                    {session.retry ? <button type="button" className="recording-page__list-action recording-page__list-action--retry" onClick={() => session.retry?.(row)}>
+                    {session.retry ? <button type="button" className="recording-page__list-action recording-page__list-action--retry"
+                      aria-label={t("recording.page.retry")} title={t("recording.page.retry")} onClick={() => session.retry?.(row)}>
                       <RotateCw size={13} aria-hidden="true" />
-                      <span>{t("recording.page.retry")}</span>
                     </button> : null}
-                    {session.remove ? <div className="recording-page__more" ref={openMenuId === row.id ? openMenuRef : undefined}>
+                    {session.remove || session.rename ? <div className="recording-page__more" ref={openMenuId === row.id ? openMenuRef : undefined}>
                       <button type="button" className="recording-page__list-action recording-page__more-trigger"
                         aria-label={`${t("recording.page.moreActions")} ${displayTitle}`} aria-haspopup="menu" aria-expanded={openMenuId === row.id}
                         onClick={() => setOpenMenuId((current) => current === row.id ? null : row.id)}><MoreHorizontal size={16} aria-hidden="true" /></button>
                       {openMenuId === row.id ? <div className="recording-page__more-menu" role="menu">
-                        <button type="button" role="menuitem" onClick={() => { setOpenMenuId(null); setConfirmingDelete(row.id); }}>
-                          <Trash2 size={14} aria-hidden="true" />{t("common.delete")}
-                        </button>
+                        {session.rename ? <button type="button" role="menuitem" onClick={() => { setOpenMenuId(null); setRenaming(row.id); }}>
+                          <Pencil size={16} aria-hidden="true" />{t("common.rename")}
+                        </button> : null}
+                        {session.remove ? <button type="button" role="menuitem" onClick={() => { setOpenMenuId(null); setConfirmingDelete(row.id); }}>
+                          <Trash2 size={16} aria-hidden="true" />{t("common.delete")}
+                        </button> : null}
                       </div> : null}
                     </div> : null}
                   </div>
                 ) : null}
-                {!pending && !failed && confirmingDelete !== row.id ? (
+                {!pending && !failed ? (
                   <div className="recording-page__list-actions">
-                    <button type="button" className="recording-page__list-action" onClick={() => session.deliver(row, "attach")}>
-                      <Plus size={13} aria-hidden="true" />
-                      <span>{t("recording.page.addToChat")}</span>
-                    </button>
+                    <Tooltip content={t("recording.page.summarize")}><button type="button" className="recording-page__list-action recording-page__summary-action" aria-label={t("recording.page.summarize")}
+                      onClick={() => session.deliver(row, "summarize")}>
+                      <FileText size={16} aria-hidden="true" />
+                    </button></Tooltip>
                     <div className="recording-page__more" ref={openMenuId === row.id ? openMenuRef : undefined}>
                       <button type="button" className="recording-page__list-action recording-page__more-trigger"
                         aria-label={`${t("recording.page.moreActions")} ${displayTitle}`} aria-haspopup="menu" aria-expanded={openMenuId === row.id}
                         onClick={() => setOpenMenuId((current) => current === row.id ? null : row.id)}><MoreHorizontal size={16} aria-hidden="true" /></button>
                       {openMenuId === row.id ? <div className="recording-page__more-menu" role="menu">
-                        <button type="button" role="menuitem" onClick={() => { setOpenMenuId(null); session.deliver(row, "summarize"); }}>
-                          <Sparkles size={14} aria-hidden="true" />{t("recording.page.summarize")}
+                        <button type="button" role="menuitem" onClick={() => { setOpenMenuId(null); session.deliver(row, "attach"); }}>
+                          <MessageSquareShare size={16} aria-hidden="true" />{t("recording.page.addToChat")}
                         </button>
-                        {session.rename ? <button type="button" role="menuitem" onClick={() => { setOpenMenuId(null); setRenaming(row.id); setRenameValue(displayTitle); }}>
-                          <Pencil size={14} aria-hidden="true" />{t("common.rename")}
+                        {session.rename ? <button type="button" role="menuitem" onClick={() => { setOpenMenuId(null); setRenaming(row.id); }}>
+                          <Pencil size={16} aria-hidden="true" />{t("common.rename")}
                         </button> : null}
                         {session.remove ? <button type="button" role="menuitem" onClick={() => { setOpenMenuId(null); setConfirmingDelete(row.id); }}>
-                          <Trash2 size={14} aria-hidden="true" />{t("common.delete")}
+                          <Trash2 size={16} aria-hidden="true" />{t("common.delete")}
                         </button> : null}
                       </div> : null}
                     </div>
@@ -955,9 +969,95 @@ export function RecordingEntryPage(props: {
             );
           })}
         </ul>
-      ) : null}
+      )}
+      {!listEmpty && !showActiveRow && !props.externalRecording && archiveRows.length > 0 && filteredRows.length === 0
+        ? <p className="recording-page__search-empty" role="status">{t("recording.page.noSearchResults")}</p> : null}
+      {confirmingDelete && session.recordings.find((row) => row.id === confirmingDelete) ? <RecordingDeleteDialog
+        entry={session.recordings.find((row) => row.id === confirmingDelete)!} session={session} onClose={() => setConfirmingDelete(null)} /> : null}
     </div>
   );
+}
+
+function RecordingNameEditor(props: { title: string; onSave(name: string): void; onCancel(): void }): ReactNode {
+  const { t } = useTranslation();
+  const [name, setName] = useState(props.title);
+  const settled = useRef(false);
+  const save = () => {
+    if (settled.current) return;
+    settled.current = true;
+    if (name.trim()) props.onSave(name.trim()); else props.onCancel();
+  };
+  const cancel = () => { settled.current = true; props.onCancel(); };
+  return <span className="recording-name-editor" onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) save();
+  }}>
+    <input autoFocus aria-label={t("common.rename")} value={name} maxLength={80}
+      onFocus={(event) => event.currentTarget.select()} onChange={(event) => setName(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing) return;
+        if (event.key === "Enter") { event.preventDefault(); save(); }
+        if (event.key === "Escape") { event.stopPropagation(); cancel(); }
+      }} />
+    <button type="button" aria-label={t("recording.page.cancelDelete")} onClick={cancel}><X size={16} aria-hidden="true" /></button>
+  </span>;
+}
+
+function RecordingActiveRow(props: { title: string; status: string; elapsedMs: number; onOpen(): void; onPause?(): void; onResume?(): void; onFinish?(): void }): ReactNode {
+  const { t } = useTranslation();
+  return <li className="recording-page__list-row recording-page__list-row--table recording-page__list-row--active">
+    <button type="button" className="recording-page__list-open" onClick={props.onOpen}>
+      <span className="recording-page__list-body">
+        <span className="recording-page__list-name"><span className="recording-page__name-heading"><span className="recording-page__list-title">{props.title}</span>
+          {props.status === "recording" || props.status === "paused" ? <span className={`recording-page__activity app-frame-recording-wave${props.status === "recording" ? " app-frame-recording-wave--live" : ""}`} aria-hidden="true">
+            <span /><span /><span /><span /><span />
+          </span> : null}
+        </span>
+          <span className="recording-page__list-status">{t(props.status === "paused" ? "plugin.ui.audio.paused"
+            : props.status === "transcribing" ? "plugin.ui.audio.transcribing" : "plugin.ui.audio.recording")}</span>
+        </span>
+        <span className="recording-page__list-meta">{formatClock(props.elapsedMs)}</span>
+      </span>
+    </button>
+    {(props.status === "recording" || props.status === "paused") && props.onFinish ? <div className="recording-page__list-actions">
+      <Tooltip content={t(props.status === "paused" ? "plugin.ui.audio.resume" : "plugin.ui.audio.pause")}>
+        <button type="button" className="recording-page__list-action recording-page__list-action--pause"
+          aria-label={t(props.status === "paused" ? "plugin.ui.audio.resume" : "plugin.ui.audio.pause")}
+          onClick={props.status === "paused" ? props.onResume : props.onPause}>
+          {props.status === "paused" ? <Play size={16} aria-hidden="true" />
+            : <span className="app-frame-recording-pause-glyph" aria-hidden="true"><span /><span /></span>}
+        </button>
+      </Tooltip>
+      <Tooltip content={t("plugin.ui.audio.stop")}><button type="button" className="recording-page__list-action recording-page__list-action--stop"
+        aria-label={t("plugin.ui.audio.stop")} onClick={props.onFinish}><span className="app-frame-recording-stop-glyph" aria-hidden="true" /></button></Tooltip>
+    </div> : null}
+  </li>;
+}
+
+function RecordingDeleteDialog(props: { entry: RecordingArchiveEntry; session: RecordingEntrySession; onClose(): void }): ReactNode {
+  const { t } = useTranslation();
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
+  const remove = async () => {
+    if (!props.session.remove || inFlight.current) return;
+    inFlight.current = true;
+    setDeleting(true);
+    setError(null);
+    try {
+      if (await props.session.remove(props.entry)) props.onClose();
+      else setError(t("recording.page.deleteFailed"));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t("recording.page.deleteFailed"));
+    } finally {
+      inFlight.current = false;
+      setDeleting(false);
+    }
+  };
+  return createPortal(<ConfirmDialog open title={t("recording.page.deleteTitle")}
+    message={<>{t("recording.page.deleteLocalConfirm")}{error ? <p role="alert">{error}</p> : null}</>}
+    cancelLabel={t("recording.page.cancelDelete")} closeLabel={t("common.close")}
+    confirmLabel={t("common.delete")} confirmVariant="danger" confirmDisabled={deleting}
+    onCancel={() => { if (!inFlight.current) props.onClose(); }} onConfirm={() => void remove()} />, document.body);
 }
 
 function LiveView(props: { session: RecordingEntrySession }): ReactNode {
@@ -973,27 +1073,10 @@ function LiveView(props: { session: RecordingEntrySession }): ReactNode {
           <ChevronLeft size={16} aria-hidden="true" />
         </button>
         <h2 className="recording-page__title">{t("recording.page.title")}</h2>
-        <div className="recording-page__controls">
-          {recording ? (
-            <>
-              <button
-                type="button"
-                className="recording-panel__action"
-                onClick={() => (session.status === "paused" ? session.resume() : session.pause())}
-              >
-                {session.status === "paused" ? <Play size={13} aria-hidden="true" /> : <Pause size={13} aria-hidden="true" />}
-                <span>{session.status === "paused" ? t("plugin.ui.audio.resume") : t("plugin.ui.audio.pause")}</span>
-              </button>
-              <button type="button" className="recording-panel__action recording-panel__action--primary" onClick={session.finish}>
-                <Square size={12} aria-hidden="true" />
-                <span>{t("plugin.ui.audio.stop")}</span>
-              </button>
-            </>
-          ) : null}
-        </div>
       </header>
-      <div className="recording-panel__status" role="status">
-        {recording || session.status === "transcribing" ? <span className="recording-panel__pulse" aria-hidden="true" /> : null}
+      <div className="recording-live" data-status={session.status}>
+      <div className="recording-panel__status recording-live__status" role="status">
+        {session.status === "recording" ? <span className="recording-panel__pulse" aria-hidden="true" /> : null}
         <span>
           {failed ? t("recording.page.transcriptionFailed")
             : completed ? t("recording.page.transcribed")
@@ -1006,9 +1089,26 @@ function LiveView(props: { session: RecordingEntrySession }): ReactNode {
         </span>
         <span className="recording-panel__status-time">{formatClock(session.elapsedMs)}</span>
       </div>
+      {recording ? <>
+        <div className="recording-live__actions">
+            <button type="button" className="recording-page__toolbar-action" aria-label={t(session.status === "paused" ? "plugin.ui.audio.resume" : "plugin.ui.audio.pause")}
+              onClick={() => (session.status === "paused" ? session.resume() : session.pause())}>
+              {session.status === "paused" ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
+              <span>{t(session.status === "paused" ? "plugin.ui.audio.resume" : "plugin.ui.audio.pause")}</span>
+            </button>
+            <button type="button" className="recording-page__toolbar-action recording-page__toolbar-action--start" aria-label={t("plugin.ui.audio.stop")} onClick={session.finish}>
+              <Square size={16} aria-hidden="true" />
+              <span>{t("plugin.ui.audio.stop")}</span>
+            </button>
+        </div>
+      </> : null}
+      </div>
+      <div className="recording-page__transcript-tabs">
+        <h3 className="recording-page__transcript-heading">{t("recording.page.transcriptTitle")}</h3>
+      </div>
       <div className="recording-panel__lines">
         {session.lines.length === 0
-          ? <p className="recording-panel__empty">{t("recording.page.listening")}</p>
+          ? recording || session.status === "starting" ? <p className="recording-panel__empty">{t(session.status === "paused" ? "plugin.ui.audio.paused" : "recording.page.listening")}</p> : null
           : session.lines.map((line) => (
             <p key={`${line.startMs}:${line.text}`} className="recording-panel__line">
               <span className="recording-panel__line-time">{formatClock(line.startMs)}</span>
@@ -1021,47 +1121,87 @@ function LiveView(props: { session: RecordingEntrySession }): ReactNode {
   );
 }
 
+function RecordingDetailsMenu(props: { entry: RecordingArchiveEntry; session: RecordingEntrySession; allowAttach: boolean; onRename(): void }): ReactNode {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { setOpen(false); triggerRef.current?.focus(); }
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+  return <div className="recording-page__more" ref={ref}>
+    <button ref={triggerRef} type="button" className="thread-preview__action"
+      aria-label={t("recording.page.moreActions")} title={t("recording.page.moreActions")}
+      aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+      <MoreHorizontal size={16} aria-hidden="true" />
+    </button>
+    {open ? <div className="recording-page__more-menu" role="menu">
+      {props.allowAttach ? <button type="button" role="menuitem" onClick={() => { setOpen(false); props.session.deliver(props.entry, "attach"); }}>
+        <MessageSquareShare size={16} aria-hidden="true" />{t("recording.page.addToChat")}
+      </button> : null}
+      {props.session.rename ? <button type="button" role="menuitem" onClick={() => { setOpen(false); props.onRename(); }}>
+        <Pencil size={16} aria-hidden="true" />{t("common.rename")}
+      </button> : null}
+      {props.session.remove ? <button type="button" role="menuitem" disabled={props.entry.status === "transcribing"}
+        onClick={() => { setOpen(false); setConfirmingDelete(true); }}>
+        <Trash2 size={16} aria-hidden="true" />{t("common.delete")}
+      </button> : null}
+    </div> : null}
+    {confirmingDelete ? <RecordingDeleteDialog entry={props.entry} session={props.session} onClose={() => setConfirmingDelete(false)} /> : null}
+  </div>;
+}
+
 function TranscriptView(props: { session: RecordingEntrySession; entry: RecordingArchiveEntry }): ReactNode {
   const { t } = useTranslation();
   const [seek, setSeek] = useState<{ ms: number; sequence: number } | undefined>();
-  const failed = props.entry.status === "failed";
-  const pending = props.entry.status === "transcribing";
+  const [renaming, setRenaming] = useState(false);
+  const pending = props.entry.status === "transcribing" || props.session.retrying?.has(props.entry.id) === true;
+  const failed = props.entry.status === "failed" && !pending;
   const ready = !failed && !pending;
   return (
     <div className="recording-page">
-      <header className="recording-page__bar">
+      <header className="recording-page__bar recording-page__bar--detail">
         <button type="button" className="recording-page__back" aria-label={t("recording.page.backToList")} onClick={props.session.back}>
           <ChevronLeft size={16} aria-hidden="true" />
         </button>
-        <h2 className="recording-page__title">{recordingDisplayTitle(props.entry)}</h2>
-        {ready || failed ? <div className="recording-page__controls">
-          {ready ? <><button type="button" className="recording-panel__action" onClick={() => props.session.deliver(props.entry, "attach")}>
-            <Plus size={13} aria-hidden="true" />
-            <span>{t("recording.page.addToChat")}</span>
-          </button>
-          <button
-            type="button"
-            className="recording-panel__action recording-panel__action--primary"
-            onClick={() => props.session.deliver(props.entry, "summarize")}
-          >
-            <Sparkles size={13} aria-hidden="true" />
-            <span>{t("recording.page.summarize")}</span>
-          </button></> : null}
-          {failed && props.session.retry ? <button type="button" className="recording-panel__action recording-panel__action--primary"
-            onClick={() => props.session.retry?.(props.entry)}>
-            <RotateCw size={13} aria-hidden="true" /><span>{t("recording.page.retry")}</span>
+        {renaming ? <div className="recording-page__title"><RecordingNameEditor title={recordingDisplayTitle(props.entry)}
+          onSave={(name) => { props.session.rename?.(props.entry, name); setRenaming(false); }} onCancel={() => setRenaming(false)} /></div>
+          : <h2 className="recording-page__title" title={recordingDisplayTitle(props.entry)}>{recordingDisplayTitle(props.entry)}</h2>}
+        {ready || failed || props.session.rename || props.session.remove ? <div className="thread-preview__actions">
+          {ready ? <>
+            <Tooltip content={t("recording.page.summarize")}><button type="button" className="thread-preview__action recording-page__summary-action" aria-label={t("recording.page.summarize")}
+              onClick={() => props.session.deliver(props.entry, "summarize")}><FileText size={16} aria-hidden="true" /></button></Tooltip>
+          </> : null}
+          {failed && props.session.retry ? <button type="button" className="thread-preview__action" aria-label={t("recording.page.retry")}
+            title={t("recording.page.retry")} onClick={() => props.session.retry?.(props.entry)}>
+            <RotateCw size={16} aria-hidden="true" />
           </button> : null}
+          {ready || props.session.rename || props.session.remove
+            ? <RecordingDetailsMenu entry={props.entry} session={props.session} allowAttach={ready} onRename={() => setRenaming(true)} /> : null}
         </div> : null}
       </header>
       {props.entry.audioUrl ? <RecordingPlayer src={props.entry.audioUrl} durationMs={props.entry.durationMs} seek={seek} /> : null}
-      {!ready ? <div className="recording-page__transcription-state" role="status">
-        {t(failed ? "recording.page.transcriptionFailed" : "plugin.ui.audio.transcribing")}
-        {failed && props.session.live?.id === props.entry.id && props.session.error ? <details>
-          <summary>{t("recording.page.errorDetails")}</summary>
-          <p>{props.session.error}</p>
-        </details> : null}
+      <div className="recording-page__transcript-tabs">
+        <h3 className="recording-page__transcript-heading">{t("recording.page.transcriptTitle")}</h3>
+      </div>
+      {!ready ? <div className={`recording-page__transcription-state${pending ? " recording-page__transcription-state--pending" : ""}`} role="status">
+        <span className="recording-page__transcription-label">{pending ? <Loader2 size={16} className="recording-page__transcribing-spinner" aria-hidden="true" /> : null}
+          {failed ? props.entry.transcriptionError || (props.session.live?.id === props.entry.id ? props.session.error : null)
+            || t("recording.page.transcriptionFailed") : t("plugin.ui.audio.transcribing")}</span>
       </div> : null}
-      {ready ? <p className="recording-panel__section">{t("plugin.ui.audio.transcript")}</p> : null}
       {ready ? <TranscriptTurns transcript={props.entry.transcript} onSeek={props.entry.audioUrl ? (ms) => setSeek((current) => ({ ms, sequence: (current?.sequence ?? 0) + 1 })) : undefined} /> : null}
     </div>
   );

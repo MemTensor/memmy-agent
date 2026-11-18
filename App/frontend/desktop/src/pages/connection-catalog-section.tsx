@@ -1,4 +1,5 @@
-import { Link2, MessageCircle, MoreHorizontal, Plus, RefreshCw, Search } from "lucide-react";
+import { SearchField } from "../components/search-field.js";
+import { Link2, MessageCircle, MoreHorizontal, Plus, RefreshCw } from "lucide-react";
 import { Memmy } from "../components/mascot/memmy.js";
 import { deriveIntegrationState, type IntegrationConnectionState } from "../integrations/connection-state.js";
 import { CATEGORY_TABS, IntegrationLogoBadge, type IntegrationCategoryTab, type IntegrationMeta } from "../integrations/integration-meta.js";
@@ -60,11 +61,7 @@ export function ConnectionCatalogSection(props: ConnectionCatalogSectionProps) {
             </button>
           ))}
         </div>
-        <label className="extension-catalog-search">
-          <Search size={15} aria-hidden="true" />
-          <input type="search" aria-label={searchLabel} placeholder={searchLabel} value={props.search}
-            onChange={(event) => props.onSearchChange(event.target.value)} />
-        </label>
+        <SearchField className="extension-catalog-search" label={searchLabel} value={props.search} onChange={props.onSearchChange} />
         {!channels && props.onCategoryChange ? (
           <label className="extension-catalog-category">
             <span className="sr-only">{t("connections.catalog.toolCategory")}</span>
