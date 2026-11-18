@@ -395,6 +395,46 @@ describe("account session repository", () => {
     store.close();
   });
 
+  it("restores cloud guide completion into the local onboarding state on every login", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-account-onboarding-sync-"));
+    const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
+    const profile = {
+      userId: "u1",
+      nickname: "n",
+      email: null,
+      phoneNumber: null,
+      avatarUrl: null,
+      planType: "free",
+      hasFinishedGuide: true,
+      region: null,
+      registeredAt: null,
+      rawProfile: { id: "u1" }
+    };
+    try {
+      // A fresh install starts with the default (unfinished) onboarding row.
+      expect(store.repositories.bootstrap.getOnboardingState()).toMatchObject({
+        completed: false,
+        firstEncounterReportStatus: "pending"
+      });
+
+      store.repositories.accountSession.upsert({ uuid: "acct-1", cloudUuid: "cred-1", profile });
+      expect(store.repositories.bootstrap.getOnboardingState()).toMatchObject({
+        completed: true,
+        currentStep: "completed",
+        firstEncounterReportStatus: "skipped"
+      });
+
+      store.repositories.accountSession.upsert({ uuid: "acct-1", cloudUuid: "cred-1", profile });
+      expect(store.repositories.bootstrap.getOnboardingState()).toMatchObject({
+        completed: true,
+        currentStep: "completed",
+        firstEncounterReportStatus: "skipped"
+      });
+    } finally {
+      store.close();
+    }
+  });
+
   it("repairs missing phone column from raw cloud profile", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-account-session-"));
     const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
