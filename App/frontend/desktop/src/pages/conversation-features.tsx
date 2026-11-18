@@ -10,6 +10,7 @@ import { normalizePluginConversationId, useOptionalPluginUi, type PluginRecordin
 import { useAppState } from "../state/app-state.js";
 import { appActions } from "../state/app-actions.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import { PLUGIN_CHANGE_EVENT } from "../lib/plugin-change-event.js";
 import { answeredUnresolvedPluginInteraction, pendingPluginInteraction, pluginInteractionCompletedLabel, pluginInteractionWaitingLabel } from "../app/plugin-interaction-waiting-label.js";
 import { pendingAgentQuestion } from "./agent-question-card.js";
 import { PluginCapabilityHost, RecordingBarPortalContext, selectVisiblePluginCalls, isActiveLegalWorkflowCard } from "./plugin-capability-host.js";
@@ -128,14 +129,27 @@ export function useConversationFeatures(options: {
 
   useEffect(() => {
     let active = true;
+    let latestRead = 0;
     const refresh = () => {
       if (!clients?.plugins) return;
-      void clients.plugins.list().then((value) => { if (active) { setPlugins(value); setError(null); } })
-        .catch((cause) => { if (active) setError({ conversationId, message: String(cause instanceof Error ? cause.message : cause) }); });
+      const read = ++latestRead;
+      void clients.plugins.list().then((value) => {
+        if (active && read === latestRead) { setPlugins(value); setError(null); }
+      }).catch((cause) => {
+        if (active && read === latestRead) {
+          setPlugins([]);
+          setError({ conversationId, message: String(cause instanceof Error ? cause.message : cause) });
+        }
+      });
     };
     refresh();
     window.addEventListener("focus", refresh);
-    return () => { active = false; window.removeEventListener("focus", refresh); };
+    window.addEventListener(PLUGIN_CHANGE_EVENT, refresh);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener(PLUGIN_CHANGE_EVENT, refresh);
+    };
   }, [clients?.plugins, state.account.userId]);
 
   const archiveRecording = useCallback((entry: RecordingArchiveEntry) => {
