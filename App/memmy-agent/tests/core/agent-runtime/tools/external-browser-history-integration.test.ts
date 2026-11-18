@@ -14,6 +14,9 @@ import { reusableHumanActions } from "../../../../src/tools/computer-history/mac
 const resources: Array<() => Promise<unknown> | unknown> = [];
 afterEach(async () => { for (const close of resources.splice(0).reverse()) await close(); });
 
+interface HistoryIntegrationInternals { clearRotationTimer(): void; }
+interface HarnessOptions { rotateSegments?: boolean; startBeforeBoundaryMs?: number; }
+
 async function syntheticPage() {
   const { chromium } = await import("playwright");
   const browserDirectory = getPlaywrightBrowsersPath();
@@ -26,7 +29,7 @@ async function syntheticPage() {
   return browser.newPage();
 }
 
-async function harness(browser: "chrome" | "edge" = "chrome") {
+async function harness(browser: "chrome" | "edge" = "chrome", options: HarnessOptions = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-history-integration-"));
   resources.push(() => fs.rmSync(root, { recursive: true, force: true }));
   const recorder = path.join(root, "stub-recorder.mjs"), settingsFile = path.join(root, "settings.json");
@@ -44,19 +47,63 @@ async function harness(browser: "chrome" | "edge" = "chrome") {
   socket.send(JSON.stringify({ type: "hello", browser, capabilities: ["browserHistory", "playwright"] }));
   await vi.waitFor(() => expect(messages.some(message => message.type === "ready")).toBe(true));
   const connectionId = messages.find(message => message.type === "ready").connectionId;
-  const started = service.startObservation(); connection.refresh();
-  const eventsFile = path.join(root, "recordings", "segments", started.observation.segmentId!, "events.jsonl");
+  const internals = service as unknown as HistoryIntegrationInternals;
+  const clearRotationTimer = () => internals.clearRotationTimer();
+  const startObservation = () => {
+    let started: ReturnType<typeof service.startObservation>;
+    if (options.startBeforeBoundaryMs !== undefined) {
+      const nearBoundary = new Date(Math.floor(Date.now() / 600_000) * 600_000 - options.startBeforeBoundaryMs);
+      // Only the synchronous start sees this clock. Browser timestamps and all timers remain real.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try { vi.setSystemTime(nearBoundary); started = service.startObservation(); }
+      finally { vi.useRealTimers(); }
+    } else started = service.startObservation();
+    // Sensor semantics must not race an unrelated wall-clock segment boundary. Rotation has
+    // explicit coverage below and in computer-history-transitions.test.ts / computer-history-child-process.test.ts.
+    if (!options.rotateSegments) clearRotationTimer();
+    return started;
+  };
+  const resumeObservation = () => {
+    const resumed = service.resumeObservation();
+    if (!options.rotateSegments) clearRotationTimer();
+    return resumed;
+  };
+  const started = startObservation(); connection.refresh();
+  const initialSegmentId = started.observation.segmentId!;
+  const segmentsDirectory = path.join(root, "recordings", "segments");
   const context = { browser, tabId: 7, windowId: 8, frameId: 0, documentId: "fixture-document",
     topUrl: "https://history-fixture.test/form", frameUrl: "https://history-fixture.test/form", privateBrowsing: false, protected: false };
   const send = (message: Record<string, unknown>) => socket.send(JSON.stringify(message));
-  const records = () => fs.existsSync(eventsFile) ? fs.readFileSync(eventsFile, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
+  const recordsInSegment = (segmentId: string) => {
+    const eventsFile = path.join(segmentsDirectory, segmentId, "events.jsonl");
+    return fs.existsSync(eventsFile) ? fs.readFileSync(eventsFile, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
+  };
+  const records = () => fs.readdirSync(segmentsDirectory, { withFileTypes: true }).filter(entry => entry.isDirectory())
+    .map(entry => entry.name).sort().flatMap(recordsInSegment);
   const payload = (id: string) => ({ version: 1, eventId: id, observedAt: Date.now(), generation: service.getBrowserCaptureIntent().generation,
     documentId: context.documentId, action: "change", target: { role: "checkbox", name: "Selected row", checked: true },
     before: { target: { checked: false } }, after: { target: { checked: true }, text: ["One row selected"] } });
   const emit = (event: any, extra: Record<string, unknown> = {}) => send({ type: "browser_history", ...context,
     generation: event.generation, actor: "human", payload: event, ...extra });
   const settle = () => new Promise<void>(resolve => setTimeout(resolve, 20));
-  return { service, bridge, socket, connection, connectionId, messages, context, payload, emit, records, send, settle, settingsFile };
+  return { service, bridge, socket, connection, connectionId, messages, context, payload, emit, records, recordsInSegment,
+    initialSegmentId, startObservation, resumeObservation, clearRotationTimer, send, settle, settingsFile };
+}
+
+function nextSocketMessage(socket: WebSocket, matches: (message: any) => boolean): Promise<any> {
+  return new Promise(resolve => {
+    const cleanup = () => {
+      socket.off("message", listener);
+      const index = resources.indexOf(cleanup);
+      if (index >= 0) resources.splice(index, 1);
+    };
+    const listener = (value: unknown) => {
+      const message = JSON.parse(String(value));
+      if (matches(message)) { cleanup(); resolve(message); }
+    };
+    socket.on("message", listener);
+    resources.push(cleanup);
+  });
 }
 
 async function awaitObservedBrowserEvent(bridge: ExternalBrowserBridge,
@@ -102,7 +149,7 @@ describe("browser History bridge to canonical event stream", () => {
     }
     await h.settle(); expect(h.records()).toHaveLength(1);
     await h.service.pauseObservation(); h.emit(event); await h.settle(); expect(h.records()).toHaveLength(1);
-    h.service.resumeObservation(); h.emit({ ...event, eventId: "late-event" }); await h.settle(); expect(h.records()).toHaveLength(1);
+    h.resumeObservation(); h.emit({ ...event, eventId: "late-event" }); await h.settle(); expect(h.records()).toHaveLength(1);
     const settings = JSON.parse(fs.readFileSync(h.settingsFile, "utf8"));
     settings.observation.rules.push({ scope: "url", urlDomain: "history-fixture.test", behavior: "do_not_observe" });
     fs.writeFileSync(h.settingsFile, JSON.stringify(settings));
@@ -171,7 +218,8 @@ describe("browser History bridge to canonical event stream", () => {
   });
 
   it("records a held key once, ignores pages scrolling themselves, bounds text and masks card numbers", async () => {
-    const h = await harness();
+    const h = await harness("chrome", { startBeforeBoundaryMs: 3_000 });
+    const initialGeneration = h.service.getBrowserCaptureIntent().generation;
     const page = await syntheticPage();
     await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: `<main id="feed" style="height:120px;overflow:auto">
       <div style="height:4000px">Live feed</div></main><section id="article">${"Long article text. ".repeat(50_000)}</section>
@@ -213,6 +261,88 @@ describe("browser History bridge to canonical event stream", () => {
     await awaitObservedBrowserInput(h.bridge, "Card number", () => page.fill("input[name=cardNumber]", "4111 1111 1111 1111"));
     expect(h.records().some(event => event.details.action === "input")).toBe(true);
     expect(JSON.stringify(h.records())).not.toContain("4111 1111 1111 1111");
+    expect(h.service.getBrowserCaptureIntent().generation).toBe(initialGeneration);
+  }, 20_000);
+
+  it("rejects delayed browser events across a real segment rotation and records a reauthorized sensor in the new segment", async () => {
+    let h!: Awaited<ReturnType<typeof harness>>;
+    let releaseOldEvent!: () => void, oldPublished!: () => void;
+    let receiveOldEvent!: (capture: { event: BrowserSemanticHistoryEvent; enabled: boolean; generation: string | null }) => void;
+    const release = new Promise<void>(resolve => { releaseOldEvent = resolve; });
+    const published = new Promise<void>(resolve => { oldPublished = resolve; });
+    const observedOldEvent = new Promise<{ event: BrowserSemanticHistoryEvent; enabled: boolean; generation: string | null }>(resolve => { receiveOldEvent = resolve; });
+    let publicationActive = true;
+    const closePublication = () => { publicationActive = false; releaseOldEvent(); };
+    resources.push(closePublication);
+    const browserResourceIndex = resources.length;
+    const page = await syntheticPage();
+    const closeBrowser = resources[browserResourceIndex];
+    const orderBrowserCleanup = () => {
+      // These also remain registered when cold setup or harness creation throws.
+      for (const cleanup of [closeBrowser, closePublication]) {
+        const index = resources.indexOf(cleanup);
+        if (index >= 0) resources.splice(index, 1);
+        resources.push(cleanup);
+      }
+    };
+    orderBrowserCleanup();
+    await page.route("**/*", route => route.fulfill({ contentType: "text/html", body: '<button id="rotate">Rotate fixture</button>' }));
+    await page.goto("https://history-fixture.test/form");
+    await page.exposeFunction("__memmyFixturePublish", async (encoded: string) => {
+      const event = JSON.parse(encoded) as BrowserSemanticHistoryEvent;
+      if (event.generation === initialGeneration && event.action === "click" && event.phase === "observed") {
+        const current = h.service.getBrowserCaptureIntent();
+        receiveOldEvent({ event, enabled: current.enabled, generation: current.generation });
+        await release;
+        if (publicationActive) h.emit(event);
+        oldPublished();
+      } else if (publicationActive) h.emit(event);
+    });
+    // Finish cold Chromium/navigation/binding setup before arming the real three-second rotation.
+    try { h = await harness("chrome", { rotateSegments: true, startBeforeBoundaryMs: 3_000 }); }
+    finally { orderBrowserCleanup(); }
+    const initialGeneration = h.service.getBrowserCaptureIntent().generation!;
+    const nextIntent = nextSocketMessage(h.socket, message => {
+      const current = h.service.getBrowserCaptureIntent();
+      if (message.type !== "browser_history_intent" || message.enabled !== true || !message.generation
+        || message.generation === initialGeneration || !current.enabled || current.generation !== message.generation) return false;
+      // The first real rotation is the behavior under test; a second wall-clock boundary is unrelated.
+      h.clearRotationTimer();
+      return true;
+    });
+    await page.evaluate(browserHistorySensorScript({ generation: initialGeneration,
+      documentId: h.context.documentId, captureText: true, bindingName: "__memmyFixturePublish" }));
+    await page.click("#rotate");
+    const captured = await observedOldEvent;
+    expect(captured.enabled).toBe(true);
+    expect(captured.generation).toBe(initialGeneration);
+    const stale = captured.event;
+    const rotatedMessage = await nextIntent;
+    const currentIntent = h.service.getBrowserCaptureIntent();
+    expect(currentIntent.enabled).toBe(true);
+    expect(currentIntent.generation).toBe(rotatedMessage.generation);
+    expect(currentIntent.generation).not.toBe(initialGeneration);
+    expect(stale).toMatchObject({ generation: initialGeneration, documentId: h.context.documentId,
+      action: "click", phase: "observed", target: { tag: "button" } });
+    expect(Date.now() - stale.observedAt).toBeLessThan(15_000);
+    expect(stale.observedAt).toBeLessThanOrEqual(Date.now() + 1_000);
+    const checkedAfterOldEvent = nextSocketMessage(h.socket, message => message.type === "browser_history_config" && message.id === "after-rotated-event");
+    releaseOldEvent();
+    await published;
+    // WebSocket ordering makes this reply a barrier after the unchanged old payload was processed.
+    h.send({ type: "browser_history_config_request", id: "after-rotated-event", ...h.context });
+    expect(await checkedAfterOldEvent).toMatchObject({ enabled: true, generation: currentIntent.generation });
+    expect(h.records().some(event => event.details.eventId === stale.eventId)).toBe(false);
+    const generation = h.service.getBrowserCaptureIntent().generation!;
+    await page.evaluate(browserHistorySensorScript({ generation,
+      documentId: h.context.documentId, captureText: true, bindingName: "__memmyFixturePublish" }));
+    const fresh = await awaitObservedBrowserEvent(h.bridge, event => event.action === "click" && event.target?.tag === "button"
+      && event.generation === generation && event.documentId === h.context.documentId, () => page.click("#rotate"));
+    const nextSegmentId = generation.split(":")[0];
+    expect(nextSegmentId).not.toBe(h.initialSegmentId);
+    expect(h.recordsInSegment(h.initialSegmentId).some(event => event.details.eventId === fresh.eventId)).toBe(false);
+    expect(h.recordsInSegment(nextSegmentId).find(event => event.details.eventId === fresh.eventId)?.details)
+      .toMatchObject({ eventId: fresh.eventId, documentId: h.context.documentId, action: "click", phase: "observed", target: { tag: "button" } });
   }, 20_000);
 
   it("captures actual checkbox/input transitions from a synthetic headless Chromium page without an Agent session", async () => {
@@ -300,7 +430,7 @@ describe("browser History bridge to canonical event stream", () => {
     const count = h.records().length;
     await authorizeCurrentDocument("paused-document"); await h.settle();
     expect(h.records()).toHaveLength(count);
-    h.service.resumeObservation();
+    h.resumeObservation();
     const settings = JSON.parse(fs.readFileSync(h.settingsFile, "utf8"));
     settings.observation.rules.push({ scope: "url", urlDomain: "history-fixture.test", behavior: "do_not_observe" });
     fs.writeFileSync(h.settingsFile, JSON.stringify(settings));
