@@ -1183,8 +1183,8 @@ describe("collab service", () => {
       .toContain(await svc.localProjectIdFor("p-1"));
   });
 
-  // The periodic sync runs inside the write queue and can spend up to a minute per session on a slow Memory service.
-  // A delete must not sit behind it: the cloud already dropped the project, the links rewrite follows in queue order.
+  // The initial save uploads in the background; drain it before blocking the periodic sync's upload.
+  // A delete must finish while that upload is blocked, and its cleared links must survive when sync finishes.
   it("answers a delete without waiting for a slow sync to release the write queue", async () => {
     let updatedAt = "2026-10-22T01:00:00.000Z";
     let hangUploads = false;
@@ -1209,7 +1209,8 @@ describe("collab service", () => {
     });
     const svc = service(fetcher);
     await svc.saveLinks("p-1", { groups: [], sessions: [{ sourceId: "claude_code", conversationId: "a1" }] });
-    // A newer turn makes the session upload again, and this upload is the one that stalls holding the queue.
+    await waitForUploads(svc, "p-1");
+    // A newer turn makes the completed session upload again; block only this periodic sync's upload.
     updatedAt = "2026-10-22T02:00:00.000Z";
     hangUploads = true;
 
