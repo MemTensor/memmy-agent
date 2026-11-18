@@ -377,6 +377,7 @@ async function submitSourceTurn(turn, pending, payload) {
   const result = await completeSourceTurn({
     configUrl: CONFIG_URL,
     turn,
+    recallTurnId: normalizeText(pending && pending.turnId) || undefined,
     sessionId: normalizeText(pending && pending.sessionId) || undefined,
     sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined,
     adapterId: "memmy-" + SOURCE + "-hook"

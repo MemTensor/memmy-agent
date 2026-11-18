@@ -366,6 +366,7 @@ const createMemmyHooks = async ({ client, directory, worktree, resolveAgent, mod
     const result = await completeSourceTurn({
       configUrl: CONFIG_URL,
       turn: parsed.turn,
+      recallTurnId: normalizeText(pending.turnId) || undefined,
       sessionId: normalizeText(captureSession) || undefined,
       sourceMemoryIds: pending.sourceMemoryIds,
       profileId: parsed.turn.profileId,

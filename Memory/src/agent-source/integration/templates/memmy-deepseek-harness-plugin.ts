@@ -266,6 +266,7 @@ async function completeTurn(memorySessionIds, session, turn, pending) {
   await completeSourceTurn({
     configUrl: CONFIG_URL,
     turn: parsed.turn,
+    recallTurnId: cleanText(pending && pending.turnId) || undefined,
     sessionId: cleanText(pending && pending.sessionId) || runtimeSession.sessionId,
     sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined,
     profileId: parsed.turn.profileId || session.header && session.header.agentPreset || "main",

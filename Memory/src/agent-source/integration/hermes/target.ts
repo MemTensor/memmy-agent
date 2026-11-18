@@ -1173,7 +1173,8 @@ class MemmyMemoryProvider(MemoryProvider):
         features = health.get("features") if isinstance(health.get("features"), dict) else {}
         versions = features.get("l3WorldModelProtocolVersions") if isinstance(features, dict) else []
         supports_v2 = isinstance(versions, list) and 2 in versions
-        workspace_root = _hermes_workspace_root(external_session_id)
+        launch_folder = _hermes_workspace_root(external_session_id)
+        workspace_root = launch_folder
         if workspace_root and not re.fullmatch(r"[a-f0-9]{64}", _clean_text(runtime.get("workspaceHostId"))):
             workspace_root = None
         session_key = "hermes-memory-" + external_session_id
@@ -1184,6 +1185,8 @@ class MemmyMemoryProvider(MemoryProvider):
                 "l3WorldModelProtocolVersion": 2,
                 "l3WorldModelTransition": "allow_legacy_rollover",
             }
+            if launch_folder:
+                body["meta"] = {"launchFolder": launch_folder}
             if workspace_root:
                 body["workspaceUri"] = Path(workspace_root).as_uri()
                 body["workspaceHostId"] = runtime.get("workspaceHostId")
@@ -1192,7 +1195,8 @@ class MemmyMemoryProvider(MemoryProvider):
         else:
             opened = _memmy_post("/api/v1/sessions/open", {
                 "sessionId": session_key,
-                "workspacePath": workspace_root or None,
+                "source": "hermes",
+                "workspacePath": launch_folder or None,
             })
             protocol = "legacy"
         memory_session_id = str(opened.get("sessionId") or "")
@@ -1227,6 +1231,7 @@ class MemmyMemoryProvider(MemoryProvider):
                 "source": "hermes",
                 "adapterId": "memmy-hermes-adapter",
                 "sessionId": state["sessionId"],
+                "recallTurnId": turn.get("turnId") if isinstance(turn, dict) else None,
                 "sourceMemoryIds": turn.get("sourceMemoryIds") if isinstance(turn, dict) else None,
                 "namespace": {
                     "source": "hermes",
@@ -1466,7 +1471,7 @@ def _session_post(state: Dict[str, Any], path: str, body: Dict[str, Any]) -> Dic
     if state.get("protocol") == "v2":
         envelope = _runtime_envelope(state["runtime"], state["sessionKey"], state.get("projectId"))
         return _memmy_post(path, {**envelope, **body})
-    return _memmy_post(path, body)
+    return _memmy_post(path, {"source": "hermes", **body})
 
 
 def _get_transport(envelope: Dict[str, Any], session_id: str = "") -> Dict[str, Dict[str, str]]:

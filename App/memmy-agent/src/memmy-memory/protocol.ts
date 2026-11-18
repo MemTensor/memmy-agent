@@ -12,7 +12,18 @@ const MEMORY_CONTEXT_TAGS = [
 export type MemmyMemoryReplaySnapshot = { turnId: string; content: Record<string, any>[] };
 
 /** Bound to one runner invocation, never persisted as conversation history. */
-export type MemmyMemoryTurnContext = { turnId: string; requestOnlyContext?: string };
+export type RecallBlock = { fingerprint: string; text: string };
+export type MemmyMemoryTurnContext = {
+  turnId: string;
+  requestOnlyContext?: string;
+  recall?: {
+    generation: string;
+    blocks: RecallBlock[];
+    invalidate: () => void;
+    refresh: () => Promise<void>;
+    compacted?: boolean;
+  };
+};
 
 export type MemmyMemoryPromptKind = "user_request" | "user_followup" | "runtime_notification" | "hook_continuation"
   | "length_recovery" | "empty_recovery" | "delivery_retry" | "max_iterations";
@@ -49,8 +60,21 @@ export function withMemmyMemoryTurnContext(
   if (!context) return messages;
   const declaration = `<memmy_runtime_context active_turn_id="${escapeAttribute(context.turnId)}" />`;
   const projected: Record<string, any>[] = [];
+  const visible = new Map<string, string>();
+  const blocks = new Map(context.recall?.blocks.map(block => [block.fingerprint, block.text]));
   for (const message of messages) {
-    const next = projectMemmyMemoryPrompt(message);
+    let next = projectMemmyMemoryPrompt(message);
+    if (next.role === "user" && Array.isArray(next.content) && next.content.some(b => b?.memmyRecall)) {
+      const content = next.content.flatMap((block: Record<string, any>) => {
+        if (!block.memmyRecall) return [block];
+        const { fingerprint, owner, generation } = block.memmyRecall;
+        const text = blocks.get(fingerprint);
+        if (!text || generation !== context.recall?.generation || visible.has(fingerprint)) return [];
+        visible.set(fingerprint, owner);
+        return [{ type: "text", text: renderMemmyMemoryContext(text, "turn_start", owner).replace(" source=", ` fingerprint="${fingerprint}" source=`) }];
+      });
+      next = { ...next, content };
+    }
     const previous = projected.at(-1);
     // Providers may otherwise replace adjacent multimodal user messages. Merge
     // their content here, preserving each request/internal-prompt boundary.
@@ -63,7 +87,13 @@ export function withMemmyMemoryTurnContext(
   // The changing scope belongs at the request tail, after all user/tool data.
   // System instructions and retained history must remain a reusable prefix.
   // Background recall has no user owner and stays in this request-only suffix.
-  const suffix = [context.requestOnlyContext, declaration].filter(Boolean).join("\n\n");
+  const references = (context.recall?.blocks ?? []).flatMap(block => {
+    const owner = visible.get(block.fingerprint);
+    if (!owner) return [renderMemmyMemoryContext(block.text, "turn_start", context.turnId)];
+    if (owner === context.turnId) return [];
+    return [`<memmy_memory_ref${turnIdAttribute(context.turnId)} from_turn="${escapeAttribute(owner)}" fingerprint="${block.fingerprint}" />`];
+  });
+  const suffix = [context.requestOnlyContext, ...references, declaration].filter(Boolean).join("\n\n");
   const last = projected.at(-1);
   if (last?.role === "user") {
     // Preserve multimodal content without introducing adjacent user messages.

@@ -117,6 +117,7 @@ export async function openRuntimeSession(input: OpenRuntimeSessionInput): Promis
       ...envelope,
       l3WorldModelProtocolVersion: 2,
       l3WorldModelTransition: input.transition,
+      meta: resolvedWorkspaceRoot ? { launchFolder: resolvedWorkspaceRoot } : undefined,
       workspaceUri: workspaceUri || undefined,
       workspaceHostId: workspaceUri ? config.workspaceHostId : undefined,
     })));
@@ -266,6 +267,7 @@ export async function completeRuntimeTurn(
 export async function completeSourceTurn(input: {
   configUrl: URL;
   turn: SourceTurn;
+  recallTurnId?: string;
   sessionId?: string;
   sourceMemoryIds?: string[];
   profileId?: string;
@@ -283,6 +285,7 @@ export async function completeSourceTurn(input: {
       sessionKey: input.turn.conversationId,
     },
     sessionId: input.sessionId,
+    recallTurnId: input.recallTurnId,
     sourceMemoryIds: input.sourceMemoryIds,
     adapterId: input.adapterId || `memmy-${input.turn.source}-hook`,
   })));
