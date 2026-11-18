@@ -134,7 +134,7 @@ export function JoinProjectModal(props: {
         props.onJoined(result.project);
       }
     } catch (cause) {
-      // 加入阶段能改的错（名字重了、成员满了）写在字段下面，别的错误留在弹窗底部。
+      // 加入阶段能改的错（比如成员满了）写在字段下面，别的错误留在弹窗底部。
       const message = messageOf(cause);
       if (nickname.trim()) setJoinError(message);
       else setError(message);
@@ -218,7 +218,6 @@ export function JoinProjectModal(props: {
                   }}
                 />
                 {joinError ? <p className={styles.joinNicknameError} role="alert">{joinError}</p> : null}
-                <small className={styles.fieldHint}>{t("collab.join.nicknameHint")}</small>
               </div>
             )}
             {preview.status === "member" ? null : (

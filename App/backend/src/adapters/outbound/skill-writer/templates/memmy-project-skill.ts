@@ -273,6 +273,7 @@ export function renderMemmyProjectSkillFile(options: MemmyProjectSkillOptions = 
     "- 不要写整句，也不要写「我」「最新」「进展」「昨天」这类泛词：任一词命中就会列出，泛词会带出无关任务。",
     "- 只记得一句原话时，把原话里最有区分度的词直接当关键词，不用先猜标题。",
     "- 成员名只放在 `--member`，不放进关键词。",
+    "- 项目里可能有同名成员：`--member` 加名字后结果里出现多个不同成员的任务，说明有重名；把他们的任务都列出来告知用户，再按与用户问题相关的内容挑读。",
     "- 时间放在 `--since`，不放进关键词。",
     // TODO(human): add one line that maps how people say a time (今天、昨天、这周、上周、「最近」) to a --since window.
     "- `--project` 填结果中显示的项目名称，不填任务标题；用户没提项目时不加。",

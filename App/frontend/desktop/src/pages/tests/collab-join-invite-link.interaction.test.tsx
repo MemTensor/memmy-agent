@@ -89,9 +89,8 @@ describe("join dialog opened from an invite link", () => {
     expect(input).toBeTruthy();
     // 内联提示说清改名的范围：全局生效，其他项目一起变。
     expect(input!.placeholder).toBe("修改后全局生效，其他项目中的昵称同步变更");
-    // 「可选」写在标签里，与本机目录同一种写法；输入框下方说明这个名字为什么重要。
+    // 「可选」写在标签里，与本机目录同一种写法。输入框下面不再放说明。
     expect(document.body.textContent).toContain("修改昵称（可选）");
-    expect(document.body.textContent).toContain("请使用易于识别的昵称");
 
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;

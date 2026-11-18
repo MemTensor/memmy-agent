@@ -366,13 +366,6 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
     return reply.send(await options.collab.joinProject(input.reference, input.directory, input.nickname));
   }));
 
-  // 改名前的检查：会跟着变的项目，以及其中已经有人占了这个名字的项目。
-  // 规则在云端实现一次，桌面端只根据返回结果决定能不能改。
-  app.get("/api/collab/nickname", guard, withErrorEnvelope(async (request, reply) => {
-    const { value } = request.query as { value?: string };
-    return reply.send(await options.collab.checkNickname(value ?? ""));
-  }));
-
   app.delete<{ Params: { projectId: string; sessionId: string } }>("/api/collab/projects/:projectId/sessions/:sessionId", guard, withErrorEnvelope(async (request, reply) => {
     const params = request.params as { projectId: string; sessionId: string };
     return reply.send(await options.collab.removeSession(ProjectIdSchema.parse(params.projectId), ProjectIdSchema.parse(params.sessionId)));

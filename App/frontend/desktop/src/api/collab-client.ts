@@ -303,13 +303,6 @@ export type CollabInvite = z.infer<typeof InviteSchema>;
 export type CollabInvitePreview = z.infer<typeof InvitePreviewSchema>;
 export type CollabJoinResult = z.infer<typeof JoinResultSchema>;
 
-/** 改名的影响面：昵称会跟着变的项目，以及被哪些项目里的同名成员拦住。 */
-const NicknameCheckSchema = z.object({
-  projects: z.array(z.object({ id: z.string(), name: z.string(), memberCount: z.number() })),
-  conflicts: z.array(z.object({ projectId: z.string(), projectName: z.string(), memberName: z.string() }))
-});
-
-export type CollabNicknameCheck = z.infer<typeof NicknameCheckSchema>;
 export type CollabKnowledgeView = z.infer<typeof KnowledgeViewSchema>;
 /** 授权状态与设置里列出的 Agent。 */
 export type CollabAgentAccessView = z.infer<typeof CollabAgentAccessViewSchema>;
@@ -431,8 +424,6 @@ export interface CollabClient {
   previewInvite(reference: string): Promise<CollabInvitePreview>;
   /** Joins at once or applies, as the project's join mode says; `directory` is where its tasks will run. */
   joinProject(reference: string, directory?: string, nickname?: string): Promise<CollabJoinResult>;
-  /** 改名前的检查：会跟着变的项目与撞名的项目，决定能不能改、要不要先确认。 */
-  checkNickname(nickname: string): Promise<CollabNicknameCheck>;
 }
 
 /** 只取状态部分：安装结果与状态同一个回应，界面把它们分开用。 */
@@ -853,14 +844,6 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
           ...(wanted ? { nickname: wanted } : {})
         }
       });
-    },
-
-    async checkNickname(nickname) {
-      return requestJson({
-        config,
-        path: `/api/collab/nickname?value=${encodeURIComponent(nickname.trim())}`,
-        schema: NicknameCheckSchema
-      });
-    },
+    }
   };
 }
