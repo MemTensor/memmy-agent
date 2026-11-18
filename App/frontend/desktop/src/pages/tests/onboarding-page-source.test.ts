@@ -324,9 +324,9 @@ describe("OnboardingPage 赠送活动开关", () => {
     const source = readFileSync(appFrameSourcePath, "utf8");
 
     expect(source).toContain("state.bootstrap?.promotions?.improvementGift === true");
-    expect(source).toContain("&& (state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0) > 0");
+    expect(source).toContain("&& Number(state.bootstrap?.promotions?.improvementGiftRewardCredits ?? 0) > 0");
     expect(source).toContain(
-      "giftTokens={state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0}"
+      'giftCredits={state.bootstrap?.promotions?.improvementGiftRewardCredits ?? "0.00"}'
     );
   });
 
@@ -335,7 +335,7 @@ describe("OnboardingPage 赠送活动开关", () => {
 
     expect(modalSource).not.toContain("props.showGift ?? true");
     const gateIndex = modalSource.indexOf("props.showGift");
-    const benefitIndex = modalSource.indexOf('"onboarding.improvement.benefitToken"');
+    const benefitIndex = modalSource.indexOf('"onboarding.improvement.benefitCredits"');
     expect(gateIndex).toBeGreaterThanOrEqual(0);
     expect(benefitIndex).toBeGreaterThan(gateIndex);
   });

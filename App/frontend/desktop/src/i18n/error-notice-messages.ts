@@ -5,6 +5,8 @@ export const zhCNErrorNoticeMessages = {
   "agent.error.authFailed": "API 密钥无效或已过期，请检查后重试",
   "agent.error.loginExpired": "登录已过期，请重新登录",
   "agent.error.rateLimited": "请求过于频繁，请稍后再试",
+  "agent.error.creditsReserved": "积分暂被其他调用占用，请稍后重试",
+  "agent.error.creditsUncertain": "调用结果尚待核实，任务已暂停。请勿重复提交；确认结果后再继续。",
   "agent.error.quotaExceeded": "当前模型 Token 余额不足，请更换模型后重试",
   "agent.error.imageInputUnsupported": "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
   "agent.error.imageAnalysisFailed": "图片解析失败，请稍后重试",
@@ -35,6 +37,7 @@ export const zhCNErrorNoticeMessages = {
   "memory.memories.processing.retryEndpointUnavailable": "本地记忆服务尚未加载重试功能，请完全退出并重新打开 Memmy 后再试",
   "memory.memories.processing.missing": "没有找到这条记忆的处理状态",
   "memory.memories.processing.failureTitle": "这条记忆处理失败",
+  "memory.memories.processing.creditsUncertain": "调用结果尚待核实，记忆加工已停止。原始内容和已完成步骤已保留，不会自动重复请求。",
   "memory.memories.processing.quotaExhaustedTitle": "当前模型 Token 余额不足，记忆处理失败，请更换模型后重试",
   "memory.memories.processing.autoRetryScheduledTitle": "记忆处理失败，稍后将自动重试"
 } as const;
@@ -45,6 +48,8 @@ export const enUSErrorNoticeMessages = {
   "agent.error.authFailed": "The API key is invalid or expired. Check your settings and try again.",
   "agent.error.loginExpired": "Your login has expired. Please sign in again.",
   "agent.error.rateLimited": "Too many requests. Please wait a moment and try again.",
+  "agent.error.creditsReserved": "Credits are reserved by another request. Please try again shortly.",
+  "agent.error.creditsUncertain": "The call outcome is not yet confirmed, so the task is paused. Do not resubmit it; confirm the result before continuing.",
   "agent.error.quotaExceeded": "The current model has insufficient tokens. Switch models and try again.",
   "agent.error.imageInputUnsupported": "The current model does not support image input. Switch to a multimodal model and try again.",
   "agent.error.imageAnalysisFailed": "Image analysis failed. Please try again later.",
@@ -75,6 +80,7 @@ export const enUSErrorNoticeMessages = {
   "memory.memories.processing.retryEndpointUnavailable": "The local memory service has not loaded retry support. Quit and reopen Memmy, then try again.",
   "memory.memories.processing.missing": "Processing status is unavailable for this memory",
   "memory.memories.processing.failureTitle": "This memory could not be processed",
+  "memory.memories.processing.creditsUncertain": "The call outcome is not yet confirmed, so memory processing has stopped. Source content and completed steps are saved. The request will not repeat automatically.",
   "memory.memories.processing.quotaExhaustedTitle": "The current model has insufficient tokens. Memory processing failed. Switch models and try again.",
   "memory.memories.processing.autoRetryScheduledTitle": "Memory processing failed. It will retry automatically later."
 } satisfies Record<keyof typeof zhCNErrorNoticeMessages, string>;

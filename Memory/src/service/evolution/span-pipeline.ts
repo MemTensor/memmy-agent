@@ -8,6 +8,7 @@ import {
 import { MEMORY_SUMMARY_MAX_TOKENS, type MemmyConfig } from "../../config/index.js";
 import { createMemoryLogger,memoryErrorFields } from "../../logging/logger.js";
 import type { LlmClient } from "../../model/types.js";
+import { isCreditModelError } from "../../model/http.js";
 import {
   kindFromMemory,
   type EpisodeRecord,
@@ -323,6 +324,7 @@ private async runBatchReflectionWindowPass(
           ok = true;
           break;
         } catch (error) {
+          if (isCreditModelError(error)) throw error;
           pipelineLogger.warn("batch_window.failed", {
             operation: BATCH_REFLECTION_OPERATION,
             pipeline: "reflection.batch_score",
@@ -604,6 +606,7 @@ private async synthesizeTraceReflection(input: {
       const cleaned = sanitizeReflectionText(text);
       return cleaned && cleaned !== "NO_REFLECTION" ? clip(cleaned, 1500) : null;
     } catch (error) {
+      if (isCreditModelError(error)) throw error;
       pipelineLogger.warn("fallback.used", {
         operation: "capture.reflection.synth",
         pipeline: "reflection.synthesis",
@@ -713,6 +716,7 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
     try {
       return await summarizeWith(this.deps.llm);
     } catch (primaryError) {
+      if (isCreditModelError(primaryError)) throw primaryError;
       const logContext = {
         operation: "capture.summarize",
         pipeline: "trace.summary",
@@ -731,6 +735,7 @@ private reflectionDownstreamPreview(job: EvolutionJobRecord, memory: MemoryRow):
           pipelineLogger.info("summary.fallback_succeeded", logContext);
           return summary;
         } catch (fallbackError) {
+          if (isCreditModelError(fallbackError)) throw fallbackError;
           pipelineLogger.error("summary.fallback_failed", {
             ...logContext,
             primaryErrorMessage: primaryError instanceof Error ? primaryError.message : String(primaryError),

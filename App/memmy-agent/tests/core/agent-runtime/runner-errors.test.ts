@@ -20,6 +20,31 @@ class QueueProvider extends LLMProvider {
 }
 
 describe("AgentRunner errors", () => {
+  it.each(["credit_insufficient", "credit_balance_reserved"])("retains the completed call and tools when the next call is denied: %s", async (code) => {
+    const provider = new QueueProvider([
+      new LLMResponse({content:"completed paid call",toolCalls:[new ToolCallRequest({id:"done-tool",name:"read_file",arguments:{path:"a"}})]}),
+      new LLMResponse({content:`Error calling LLM: ${code}`,finishReason:"error",errorCode:code,
+        errorCategory:code === "credit_insufficient" ? "quota_exhausted" : null,errorShouldRetry:false}),
+    ]);
+    let toolRuns=0;
+    const tools={getDefinitions:()=>[],execute:async()=>{toolRuns++;return "saved tool result";}};
+    const result=await new AgentRunner(provider).run(new AgentRunSpec({messages:[{role:"user",content:"task"}],tools,maxIterations:4}));
+    expect(result.stopReason).toBe("error");
+    expect(toolRuns).toBe(1); expect(provider.calls).toHaveLength(2);
+    expect(result.messages).toContainEqual(expect.objectContaining({role:"tool",tool_call_id:"done-tool",content:"saved tool result"}));
+    const continued = new QueueProvider([new LLMResponse({content:"finished",finishReason:"stop"})]);
+    await new AgentRunner(continued).run(new AgentRunSpec({messages:[...result.messages,{role:"user",content:"continue"}],tools}));
+    expect(toolRuns).toBe(1);
+    expect(continued.calls[0].messages).toContainEqual(expect.objectContaining({role:"tool",tool_call_id:"done-tool",content:"saved tool result"}));
+  });
+  it("preserves already generated text in continuation context after insufficient credits", async () => {
+    const error = new LLMResponse({ content: "积分不足", finishReason: "error", errorCategory: "quota_exhausted" });
+    error.partialContent = "generated before exhaustion";
+    const result = await new AgentRunner(new QueueProvider([error])).run(new AgentRunSpec({ messages: [{ role: "user", content: "hi" }] }));
+    expect(result.stopReason).toBe("error");
+    expect(result.messages).toContainEqual(expect.objectContaining({ role: "assistant", content: "generated before exhaustion" }));
+  });
+
   it("throws when no provider is available", async () => {
     await expect(new AgentRunner().run(new AgentRunSpec({ messages: [{ role: "user", content: "hi" }] }))).rejects.toThrow(
       "provider is required",

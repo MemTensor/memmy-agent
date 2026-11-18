@@ -9021,6 +9021,15 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
   to { opacity: 1; transform: translateY(0); }
 }
 
+.memmy-notification--leaving {
+  pointer-events: none;
+  animation: memmy-notification-out 240ms ease-in forwards;
+}
+
+@keyframes memmy-notification-out {
+  to { opacity: 0; transform: translateX(calc(100% + var(--space-5))); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .memmy-notification { animation: none; }
 }

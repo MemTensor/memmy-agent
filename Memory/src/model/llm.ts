@@ -2,7 +2,7 @@ import { get_encoding } from "tiktoken";
 import { MEMORY_SUMMARY_MAX_TOKENS, type LlmConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { resolveMemoryAgentRegion } from "./agent-region.js";
-import { bearer, ModelHttpError, postJsonWithRetry, trimTrailingSlash } from "./http.js";
+import { bearer, isCreditModelError, ModelHttpError, postJsonWithRetry, trimTrailingSlash } from "./http.js";
 import {
   HttpByokTokenUsageRecorder,
   extractModelTokenUsage,
@@ -390,7 +390,7 @@ class HttpLlmClient implements LlmClient {
     try {
       response = await request(automaticResponseFormat);
     } catch (error) {
-      if (automaticResponseFormat !== "json_object" || !requiresTextResponseFormat(error)) {
+      if (isCreditModelError(error) || automaticResponseFormat !== "json_object" || !requiresTextResponseFormat(error)) {
         throw error;
       }
       this.openAiJsonResponseFormat = "text";

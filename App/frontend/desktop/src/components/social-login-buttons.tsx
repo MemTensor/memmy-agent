@@ -7,15 +7,18 @@ const SOCIAL_LOGIN_BUTTONS_ENABLED = true;
 
 export interface SocialLoginButtonsProps {
   pendingProvider: SocialLoginProvider | null;
+  waitingForAuthorization?: boolean;
   disabled?: boolean;
   showDivider?: boolean;
   feedback?: { text: string; tone: "error" | "success" } | null;
   onLogin: (provider: SocialLoginProvider) => void;
+  onCancel: () => void;
 }
 
 export function SocialLoginButtons(props: SocialLoginButtonsProps) {
   const { t } = useTranslation();
   if (!SOCIAL_LOGIN_BUTTONS_ENABLED) return null;
+  const pendingLabel = t(props.waitingForAuthorization ? "login.social.authorizing" : "login.social.opening");
 
   return (
     <div className="social-login-actions">
@@ -23,14 +26,14 @@ export function SocialLoginButtons(props: SocialLoginButtonsProps) {
       <div className="social-login-actions__buttons">
         <SocialLoginButton
           provider="google"
-          label={props.pendingProvider === "google" ? t("login.social.opening") : t("login.social.google")}
+          label={props.pendingProvider === "google" ? pendingLabel : t("login.social.google")}
           icon={<GoogleMark />}
           disabled={props.disabled || Boolean(props.pendingProvider)}
           onClick={() => props.onLogin("google")}
         />
         <SocialLoginButton
           provider="github"
-          label={props.pendingProvider === "github" ? t("login.social.opening") : t("login.social.github")}
+          label={props.pendingProvider === "github" ? pendingLabel : t("login.social.github")}
           icon={<GitHubMark />}
           disabled={props.disabled || Boolean(props.pendingProvider)}
           onClick={() => props.onLogin("github")}
@@ -44,6 +47,11 @@ export function SocialLoginButtons(props: SocialLoginButtonsProps) {
         >
           {props.feedback.text}
         </p>
+      ) : null}
+      {props.pendingProvider ? (
+        <button type="button" onClick={props.onCancel} className="mx-auto block rounded px-3 py-2 text-sm text-text-ink underline underline-offset-4 focus-visible:outline focus-visible:outline-2">
+          {t("login.social.cancelWaiting")}
+        </button>
       ) : null}
     </div>
   );

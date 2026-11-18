@@ -113,7 +113,7 @@ export function classifyQuotaExhaustion(
 
   switch (provider) {
     case "memmy_account":
-      return errorCode === "40309" ? "quota_exhausted" : null;
+      return ["credit_insufficient", "40308", "40309"].includes(errorCode ?? "") ? "quota_exhausted" : null;
     case "openai":
       if (errorCode && OPENAI_QUOTA_CODES.has(errorCode)) return "quota_exhausted";
       return errorCode == null && errorType === "insufficient_quota"

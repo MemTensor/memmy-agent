@@ -69,6 +69,7 @@
   line-height: 1.5;
 }
 .actions { display: flex; justify-content: center; gap: 10px; margin-top: 25px; }
+.meta strong { font-weight: 700; color: color-mix(in srgb, var(--color-text-ink) 78%, white); }
 .action {
   display: inline-flex;
   flex: 0 1 156px;

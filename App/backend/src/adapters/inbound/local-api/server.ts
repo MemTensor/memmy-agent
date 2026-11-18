@@ -7,6 +7,7 @@ import { registerKnowledgeRoutes } from "@memmy/knowledge/routes";
 import type { PermissionManager } from "../../../permission/index.js";
 import type { BackendServices } from "../../../services/index.js";
 import { registerAccountRoutes } from "./routes/account.js";
+import { registerCreditsRoutes } from "./routes/credits.js";
 import { registerTokenQuotaRoutes } from "./routes/token-quota.js";
 import { registerAppConfigRoutes } from "./routes/app-config.js";
 import { registerAgentSourceRoutes } from "./routes/agent-sources.js";
@@ -106,6 +107,7 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     appConfig: options.services.appConfig,
     authenticateRuntimeToken
   });
+  registerCreditsRoutes(app, { credits: options.services.credits, authenticateRuntimeToken });
   registerTokenQuotaRoutes(app, {
     tokenQuota: options.services.tokenQuota,
     authenticateRuntimeToken

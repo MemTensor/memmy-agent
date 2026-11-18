@@ -22,7 +22,32 @@ export const API_ERROR_CODES = [
   "toolkit_unsupported",
   "model_config_changed",
   "config_write_busy",
-  "account_model_preset_conflict"
+  "account_model_preset_conflict",
+  "CREDIT_INSUFFICIENT",
+  "CREDIT_BALANCE_RESERVED",
+  "ALREADY_PRO",
+  "INVALID_APPLICATION",
+  "ACCOUNT_NOT_REGISTERED",
+  "BUSINESS_REQUEST_REUSED",
+  "LEGACY_QUOTA_RETIRED",
+  "PLAN_APPLICATION_NOT_ELIGIBLE",
+  "REWARD_NOT_CONFIGURED",
+  "CHECKIN_ALREADY_CLAIMED",
+  "VERIFY_CODE_INVALID",
+  "INVITATION_CODE_INVALID",
+  "EXPORT_FAILED",
+  "OAUTH_PROVIDER_UNSUPPORTED",
+  "REDIRECT_URI_NOT_ALLOWED",
+  "VOUCHER_INVALID",
+  "VOUCHER_ALREADY_REDEEMED",
+  "VOUCHER_EXPIRED",
+  "VOUCHER_EXHAUSTED",
+  "VOUCHER_INELIGIBLE",
+  "USAGE_FORBIDDEN",
+  "USAGE_NOT_FOUND",
+  "ASR_FORMAT_UNSUPPORTED",
+  "RATE_LIMITED",
+  "REWARD_RATE_LIMITED"
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
@@ -46,7 +71,32 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Objec
   toolkit_unsupported: 400,
   model_config_changed: 409,
   config_write_busy: 409,
-  account_model_preset_conflict: 409
+  account_model_preset_conflict: 409,
+  CREDIT_INSUFFICIENT: 422,
+  CREDIT_BALANCE_RESERVED: 409,
+  ALREADY_PRO: 409,
+  INVALID_APPLICATION: 400,
+  ACCOUNT_NOT_REGISTERED: 401,
+  BUSINESS_REQUEST_REUSED: 409,
+  LEGACY_QUOTA_RETIRED: 410,
+  PLAN_APPLICATION_NOT_ELIGIBLE: 409,
+  REWARD_NOT_CONFIGURED: 503,
+  CHECKIN_ALREADY_CLAIMED: 409,
+  VERIFY_CODE_INVALID: 400,
+  INVITATION_CODE_INVALID: 400,
+  EXPORT_FAILED: 500,
+  OAUTH_PROVIDER_UNSUPPORTED: 400,
+  REDIRECT_URI_NOT_ALLOWED: 400,
+  VOUCHER_INVALID: 422,
+  VOUCHER_ALREADY_REDEEMED: 409,
+  VOUCHER_EXPIRED: 422,
+  VOUCHER_EXHAUSTED: 409,
+  VOUCHER_INELIGIBLE: 422,
+  USAGE_FORBIDDEN: 403,
+  USAGE_NOT_FOUND: 404,
+  ASR_FORMAT_UNSUPPORTED: 400,
+  RATE_LIMITED: 429,
+  REWARD_RATE_LIMITED: 429
 });
 
 export interface ApiError extends Error {
@@ -69,6 +119,9 @@ export function withErrorEnvelope<Reply>(
       return await handler(request, reply);
     } catch (error) {
       const envelope = toErrorEnvelope(error);
+      if (envelope.status === 429 && error instanceof Error && "retryAfterSeconds" in error
+          && typeof error.retryAfterSeconds === "number" && Number.isFinite(error.retryAfterSeconds) && error.retryAfterSeconds > 0)
+        reply.header("Retry-After", Math.ceil(error.retryAfterSeconds));
       return reply.code(envelope.status).send({
         error: {
           code: envelope.code,

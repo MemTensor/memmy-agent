@@ -1,3 +1,4 @@
+import { creditCheckpoint, withCreditCheckpoints } from "../../model/credit-checkpoint.js";
 import { ModelHttpError } from "../../model/http.js";
 /**
  * Worker scheduling and execution domain.
@@ -125,6 +126,7 @@ export interface WorkerRunnerDeps {
   memoryBudgetNextWakeAtMs: () => number;
   memoryBudgetNextReconcileAtMs?: () => number | undefined;
   summaryModelConfigured: () => boolean;
+  canResumeCredits?: (jobType: string) => Promise<boolean>;
   nowIso: () => string;
   nowMs?: () => number;
   encodeChangeCursor: (changeSeq: number) => string;
@@ -164,13 +166,18 @@ export interface WorkerRunnerDeps {
 }
 
 export class WorkerRunner {
+  private nextCreditCheckAt = 0;
   constructor(private readonly deps: WorkerRunnerDeps) {}
 
   nextWorkerRunAt(): number | undefined {
     if (!this.deps.memoryAddEnabled()) {
       return undefined;
     }
-    const reconcileAt = this.deps.memoryBudgetNextReconcileAtMs?.();
+    const budgetReconcileAt = this.deps.memoryBudgetNextReconcileAtMs?.();
+    const creditReconcileAt = this.deps.canResumeCredits && (this.deps.repos.runtime.creditPausedJobs(1).length
+      || this.deps.repos.runtime.creditPausedEmbeddingRetries(1).length)
+      ? Math.max(Date.now(), this.nextCreditCheckAt) : undefined;
+    const reconcileAt = [budgetReconcileAt, creditReconcileAt].filter((time): time is number => Number.isFinite(time)).sort((a,b)=>a-b)[0];
     const heldSummaryJobs = this.summaryJobsHeld();
     if (this.deps.memoryBudgetPaused()) {
       const allowed = allowedMemoryBudgetJobTypes(this.deps.memoryBudgetModelSources())
@@ -400,6 +407,29 @@ export class WorkerRunner {
     if (!this.deps.memoryAddEnabled()) {
       return this.deps.runWorkerNoWrite(request);
     }
+    if (this.deps.canResumeCredits && Date.now() >= this.nextCreditCheckAt) {
+      this.nextCreditCheckAt = Date.now() + 30_000;
+      const readiness = new Map<string, boolean>();
+      let afterId = "";
+      while (true) {
+        const jobs = this.deps.repos.runtime.creditPausedJobs(100, afterId);
+        if (!jobs.length) break;
+        for (const job of jobs) {
+          if (!readiness.has(job.jobType)) readiness.set(job.jobType, await this.deps.canResumeCredits(job.jobType));
+          if (!readiness.get(job.jobType)) continue;
+          const resumed = this.deps.repos.runtime.resumeCreditJob(job.id, this.deps.nowIso());
+          if (resumed) this.deps.appendJobChange(resumed, "queued", job);
+        }
+        afterId = jobs[jobs.length - 1]!.id;
+      }
+      const pausedRetries = this.deps.repos.runtime.creditPausedEmbeddingRetries();
+      if (pausedRetries.length && await this.deps.canResumeCredits("embedding")) {
+        for (const retry of pausedRetries) {
+          const resumed = this.deps.repos.runtime.resumeCreditEmbeddingRetry(retry.id, this.nowMs());
+          if (resumed) this.deps.appendEmbeddingRetryChange(resumed, "queued", retry);
+        }
+      }
+    }
     const normalizedLimit = Math.max(1, Math.floor(limit));
     const targetMemoryIds = request.targetMemoryIds;
     // A large upgrade drains in bounded batches over normal worker rounds.
@@ -517,7 +547,10 @@ export class WorkerRunner {
     this.markProcessingJobLeased(job);
     workerLogger.info("job.started", workerJobLogFields(job));
     try {
-      await this.deps.jobHandlers.processJob(job);
+      await withCreditCheckpoints(
+        (key) => (this.deps.repos.runtime.getJob(job.id)?.payload.modelSteps as Record<string, unknown> | undefined)?.[key],
+        (key, value) => this.deps.repos.runtime.saveModelStep(job.id, key, value, this.deps.nowIso()),
+        () => this.deps.jobHandlers.processJob(job));
       return this.completeLeasedWorkerJob(job);
     } catch (error) {
       if (error instanceof SummaryModelUnconfiguredError) {
@@ -550,6 +583,25 @@ export class WorkerRunner {
     for (const role of ["document", "query"] as const) {
       const batch = prepared.filter((item) => item.role === role);
       if (batch.length === 0) continue;
+
+      // Paid requests belong to one durable job, so a changed batch after restart cannot replay other jobs' work.
+      if (this.deps.embedder.config.actualModelContext?.source === "account" || batch.some(item => item.job.payload.modelSteps)) {
+        for (const item of batch) {
+          try {
+            await withCreditCheckpoints(
+              key => (this.deps.repos.runtime.getJob(item.job.id)?.payload.modelSteps as Record<string, unknown> | undefined)?.[key],
+              (key, value) => this.deps.repos.runtime.saveModelStep(item.job.id, key, value, this.deps.nowIso()),
+              async () => {
+                const vector = await this.embedWithCreditCheckpoint(item.text || "(empty)", role);
+                this.deps.embeddingJobs.applyEmbeddingVector(item, vector);
+              });
+            results.push(this.completeLeasedWorkerJob(item.job));
+          } catch (error) {
+            results.push(this.failLeasedWorkerJob(item.job, error));
+          }
+        }
+        continue;
+      }
 
       try {
         const vectors = await this.deps.embedder.embed(batch.map((item) => item.text || "(empty)"), role);
@@ -585,8 +637,18 @@ export class WorkerRunner {
     }
   }
 
+  private async embedWithCreditCheckpoint(text: string, role: "document" | "query"): Promise<number[]> {
+    const checkpoint = creditCheckpoint("embedding.vector", { text, role });
+    const completed = checkpoint?.read();
+    if (completed !== undefined) return completed as number[];
+    const vector = await this.deps.embedder.embedOne(text, role);
+    // Cache hits also need a durable result before a later local write can fail.
+    checkpoint?.save(vector);
+    return vector;
+  }
+
   finishFailedEmbeddingItem(item: PreparedEmbeddingJob, error: unknown): WorkerJobRunResult {
-    if (classifyProcessingError(error).retryAction !== "retry") {
+    if (["PAUSED_CREDIT", "CREDIT_BALANCE_RESERVED"].includes(classifyProcessingError(error).code) || classifyProcessingError(error).retryAction !== "retry") {
       return this.failLeasedWorkerJob(item.job, error);
     }
     if (!this.deps.embeddingJobs.enqueueEmbeddingRetryAfterFailure(item, error)) {
@@ -612,6 +674,11 @@ export class WorkerRunner {
   }
 
   failLeasedWorkerJob(job: EvolutionJobRecord, error: unknown): WorkerJobRunResult {
+    // A vector and its job may already have committed before a change notification failed.
+    const completed = this.deps.repos.runtime.getJob(job.id);
+    if (completed?.status === "succeeded") {
+      return { succeeded: 1, failed: 0, ref: jobToRef(completed) };
+    }
     if (error instanceof ObservationDependenciesPendingError) {
       const at = this.deps.nowIso();
       const deferred = this.deps.repos.runtime.deferProcessingJob(job.id, new Date(Date.parse(at) + 30_000).toISOString(), at) ?? job;
@@ -628,7 +695,28 @@ export class WorkerRunner {
       : error instanceof Error ? error.message : String(error);
     const stage = processingStageForJob(job.jobType);
     const classification = classifyProcessingError(error);
-    const forceDeadLetter = classification.code === "40309"
+    if (classification.code === "CREDIT_BALANCE_RESERVED") {
+      const at = this.deps.nowIso();
+      const deferred = this.deps.repos.runtime.deferProcessingJob(job.id, new Date(Date.parse(at) + 30_000).toISOString(), at) ?? job;
+      if (stage && job.targetMemoryId) this.deps.repos.processing.update(job.targetMemoryId, {
+        state: stage === "summary" ? "summary_pending" : "embedding_pending", stage,
+        errorCode: null, errorMessage: null, failedAt: null,
+        retryAction: "retry", attemptCount: deferred.attempts, updatedAt: at
+      });
+      this.deps.appendJobChange(deferred, "queued", job);
+      return { succeeded: 0, failed: 0, ref: { ...jobToRef(deferred), status: "queued" } };
+    }
+    if (classification.code === "PAUSED_CREDIT") {
+      const paused = this.deps.repos.runtime.pauseForCredits(job.id, this.deps.nowIso()) ?? job;
+      if (stage && job.targetMemoryId) this.deps.repos.processing.update(job.targetMemoryId, {
+        state: stage === "summary" ? "summary_pending" : "embedding_pending", stage,
+        errorCode: "PAUSED_CREDIT", errorMessage: "积分不足，补足后自动继续", failedAt: null,
+        retryAction: "retry", attemptCount: paused.attempts, updatedAt: this.deps.nowIso()
+      });
+      this.deps.appendJobChange(paused, "queued", job);
+      return { succeeded: 0, failed: 0, ref: { ...jobToRef(paused), status: "queued" } };
+    }
+    const forceDeadLetter = classification.code === "CREDIT_CALL_UNCERTAIN"
       || Boolean(stage && classification.retryAction !== "retry");
     const failedJob = this.deps.repos.runtime.failJob(
       job.id,
@@ -673,7 +761,7 @@ export class WorkerRunner {
       stage,
       activeJobId: job.id,
       attemptCount: job.attempts,
-      ...(processing?.errorCode === OBSERVATION_SUMMARY_MODEL_UNCONFIGURED.errorCode
+      ...((processing?.errorCode === OBSERVATION_SUMMARY_MODEL_UNCONFIGURED.errorCode || processing?.errorCode === "PAUSED_CREDIT")
         ? { retryAction: "retry" as const, errorCode: null, errorMessage: null, failedAt: null }
         : {}),
       updatedAt: this.deps.nowIso()
@@ -751,6 +839,13 @@ export class WorkerRunner {
       const batch = claimed.filter((item) => item.retry.embedRole === role);
       if (batch.length === 0) continue;
 
+      if (this.deps.embedder.config.actualModelContext?.source === "account" || batch.some(item => this.deps.repos.runtime.getEmbeddingRetryModelSteps(item.retry.id))) {
+        for (const item of batch) {
+          results.push(await this.runClaimedEmbeddingRetryItem(item.retry, item.claim, item.attemptNo));
+        }
+        continue;
+      }
+
       try {
         const vectors = await this.deps.embedder.embed(
           batch.map((item) => item.retry.sourceText || "(empty)"),
@@ -790,7 +885,10 @@ export class WorkerRunner {
     attemptNo: number
   ): Promise<EmbeddingRetryResult> {
     try {
-      const vector = await this.deps.embedder.embedOne(retry.sourceText || "(empty)", retry.embedRole);
+      const vector = await withCreditCheckpoints(
+        key => this.deps.repos.runtime.getEmbeddingRetryModelSteps(retry.id)?.[key],
+        (key, value) => this.deps.repos.runtime.saveEmbeddingRetryModelStep(retry.id, claim, key, value, this.nowMs()),
+        () => this.embedWithCreditCheckpoint(retry.sourceText || "(empty)", retry.embedRole));
       return this.applyEmbeddingRetryVector(retry, claim, vector);
     } catch (error) {
       return this.failClaimedEmbeddingRetry(retry, claim, attemptNo, error);
@@ -854,6 +952,22 @@ export class WorkerRunner {
     error: unknown
   ): EmbeddingRetryResult {
     const message = sanitizeProcessingError(error);
+    if (classifyProcessingError(error).code === "CREDIT_BALANCE_RESERVED") {
+      const deferred = this.deps.repos.runtime.markEmbeddingRetryRetryClaimed(retry.id, {
+        ...claim, attempts: retry.attempts, nextAttemptAt: this.nowMs() + 30_000,
+        error: "CREDIT_BALANCE_RESERVED", now: this.nowMs()
+      });
+      if (deferred) this.deps.appendEmbeddingRetryChange(deferred, "retry", retry);
+      return { succeeded: 0, failed: 0, item: deferred ? embeddingRetryToRunItem(deferred) : null };
+    }
+    if (classifyProcessingError(error).code === "PAUSED_CREDIT") {
+      const paused = this.deps.repos.runtime.markEmbeddingRetryRetryClaimed(retry.id, {
+        ...claim, attempts: retry.attempts, nextAttemptAt: 253402300799000,
+        error: "PAUSED_CREDIT", now: this.nowMs()
+      });
+      if (paused) this.deps.appendEmbeddingRetryChange(paused, "retry", retry);
+      return { succeeded: 0, failed: 0, item: paused ? embeddingRetryToRunItem(paused) : null };
+    }
     const terminal = classifyProcessingError(error).retryAction !== "retry" || attemptNo >= retry.maxAttempts;
     const updated = terminal
       ? this.deps.repos.runtime.markEmbeddingRetryFailedClaimed(retry.id, {

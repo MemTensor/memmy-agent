@@ -1,3 +1,4 @@
+import { parseSettings } from "../src/client.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -499,4 +500,13 @@ it("passes created time through for files and folders", async () => {
   } finally {
     await app.close();
   }
+});
+
+it("preserves authoritative plan limits and confirmed storage usage", () => {
+  const result = parseSettings({ authenticated: true, enabled: false, serviceAvailable: true, bases: [], maxBases: 50,
+    currentPlanCode: "PRO", limits: { baseLimit: 50, storageBytes: 53687091200, membersPerBase: 10 },
+    usage: { baseCount: 1, storageBytes: 1048576, reservedUploadBytes: 128, reconciled: true }, accountVersion: 3 });
+  expect(result.limits?.membersPerBase).toBe(10);
+  expect(result.usage?.storageBytes).toBe(1048576);
+  expect(result.currentPlanCode).toBe("PRO");
 });

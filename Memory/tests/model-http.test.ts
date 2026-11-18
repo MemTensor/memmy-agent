@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ModelHttpError, postJsonWithRetry } from "../src/model/http.js";
+import { isCreditModelError, ModelHttpError, postJsonWithRetry } from "../src/model/http.js";
 import { classifyProcessingError } from "../src/service/worker/job-handlers.js";
 
 afterEach(() => {
@@ -8,6 +8,15 @@ afterEach(() => {
 });
 
 describe("model HTTP responses", () => {
+  it("recognizes credit failures without overriding a different structured provider error", () => {
+    expect(isCreditModelError(new Error("CREDIT_CALL_UNCERTAIN"))).toBe(true);
+    expect(classifyProcessingError(new Error("CREDIT_CALL_UNCERTAIN"))).toEqual({ code: "CREDIT_CALL_UNCERTAIN", retryAction: "none" });
+    const lowerCase = new ModelHttpError("unknown", "openai_compatible", 502, "credit_call_uncertain", "unknown");
+    expect(isCreditModelError(lowerCase)).toBe(true);
+    expect(classifyProcessingError(lowerCase)).toEqual({ code: "CREDIT_CALL_UNCERTAIN", retryAction: "none" });
+    expect(isCreditModelError(new ModelHttpError("CREDIT_INSUFFICIENT", "openai_compatible", 400, "invalid_request", "other"))).toBe(false);
+  });
+
   it("reports an HTML 404 as an endpoint error before parsing JSON", async () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => new Response(
       "<!doctype html><html><body>Not Found</body></html>",
@@ -152,7 +161,7 @@ describe("model HTTP responses", () => {
       200,
       "40309",
       detail
-    ))).toEqual({ code: "40309", retryAction: "open_settings" });
+    ))).toEqual({ code: "PAUSED_CREDIT", retryAction: "retry" });
   });
 
   it("does not reject an HTTP 200 response with a non-error business code", async () => {

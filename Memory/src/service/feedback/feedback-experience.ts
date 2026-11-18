@@ -1,3 +1,4 @@
+import { isCreditModelError } from "../../model/http.js";
 import type {
   FeedbackTextClassification,
   FeedbackTextShape,
@@ -1030,6 +1031,7 @@ async enhanceFeedbackExperienceDraft(
         method: "llm"
       });
     } catch (error) {
+      if (isCreditModelError(error)) throw error;
       pipelineLogger.warn("fallback.used", {
         operation: polarity === "negative"
           ? `${FAILURE_EXPERIENCE_SINK_PROMPT.id}.v${FAILURE_EXPERIENCE_SINK_PROMPT.version}`
@@ -2137,6 +2139,7 @@ export async function synthesizeDecisionRepairDraft(
     });
     return normalizeDecisionRepairLlmDraft(result);
   } catch (error) {
+    if (isCreditModelError(error)) throw error;
     pipelineLogger.warn("fallback.used", {
       operation: DECISION_REPAIR_OPERATION,
       pipeline: input.diagnostics?.pipeline ?? decisionRepairPipelineForTrigger(input.trigger),
@@ -2241,6 +2244,7 @@ export async function synthesizeFailureExperienceSink(
     }
     return draft;
   } catch (error) {
+    if (isCreditModelError(error)) throw error;
     pipelineLogger.warn("failure_experience.quarantined", {
       operation: `${FAILURE_EXPERIENCE_SINK_PROMPT.id}.v${FAILURE_EXPERIENCE_SINK_PROMPT.version}`,
       pipeline: "failure.experience.sink",

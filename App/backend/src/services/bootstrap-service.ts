@@ -14,6 +14,7 @@ import type { AppStateStore } from "../infrastructure/app-state-store/index.js";
 import type { CloudClient, CloudHealth } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { ScanPreferencesStore } from "../infrastructure/memmy-config/agent-access.js";
+import { MEMMY_VERSION } from "../project-version.js";
 
 export type BootstrapScenario = "onboarding" | "completed";
 
@@ -35,13 +36,19 @@ export function createBootstrapService(options: CreateBootstrapServiceOptions): 
       const bootstrap = options.appStateStore.repositories.bootstrap;
       const appSettings = bootstrap.getAppSettings();
       const onboarding = await reconcileImprovementProgram(options, appSettings, bootstrap.getOnboardingState());
-      const [memoryHealth, cloudHealth, tokenUsage, legal, promotions, lotteryStatus] = await Promise.all([
+      const [memoryHealth, cloudHealth, tokenUsage, legal, promotions, lotteryStatus, desktopContent] = await Promise.all([
         getMemoryHealth(options.memoryClient),
         getCloudHealth(options.cloudClient),
         refreshTokenUsage(options),
         getLegalUrls(options.cloudClient),
         getPromotions(options.cloudClient),
-        getLotteryStatus(options.cloudClient)
+        getLotteryStatus(options.cloudClient),
+        options.cloudClient.getDesktopContent?.({
+          locale: appSettings.language === "en-US" || (appSettings.language === "system" &&
+            !Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase().startsWith("zh")) ? "en-US" : "zh-CN",
+          clientVersion: MEMMY_VERSION,
+          region: process.env.MEMMY_APP_EDITION?.toLowerCase() === "intl" ? "INTL" : "CN"
+        }).catch(() => undefined)
       ]);
 
       return AppBootstrapResponseSchema.parse({
@@ -64,6 +71,7 @@ export function createBootstrapService(options: CreateBootstrapServiceOptions): 
           cloud: cloudHealth.status
         },
         ...(legal ? { legal } : {}),
+        ...(desktopContent ? { desktopContent } : {}),
         promotions,
         ...(lotteryStatus ? { lotteryStatus } : {})
       });

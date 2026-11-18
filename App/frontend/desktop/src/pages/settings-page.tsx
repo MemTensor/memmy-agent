@@ -34,6 +34,7 @@ import type { ModelWorkspaceMode } from "../state/model-workspace.js";
 import { AppFrame } from "./app-frame.js";
 import { ComputerUseSettings } from "./computer-use-settings.js";
 import { CreditsSettingsPanel } from "./credits-in-app.js";
+import type { CreditsClient } from "../api/credits-client.js";
 import { ModelWorkspaceSection } from "./model-workspace-section.js";
 import {
   MEMORY_TOKEN_BUDGET_SECTION_ID,
@@ -239,6 +240,7 @@ export function SettingsPage() {
         configClient={clients?.config}
         byokTokenUsageClient={clients?.byokTokenUsage}
         tokenQuotaClient={clients?.tokenQuota}
+        creditsClient={clients?.credits}
         computerUseClient={clients?.memmyAgent}
         update={update}
         track={track}
@@ -270,6 +272,7 @@ export interface SettingsPageViewProps {
   configClient?: ConfigClient;
   byokTokenUsageClient?: ByokTokenUsageClient;
   tokenQuotaClient?: TokenQuotaClient;
+  creditsClient?: CreditsClient;
   computerUseClient?: import("../api/memmy-agent-client.js").MemmyAgentClient;
   update: UpdateCoordinatorValue;
   track?: TrackAnalyticsEvent;
@@ -335,6 +338,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     configClient,
     byokTokenUsageClient,
     tokenQuotaClient,
+    creditsClient,
     update,
     track = noopTrackAnalyticsEvent,
     activeTab: activeTabProp,
@@ -413,6 +417,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const savedDailyLimitRef = useRef<number | null>(bootstrap?.app.memoryByokDailyLimitM ?? 10);
   const savedTotalLimitRef = useRef<number | null>(bootstrap?.app.memoryByokTotalLimitM ?? 500);
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [invitationOwner, setInvitationOwner] = useState<string | null>();
   const [invitationInfo, setInvitationInfo] = useState<AccountInvitationView | null>(null);
   const [invitationLoadStatus, setInvitationLoadStatus] =
     useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -509,7 +514,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
   const { isTokenLow } = resolveGiftTokenUsage(giftBarUsedTokens, giftTotalTokens, giftRemainingTokens);
   const showGiftQuota = !isByokMode;
   const invitationPromotion = bootstrap?.promotions?.invitation;
-  const invitationEnabled = invitationPromotion?.enabled === true;
+  const invitationEnabled = (isAccountMode && !!creditsClient && !creditsPreview) || invitationPromotion?.enabled === true;
   const invitationRewardBody = invitationPromotion
     && invitationPromotion.inviterRewardTokens > 0
     && invitationPromotion.inviterRewardTokens === invitationPromotion.inviteeRewardTokens
@@ -517,14 +522,16 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           count: formatTokenGiftAmount(invitationPromotion.inviterRewardTokens)
         })
       : t("settings.token.invite.body");
-  const displayInviteCode = invitationInfo?.invitationCode ?? null;
+  const displayInviteCode = invitationOwner === state.account.userId ? invitationInfo?.invitationCode ?? null : null;
   const inviteDailyLimitReached = invitationInfo?.dailyLimitReached ?? false;
   const showInvitationBanner = invitationEnabled
     && (invitationLoadStatus !== "ready" || invitationInfo?.enabled === true);
   const canApplyMoreByPromotion = bootstrap?.promotions?.applyMore ?? true;
-  const quotaRequestPending = quotaEligibility?.state === "pending";
-  const quotaApplicationBlocked = quotaEligibility !== null && quotaEligibility.state !== "available";
-  const applyMoreButtonLabel = quotaRequestPending ? t("settings.token.applyMore.pending") : t("settings.token.applyMore");
+  const quotaUsesPlanUpgrade = quotaEligibility !== null && "deprecated" in quotaEligibility;
+  const quotaRequestPending = quotaEligibility !== null && "state" in quotaEligibility && quotaEligibility.state === "pending";
+  const quotaApplicationBlocked = isQuotaApplicationBlocked(quotaEligibility);
+  const applyMoreButtonLabel = quotaRequestPending ? t("settings.token.applyMore.pending")
+    : quotaUsesPlanUpgrade ? t("credits.upgrade") : t("settings.token.applyMore");
   const quotaEligibilityMessage = resolveQuotaEligibilityMessage(quotaEligibility, language);
   const quotaEligibilityText = quotaEligibilityMessage
     ? t(quotaEligibilityMessage.key, quotaEligibilityMessage.values)
@@ -650,10 +657,17 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     setInvitationLoadStatus("loading");
     const accountKey =
       state.account.email || state.account.phoneNumber || state.account.registeredAt || "account";
-    void requestAccountInvitation(accountClient, accountKey).then((result) => {
+    setInvitationInfo(null);
+    const load = creditsClient && !creditsPreview
+      ? creditsClient.invitationSummary().then(summary => {
+          return { enabled: true, invitationCode: summary.invitationCode, usedInviteSlotsToday: summary.todayRewarded, remainingInvitesToday: summary.todayRemaining, dailySuccessLimit: summary.rule.dailyLimit, dailyLimitReached: summary.todayRemaining === 0 };
+        })
+      : requestAccountInvitation(accountClient, accountKey);
+    void load.then((result) => {
       if (cancelled) {
         return;
       }
+      setInvitationOwner(state.account.userId);
       setInvitationInfo(result.enabled ? result : null);
       setInvitationLoadStatus("ready");
     }).catch((error) => {
@@ -673,6 +687,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     hasAccountSession,
     invitationEnabled,
     invitationReloadVersion,
+    creditsClient, creditsPreview, state.account.userId,
     isAccountMode
   ]);
 
@@ -694,7 +709,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     /** Pending requests refresh on window focus instead of fixed-interval polling. */
     const handleWindowFocus = () => {
       void refreshQuotaEligibility().then(async (nextEligibility) => {
-        if (!nextEligibility || nextEligibility.state === "pending" || !configClient) {
+        if (!nextEligibility || "deprecated" in nextEligibility || nextEligibility.state === "pending" || !configClient) {
           return;
         }
 
@@ -1274,17 +1289,28 @@ export function SettingsPageView(props: SettingsPageViewProps) {
    * Returns early when the text is too short; disables the button during submission; on success shows the success state and clears the input.
    */
   async function handleSubmitFeedback() {
-    if (quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting) {
+    if (quotaApplicationBlocked || (!quotaUsesPlanUpgrade && !canSubmitFeedback(feedbackText)) || feedbackSubmitting) {
       return;
     }
     setFeedbackSubmitting(true);
     setFeedbackError(null);
     try {
-      const result = await tokenQuotaClient?.requestQuota(feedbackText);
-      if (result?.status === "pending") {
+      if (!tokenQuotaClient) throw new Error(t("settings.token.applyMore.error"));
+      const result = await tokenQuotaClient.requestQuota(quotaUsesPlanUpgrade ? {
+        requestId: crypto.randomUUID(),
+        region: import.meta.env.MEMMY_APP_EDITION === "intl" ? "INTL" : "CN",
+        language
+      } : feedbackText);
+      if ("deprecated" in result) {
+        await openExternalUrl(result.formUrl);
+        setShowApplyMore(false);
+        setFeedbackText("");
+        return;
+      }
+      if (result.status === "pending") {
         setQuotaEligibility((current) => ({
           state: "pending",
-          requestCount: Math.min(5, (current?.requestCount ?? 0) + 1),
+          requestCount: Math.min(5, (current && "requestCount" in current ? current.requestCount : 0) + 1),
           maxRequestCount: 5,
           nextAllowedAtEpochMs: null,
           latestRequestStatus: "pending",
@@ -1305,12 +1331,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
       setFeedbackText("");
     } catch (error) {
       const nextEligibility = await refreshQuotaEligibility();
-      if (nextEligibility && nextEligibility.state !== "available") {
+      if (isQuotaApplicationBlocked(nextEligibility)) {
         setFeedbackSubmitted(false);
         setFeedbackText("");
         return;
       }
-      if (isPendingQuotaRequestError(error)) {
+      if (!quotaUsesPlanUpgrade && (!nextEligibility || !("deprecated" in nextEligibility)) && isPendingQuotaRequestError(error)) {
         setQuotaEligibility({
           state: "pending",
           requestCount: 1,
@@ -1453,14 +1479,14 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     }
   }
 
-  const invitationCard = isAccountMode && showGiftQuota && showInvitationBanner ? (
+  const invitationCard = isAccountMode && (showGiftQuota || !!creditsClient) && showInvitationBanner ? (
     <div
       className={`${usageStyles.invitationCard} border ${
         inviteDailyLimitReached
           ? "bg-text-ink/[0.05] border-border-stone/50"
           : "bg-action-sky/6 border-action-sky/15"
       }`}
-      style={creditsPreview ? { marginBottom: 24 } : undefined}
+      style={creditsPreview || !!creditsClient ? { marginBottom: 24 } : undefined}
     >
       <span
         className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center ${
@@ -1470,7 +1496,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
         <Gift size={15} strokeWidth={2.1} aria-hidden="true" />
       </span>
       <div className="min-w-0">
-        <p className="text-sm text-text-ink/80 leading-5">{t(creditsPreview ? "credits.invite.title" : "settings.token.invite.title")}</p>
+        <p className="text-sm text-text-ink/80 leading-5">{t(creditsPreview || !!creditsClient ? "credits.invite.title" : "settings.token.invite.title")}</p>
         <p
           className={`mt-0.5 text-xs leading-4 ${
             inviteDailyLimitReached ? "text-text-ink/50" : "text-text-ink/45"
@@ -1482,7 +1508,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
               ? t("settings.token.invite.loading")
               : inviteDailyLimitReached
                 ? t("settings.token.invite.dailyLimit")
-                : creditsPreview ? t("credits.invite.body") : invitationRewardBody}
+                : creditsPreview || !!creditsClient ? t("credits.invite.body") : invitationRewardBody}
         </p>
       </div>
       {displayInviteCode ? (
@@ -1758,10 +1784,12 @@ export function SettingsPageView(props: SettingsPageViewProps) {
           role="tabpanel"
           aria-labelledby="settings-tab-tokens"
           hidden={activeTab !== "tokens"}
-          className={creditsPreview ? "flex flex-col" : undefined}
+          className={creditsPreview || (isAccountMode && !!creditsClient) ? "flex flex-col" : undefined}
         >
         {creditsPreview && <CreditsSettingsPanel invitationContent={invitationCard} />}
-        <div id="token-usage" className="mb-6" hidden={creditsPreview}>
+        {!creditsPreview && isAccountMode && creditsClient && activeTab === "tokens" &&
+          <CreditsSettingsPanel key={state.account.userId ?? "signed-out"} invitationContent={invitationCard} />}
+        <div id="token-usage" className="mb-6" hidden={creditsPreview || (isAccountMode && !!creditsClient)}>
           <div className="flex items-center justify-between gap-4 mb-3">
             <div className="flex items-center gap-2">
               <Zap size={16} className="text-text-ink/60" />
@@ -1783,7 +1811,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                 >
                   {applyMoreButtonLabel}
                 </button>
-              ) : canApplyMoreByPromotion && isTokenLow && (!quotaEligibility || quotaEligibility.state === "available") ? (
+              ) : canApplyMoreByPromotion && isTokenLow && !quotaApplicationBlocked ? (
                 <button
                   type="button"
                   onClick={openApplyMore}
@@ -1806,7 +1834,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
 
         </div>
 
-        {!creditsPreview && invitationCard}
+        {!creditsPreview && !(isAccountMode && creditsClient) && invitationCard}
         </div>
 
         <div
@@ -2034,6 +2062,11 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                 <p className="py-6 text-center text-sm text-status-success">
                   {t("settings.token.applyMore.success")}
                 </p>
+              ) : quotaUsesPlanUpgrade ? (
+                <div className="space-y-2 py-6 text-center text-sm">
+                  <p>{t("settings.token.applyMore.upgradeQuestionnaire")}</p>
+                  {feedbackError && <p className="text-status-error">{feedbackError}</p>}
+                </div>
               ) : (
                 <div className="space-y-2">
                   <textarea
@@ -2081,10 +2114,10 @@ export function SettingsPageView(props: SettingsPageViewProps) {
                   <button
                     type="button"
                     onClick={() => void handleSubmitFeedback()}
-                    disabled={quotaApplicationBlocked || !canSubmitFeedback(feedbackText) || feedbackSubmitting}
+                    disabled={quotaApplicationBlocked || (!quotaUsesPlanUpgrade && !canSubmitFeedback(feedbackText)) || feedbackSubmitting}
                     className="flex-1 py-3 text-sm text-white bg-action-sky rounded-btn hover:bg-action-sky-hover transition-colors font-semibold cursor-pointer shadow-md disabled:opacity-40 disabled:cursor-not-allowed"
                   >
-                    {t("settings.token.applyMore.submit")}
+                    {t(quotaUsesPlanUpgrade ? "settings.token.applyMore.openQuestionnaire" : "settings.token.applyMore.submit")}
                   </button>
                 </>
               )}
@@ -3658,16 +3691,15 @@ function resolveInitialModelMode(userMode: AppSettingsDto["userMode"] | undefine
  * @returns True when the UI should switch to the "request pending" state.
  */
 export function isPendingQuotaRequestError(error: unknown): boolean {
-  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : null;
-  if (code === "conflict") {
-    return true;
-  }
-
   if (!(error instanceof Error)) {
     return false;
   }
 
   return /\u5f85\u5ba1\u6279|\u91cd\u590d\u63d0\u4ea4|\u5df2\u6709.*\u7533\u8bf7|pending|duplicate/i.test(error.message);
+}
+
+export function isQuotaApplicationBlocked(eligibility: TokenQuotaEligibility | null): boolean {
+  return eligibility !== null && ("deprecated" in eligibility ? !eligibility.eligible : eligibility.state !== "available");
 }
 
 /**
@@ -3681,9 +3713,11 @@ export function resolveQuotaEligibilityMessage(
   eligibility: TokenQuotaEligibility | null,
   language: "zh-CN" | "en-US"
 ): QuotaEligibilityMessage | null {
-  if (!eligibility || eligibility.state === "available") {
-    return null;
+  if (!eligibility) return null;
+  if ("deprecated" in eligibility) {
+    return { key: eligibility.eligible ? "settings.token.applyMore.upgradeQuestionnaire" : "settings.token.applyMore.upgradeNotNeeded" };
   }
+  if (eligibility.state === "available") return null;
   if (eligibility.state === "pending") {
     return { key: "settings.token.applyMore.pendingDesc" };
   }

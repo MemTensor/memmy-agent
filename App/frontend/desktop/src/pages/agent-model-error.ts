@@ -11,7 +11,7 @@ const RETRY_GIVING_UP_PATTERN = /Model request failed after \d+ retries, giving 
 const RETRY_ATTEMPT_PATTERN = /Model request failed, retrying attempt (\d+) in (\d+)s\.\.\./;
 const RETRY_WAIT_PATTERN = /Retry attempt (\d+): Model request still waiting to retry in (\d+)s\.\.\./;
 const PERSISTENT_RETRY_STOPPED_PATTERN = /Persistent retry stopped after \d+ identical errors\./;
-const LEGACY_QUOTA_CODE_PATTERN = /\b40309\b/;
+const LEGACY_QUOTA_CODE_PATTERN = /\b(?:40308|40309)\b/i;
 
 export function isAgentModelErrorContent(content: string): boolean {
   const text = content.trim();
@@ -70,6 +70,12 @@ export function formatAgentModelError(content: string, t: Translate, options?: A
   const failureDetail = failedAt
     ? (structuredDetail ? `${failedAt}: ${structuredDetail}` : failedAt)
     : structuredDetail;
+  if (options?.modelError?.source !== "byok" && /\bCREDIT_BALANCE_RESERVED\b/i.test(`${content}\n${structuredDetail ?? ""}`)) {
+    return { title: t("agent.error.creditsReserved"), detail: null };
+  }
+  if (options?.modelError?.source !== "byok" && /\bCREDIT_CALL_UNCERTAIN\b/i.test(`${content}\n${structuredDetail ?? ""}`)) {
+    return { title: t("agent.error.creditsUncertain"), detail: null };
+  }
   if (options?.modelError?.category === "image_input_unsupported") {
     return {
       title: t(ERROR_NOTICE_KEYS.agent.imageInputUnsupported),

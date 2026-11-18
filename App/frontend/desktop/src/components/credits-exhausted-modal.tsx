@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, type KeyboardEvent, type MouseEvent } from "react";
+import { useLayoutEffect, useRef, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import memmySad from "../assets/mascot/memmy-sad.png";
@@ -7,9 +7,9 @@ import { useTranslation } from "../i18n/use-translation.js";
 import styles from "./credits-exhausted-modal.module.css";
 
 export interface CreditsExhaustedModalProps {
-  plan: CreditPlan;
-  nextReset: Date;
-  upgradeUrl: string;
+  plan: CreditPlan | null;
+  nextReset: Date | null;
+  onApplyMore(): void;
   onUseOwnModel(): void;
   onViewDetails(): void;
   onDismiss(): void;
@@ -42,19 +42,11 @@ export function CreditsExhaustedModal(props: CreditsExhaustedModalProps) {
 
   if (typeof document === "undefined") return null;
 
-  const resetTime = props.nextReset.toLocaleString(language, {
+  const resetTime = props.nextReset?.toLocaleString(language, {
     year: "numeric", month: "2-digit", day: "2-digit",
     hour: "2-digit", minute: "2-digit", hour12: false
-  });
-  const planName = t(props.plan === "pro" ? "plan.pro.name" : "plan.free.name");
-
-  function openUpgrade(event: MouseEvent<HTMLAnchorElement>) {
-    if (typeof window.memmy?.openExternal !== "function") return;
-    event.preventDefault();
-    void window.memmy.openExternal(props.upgradeUrl).catch(() => {
-      window.open(props.upgradeUrl, "_blank", "noopener,noreferrer");
-    });
-  }
+  }) ?? "—";
+  const planName = props.plan ? t(props.plan === "pro" ? "plan.pro.name" : "plan.free.name") : "—";
 
   return createPortal(
     <div className={styles.backdrop} onClick={(event) => {
@@ -76,13 +68,13 @@ export function CreditsExhaustedModal(props: CreditsExhaustedModalProps) {
         <div className={styles.mascot}><img src={memmySad} alt="" /></div>
         <h2 id="credits-exhausted-title">{t("credits.exhausted.title")}</h2>
         <p id="credits-exhausted-description" className={styles.description}>{t("credits.modal.description")}</p>
-        <p className={styles.meta}>{t("credits.modal.reset", { plan: planName, time: resetTime })}</p>
+        <p className={styles.meta}>{t("credits.modal.reset", { plan: planName, time: "" })}<strong>{resetTime}</strong></p>
         <div className={styles.actions}>
           {props.plan === "free" ? (
             <>
-              <a className={[styles.action, styles.primary].join(" ")} href={props.upgradeUrl} target="_blank" rel="noopener noreferrer" onClick={openUpgrade}>
+              <button className={[styles.action, styles.primary].join(" ")} type="button" onClick={props.onApplyMore}>
                 {t("credits.exhausted.upgrade")}
-              </a>
+              </button>
               <button className={[styles.action, styles.secondary].join(" ")} type="button" onClick={props.onUseOwnModel}>
                 {t("credits.modal.useOwnModel")}
               </button>

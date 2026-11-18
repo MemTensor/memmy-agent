@@ -14,12 +14,16 @@ export interface AsrClient {
 export function createHttpAsrClient(config: RuntimeConfig): AsrClient {
   return {
     async transcribe(input) {
-      return requestJson({
+      const result = await requestJson({
         config,
         path: "/api/asr/transcriptions",
         schema: AsrTranscriptionResponseSchema,
         body: AsrTranscriptionInputSchema.parse(input)
       });
+      if (result.source === "account" && result.creditSettlement && typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("credits.changed", { detail: result.creditSettlement }));
+      }
+      return result;
     }
   };
 }

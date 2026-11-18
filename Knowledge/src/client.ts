@@ -140,14 +140,11 @@ export class ManagedKnowledgeClient implements KnowledgeRecallClient {
         ms,
       });
       throw new KnowledgeError(
-        response.status === 401 || response.status === 403
+        response.status === 401
           ? "请重新登录 Memmy"
           : `[HTTP ${response.status}] ${serverMessage || fallback}`,
-        response.status === 401 || response.status === 403
-          ? 401
-          : response.status === 404
-            ? 404
-            : 502,
+        response.status,
+        typeof serverCode === "string" ? serverCode : undefined,
       );
     }
     let parsed: Record<string, unknown>;
@@ -263,7 +260,15 @@ export function parseSettings(input: unknown): KnowledgeSettings {
     !Array.isArray(data.bases)
   )
     throw new KnowledgeError("知识库服务返回格式无效", 502);
+  const limits = record(data.limits), usage = record(data.usage);
+  const nonnegative = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
   return {
+    ...(data.currentPlanCode === "FREE" || data.currentPlanCode === "PRO" ? { currentPlanCode: data.currentPlanCode } : {}),
+    ...(nonnegative(limits.baseLimit) && nonnegative(limits.storageBytes) && nonnegative(limits.membersPerBase)
+      ? { limits: { baseLimit: limits.baseLimit, storageBytes: limits.storageBytes, membersPerBase: limits.membersPerBase } } : {}),
+    ...(nonnegative(usage.baseCount) && nonnegative(usage.storageBytes) && nonnegative(usage.reservedUploadBytes) && typeof usage.reconciled === "boolean"
+      ? { usage: { baseCount: usage.baseCount, storageBytes: usage.storageBytes, reservedUploadBytes: usage.reservedUploadBytes, reconciled: usage.reconciled } } : {}),
+    ...(nonnegative(data.accountVersion) ? { accountVersion: data.accountVersion } : {}),
     authenticated: data.authenticated === true,
     enabled: data.enabled,
     serviceAvailable: data.serviceAvailable,

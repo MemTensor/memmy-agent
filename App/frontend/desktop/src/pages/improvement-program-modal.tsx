@@ -1,17 +1,17 @@
 import { ExternalLink, Gift } from "lucide-react";
 import { Memmy } from "../components/mascot/memmy.js";
 import { useTranslation } from "../i18n/use-translation.js";
-import { formatTokenGiftAmount } from "./token-gift.js";
+import { formatCreditAmount } from "../app/credit-display.js";
 
 export interface ImprovementProgramModalProps {
   onChoice: (accepted: boolean) => void;
   onLearnMore: () => void;
   showGift: boolean;
-  giftTokens: number;
+  giftCredits: string;
 }
 
 export function ImprovementProgramModal(props: ImprovementProgramModalProps) {
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-text-ink/30 backdrop-blur-sm">
@@ -32,8 +32,8 @@ export function ImprovementProgramModal(props: ImprovementProgramModalProps) {
                 <span className="text-sm text-text-ink/70">
                   {t("onboarding.improvement.benefitPrefix")}{" "}
                   <strong className="text-action-sky">
-                    {t("onboarding.improvement.benefitToken", {
-                      count: formatTokenGiftAmount(props.giftTokens)
+                    {t("onboarding.improvement.benefitCredits", {
+                      count: formatCreditAmount(props.giftCredits, language)
                     })}
                   </strong>
                 </span>

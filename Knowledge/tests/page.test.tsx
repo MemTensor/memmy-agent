@@ -6,11 +6,59 @@ import { KnowledgePage } from "../src/ui/page.js";
 import type { KnowledgeSettings } from "../src/types.js";
 
 let root: Root | undefined;
+it.each(["zh-CN", "en-US"])("shows storage quota errors separately from other upload failures (%s)", async (language) => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const state: KnowledgeSettings = {
+    authenticated: true, enabled: true, serviceAvailable: true,
+    bases: [{ id: "base-1", name: "KB-2", selected: true }],
+  };
+  vi.stubGlobal("fetch", vi.fn(async (url: URL, init: RequestInit) => {
+    const path = String(url);
+    if (path.endsWith("/files") && init.method === "POST") {
+      const file = (init.body as FormData).get("file") as File;
+      return new Response(JSON.stringify(file.name === "quota.txt"
+        ? { error: "Storage request rejected", code: "KNOWLEDGE_STORAGE_LIMIT_EXCEEDED" }
+        : { error: "Service unavailable" }), { status: file.name === "quota.txt" ? 409 : 503 });
+    }
+    if (path.includes("/files")) return new Response(JSON.stringify({ files: [], total: 0, page: 1 }));
+    if (path.includes("/folders")) return new Response(JSON.stringify({ folders: [] }));
+    return new Response(JSON.stringify(state));
+  }));
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(<KnowledgePage connection={{ baseUrl: "http://localhost:1234", localToken: "test" }} language={language} />);
+  });
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  Object.defineProperty(input, "files", { configurable: true, value: [new File(["quota"], "quota.txt"), new File(["other"], "other.txt")] });
+  await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+  const notice = container.querySelector(".mk-upload-toast")!.textContent;
+  expect(notice).toContain(language === "zh-CN"
+    ? "上传完成：成功 0 个，失败 2 个"
+    : "Upload complete: 0 succeeded, 2 failed");
+  const alert = container.querySelector<HTMLElement>(".mk-storage-alert")!;
+  expect(alert.getAttribute("role")).toBe("alert");
+  expect(alert.querySelector(".mk-toast-text")!.textContent).toBe(language === "zh-CN"
+    ? "1 个文件未能上传：知识库总容量超限，请整理文件或升级套餐。"
+    : "1 file(s) could not be uploaded: knowledge base storage limit exceeded. Remove files or upgrade your plan.");
+  expect(alert.previousElementSibling?.classList.contains("mk-toolbar")).toBe(true);
+  expect(alert.nextElementSibling?.classList.contains("mk-body")).toBe(true);
+  expect(notice).toContain(language === "zh-CN" ? "1 个文件未能上传" : "1 file(s) failed to upload");
+  expect(notice).not.toContain(language === "zh-CN" ? "2 个文件未能上传" : "2 file(s) failed to upload");
+  Object.defineProperty(input, "files", { configurable: true, value: [new File(["quota"], "quota.txt")] });
+  await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect(container.querySelector(".mk-upload-toast")).toBeNull();
+  expect(container.querySelector(".mk-storage-alert")).not.toBeNull();
+  await act(async () => { container.querySelector<HTMLButtonElement>(".mk-storage-alert button")!.click(); });
+  expect(container.querySelector(".mk-storage-alert")).toBeNull();
+});
 afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   root = undefined;
   document.body.innerHTML = "";
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 it("shows management only, with recall off by default and no exposed saved secret", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -18,6 +66,9 @@ it("shows management only, with recall off by default and no exposed saved secre
     authenticated: true,
     enabled: false,
     serviceAvailable: true,
+    maxBases: 50, currentPlanCode: "PRO",
+    limits: { baseLimit: 50, storageBytes: 53687091200, membersPerBase: 10 },
+    usage: { baseCount: 1, storageBytes: 1073741824, reservedUploadBytes: 0, reconciled: true },
     bases: [{ id: "base-1", name: "差旅制度", selected: false }],
   };
   const calls: { url: string; body?: Record<string, unknown> }[] = [];
@@ -59,6 +110,8 @@ it("shows management only, with recall off by default and no exposed saved secre
   expect(toggle.getAttribute("aria-checked")).toBe("false");
   expect(toggle.disabled).toBe(false);
   expect(container.textContent).toContain("差旅制度");
+  expect(container.textContent).toContain("总容量：1.00G/50G");
+  expect(container.textContent).toContain("可创建的知识库：1/50");
   expect(container.querySelector("textarea")).toBeNull();
   const fileInput =
     container.querySelector<HTMLInputElement>('input[type="file"]')!;
@@ -95,7 +148,7 @@ it("shows management only, with recall off by default and no exposed saved secre
     ".mk-group-title{display:flex;align-items:center;gap:6px;margin:0 0 2px;",
   );
   expect(container.querySelector(".mk-quota")?.textContent).toContain(
-    "可创建的知识库：1/10",
+    "可创建的知识库：1/50",
   );
   expect(container.querySelector("style")?.textContent).toContain(
     ".mk-side-foot{padding:10px 16px}",
@@ -307,6 +360,56 @@ it("keeps long file names inside the name column and exposes the full name on ho
   expect(styles).toContain(
     ".mk-fname-wrap:hover .mk-fname-tooltip{opacity:1;visibility:visible;",
   );
+});
+
+it.each([
+  ["zh", "处理中", "失败", "可用"],
+  ["en", "Processing", "Failed", "Available"],
+])("shows processing failures and stops polling them (%s)", async (language, processing, failed, available) => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.useFakeTimers();
+  const reason = "文档内容超过解析长度上限，请拆分文件后重新上传";
+  let fileRequests = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: URL) => {
+    const path = String(url);
+    if (path.includes("/files")) {
+      fileRequests++;
+      return new Response(JSON.stringify({
+        files: [
+          { id: "large", name: "large.txt", status: fileRequests === 1 ? "PROCESSING" : "PROCESSING_FAILED", message: fileRequests === 1 ? "" : reason },
+          { id: "ready", name: "ready.txt", status: "AVAILABLE", message: "" },
+        ],
+        total: 2,
+        page: 1,
+      }));
+    }
+    if (path.includes("/folders")) return new Response(JSON.stringify({ folders: [] }));
+    if (path.includes("/members")) return new Response(JSON.stringify({ members: [] }));
+    return new Response(JSON.stringify({
+      authenticated: true,
+      enabled: true,
+      serviceAvailable: true,
+      bases: [{ id: "base-1", name: "资料库", selected: true }],
+    }));
+  }));
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(<KnowledgePage connection={{ baseUrl: "http://localhost:1234", localToken: "local-test" }} language={language} />);
+  });
+  expect(fileRequests).toBe(1);
+  expect(container.querySelector(".mk-dot-busy")?.textContent).toBe(processing);
+  expect(container.querySelector(".mk-dot-ok")?.textContent).toBe(available);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(fileRequests).toBe(2);
+  expect(container.querySelector(".mk-dot-fail")?.textContent).toBe(failed);
+  expect(container.querySelector(".mk-dot-busy")).toBeNull();
+  expect(container.querySelector(".mk-fsub")?.textContent).toBe(reason);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+  expect(fileRequests).toBe(2);
 });
 
 it("removes a knowledge base from the list without waiting for delete to finish", async () => {
@@ -605,7 +708,7 @@ it("shows share failure inside the modal instead of the page banner", async () =
       .click();
   });
   const shareError = container.querySelector(".mk-share-modal .mk-share-error");
-  expect(shareError?.textContent).toBe("用户不存在");
+  expect(shareError?.textContent).toBe("目标用户不存在");
   expect(getComputedStyle(shareError!).color).toBe("#c05a55");
   expect(container.querySelector(".mk-error")).toBeNull();
   expect(container.textContent).not.toContain("HTTP 404");
@@ -670,3 +773,20 @@ it("resizes the knowledge list from the divider and keeps the new button inside 
   expect(side?.contains(button ?? null)).toBe(true);
   expect(window.localStorage.getItem("memmy.knowledge.list-width")).toBe("304");
 });
+
+for (const maxBases of [10, 50]) {
+  it(`keeps create enabled at ${maxBases}, shows the limit toast, and sends no create request`, async () => {
+    const container = await renderKnowledge({
+      authenticated: true, enabled: true, serviceAvailable: true, maxBases,
+      bases: Array.from({ length: maxBases }, (_, i) => ({ id: `base-${i}`, name: `知识库${i}`, selected: false })),
+    });
+    const create = container.querySelector<HTMLButtonElement>(".mk-new-btn")!;
+    expect(create.disabled).toBe(false);
+    for (let i = 0; i < 2; i++) {
+      await act(async () => { create.click(); });
+      expect(container.querySelector('.mk-limit-toast[role="alert"]')?.textContent).toBe(`知识库数量已达上限（${maxBases}/${maxBases}）`);
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    }
+    expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+}

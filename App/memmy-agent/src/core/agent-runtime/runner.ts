@@ -1904,6 +1904,7 @@ export class AgentRunner {
         finalContent = clean || spec.errorMessage || DEFAULT_ERROR_MESSAGE;
         stopReason = "error";
         error = finalContent;
+        if (response.partialContent) AgentRunner.appendFinalMessage(messages, response.partialContent);
         AgentRunner.appendModelErrorPlaceholder(messages);
         context.finalContent = finalContent;
         context.error = error;

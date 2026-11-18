@@ -4,6 +4,7 @@ import type {
   TokenQuotaApplyResult,
   TokenQuotaEligibility
 } from "../adapters/outbound/cloud-client/index.js";
+import type { RequestTokenQuotaInput } from "@memmy/local-api-contracts";
 import type { AccountSessionRepository } from "../infrastructure/app-state-store/repositories/account-session-repo.js";
 
 /** Token quota operations used by the settings page. */
@@ -11,7 +12,7 @@ export interface TokenQuotaService {
   /** Gets eligibility for the signed-in account. */
   getEligibility(): Promise<TokenQuotaEligibility>;
   /** Submits a request; the cloud performs final validation and concurrency control. */
-  requestQuota(input: { reason: string }): Promise<TokenQuotaApplyResult>;
+  requestQuota(input: RequestTokenQuotaInput): Promise<TokenQuotaApplyResult>;
 }
 
 /** Dependencies for the local token quota service. */
@@ -32,7 +33,7 @@ export function createTokenQuotaService(options: CreateTokenQuotaServiceOptions)
 
     async requestQuota(input) {
       const uuid = requireCloudUuid(options.accountSessionRepository);
-      return options.cloudClient.requestTokenQuota({ uuid, reason: input.reason });
+      return options.cloudClient.requestTokenQuota({ ...input, uuid });
     }
   };
 }

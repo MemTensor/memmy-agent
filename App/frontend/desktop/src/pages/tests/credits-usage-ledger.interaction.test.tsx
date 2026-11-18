@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { CreditRequestHover } from "../credit-request-hover.js";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,6 +26,21 @@ describe("usage list interaction",()=>{
     click(button('30 天'));expect(date.textContent).toBe('2026-09-16 – 2026-10-16');
   });
 
+  it("loads authorized full content inside the existing hover without a new modal", async()=>{
+    const loadContent=vi.fn(async()=>"owner full request");
+    await act(async()=>root.render(<AppProviders><CreditRequestHover content="redacted preview" requestId="call-local" loadContent={loadContent}/></AppProviders>));
+    const trigger=host.querySelector<HTMLElement>('span[tabindex="0"]')!;
+    await act(async()=>trigger.focus());
+    expect(loadContent).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('[role="region"]')?.textContent).toContain("owner full request");
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+  it("does not present a preview as full content when retained content is unavailable", async()=>{
+    await act(async()=>root.render(<AppProviders><CreditRequestHover content="old preview" requestId="expired" loadContent={async()=>null}/></AppProviders>));
+    await act(async()=>host.querySelector<HTMLElement>('span[tabindex="0"]')!.focus());
+    expect(document.querySelector('[role="region"]')?.textContent).toContain("请求内容不可用");
+    expect(document.querySelector('[role="region"]')?.textContent).not.toContain("old preview");
+  });
   it("keeps the request hover card open for multiline content and copying its ID",async()=>{
     const copy=vi.spyOn(navigator.clipboard,'writeText').mockResolvedValue();
     const row=rows()[0]!;

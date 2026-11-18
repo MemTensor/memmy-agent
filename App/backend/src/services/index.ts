@@ -27,6 +27,7 @@ import { createBuiltinAgentSourceRegistry } from "./builtin-agent-source-registr
 import { createBuiltinSkillTargetRegistry } from "./builtin-skill-target-registry.js";
 import { createAppConfigService, type AppConfigService } from "./app-config-service.js";
 import { createAccountService, type AccountService } from "./account-service.js";
+import { createCreditsService, type CreditsService } from "./credits-service.js";
 import { createAsrService, type AsrService } from "./asr-service.js";
 import { createTokenQuotaService, type TokenQuotaService } from "./token-quota-service.js";
 import {
@@ -60,6 +61,7 @@ import {
 import { createTurnService, type TurnService } from "./turn-service.js";
 
 export interface BackendServices {
+  credits: CreditsService;
   memoryClient: MemoryClient;
   agentAdapterRegistry: AgentAdapterRegistry;
   bootstrap: BootstrapService;
@@ -177,6 +179,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
 
   return {
     memoryClient: options.memoryClient,
+    credits: createCreditsService(options.cloudClient, options.appStateStore.repositories.accountSession),
     agentAdapterRegistry: options.agentAdapterRegistry,
     bootstrap: createBootstrapService({
       ...options,

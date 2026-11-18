@@ -729,6 +729,38 @@ describe("AccountService", () => {
     expect(calls).toEqual(["local-cloud-uuid", "cloud-update:cloud.login.uuid:true"]);
   });
 
+  it("mirrors the finished guide flag into the local account row so re-login skips onboarding", async () => {
+    const calls: string[] = [];
+    const service = createAccountService({
+      cloudClient: {
+        ...createCloudClientStub(),
+        async updateAccountGuide(input) {
+          calls.push(`cloud-update:${input.uuid}:${input.hasFinishedGuide}`);
+        },
+        async getAccountInfo(input) {
+          calls.push(`cloud-info:${input.uuid}`);
+          return { ...cloudProfile(), hasFinishedGuide: true };
+        }
+      },
+      accountSessionRepository: {
+        ...createAccountSessionRepositoryStub(),
+        get() {
+          return { authenticated: true as const, isNewUser: false, profile: cloudProfile() };
+        },
+        getCloudUuid() {
+          return "cloud.login.uuid";
+        },
+        upsert(input) {
+          calls.push(`local-upsert:${input.profile.hasFinishedGuide}`);
+          return { authenticated: true as const, isNewUser: false, profile: { ...cloudProfile(), hasFinishedGuide: true } };
+        }
+      }
+    });
+
+    await expect(service.markGuideFinished()).resolves.toEqual({ ok: true });
+    expect(calls).toEqual(["cloud-update:cloud.login.uuid:true", "cloud-info:cloud.login.uuid", "local-upsert:true"]);
+  });
+
   it("notifies cloud logout with stored uuid, then clears local session", async () => {
     const calls: string[] = [];
     const service = createAccountService({

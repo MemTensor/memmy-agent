@@ -57,3 +57,49 @@ describe("GET /api/token-quota/eligibility", () => {
     expect(getEligibility).toHaveBeenCalledTimes(1);
   });
 });
+
+
+it("passes the upgrade request through service and both HTTP boundaries without reporting pending", async () => {
+  const { createHttpCloudClient } = await import("../adapters/outbound/cloud-client/http-cloud-client.js");
+  const { createTokenQuotaService } = await import("../services/token-quota-service.js");
+  const redirect = { accepted: true, deprecated: true, formType: "CN_ZH",
+    formUrl: "https://alidocs.dingtalk.com/notable/share/form/official",
+    latestApplicationApi: "/api/credits/v1/plan-applications/latest" };
+  const eligibility = { eligible: true, deprecated: true, plansApi: "/api/credits/v1/plans",
+    latestApplicationApi: redirect.latestApplicationApi, compatibilityEndAt: null };
+  const fetchImpl = vi.fn(async (url: string | URL | Request) => new Response(JSON.stringify({
+    data: String(url).endsWith("eligibility") ? eligibility : redirect
+  })));
+  const cloudClient = createHttpCloudClient({ baseUrl: "https://cloud.test", fetchImpl: fetchImpl as typeof fetch });
+  const app = Fastify();
+  registerTokenQuotaRoutes(app, { tokenQuota: createTokenQuotaService({ cloudClient,
+    accountSessionRepository: { getCloudUuid: () => "current-account" } }), authenticateRuntimeToken: async () => undefined });
+  try {
+    const response = await app.inject({ method: "POST", url: "/api/token-quota/request",
+      payload: { requestId: "upgrade:1", region: "CN", language: "zh-CN" } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(redirect);
+    const status = await app.inject({ method: "GET", url: "/api/token-quota/eligibility" });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toEqual(eligibility);
+  } finally { await app.close(); }
+});
+
+it.each([
+  [410, "LEGACY_QUOTA_RETIRED"],
+  [409, "PLAN_APPLICATION_NOT_ELIGIBLE"],
+  [409, "BUSINESS_REQUEST_REUSED"]
+])("preserves the cloud HTTP %s compatibility failure %s", async (status, code) => {
+  const { createHttpCloudClient } = await import("../adapters/outbound/cloud-client/http-cloud-client.js");
+  const { createTokenQuotaService } = await import("../services/token-quota-service.js");
+  const cloudClient = createHttpCloudClient({ baseUrl: "https://cloud.test", fetchImpl: (async () =>
+    new Response(JSON.stringify({ code, message: "Action unavailable" }), { status: status as number })) as typeof fetch });
+  const app = Fastify();
+  registerTokenQuotaRoutes(app, { tokenQuota: createTokenQuotaService({ cloudClient,
+    accountSessionRepository: { getCloudUuid: () => "current-account" } }), authenticateRuntimeToken: async () => undefined });
+  try {
+    const response = await app.inject({ method: "POST", url: "/api/token-quota/request", payload: { requestId: "upgrade:1" } });
+    expect(response.statusCode).toBe(status);
+    expect(response.json().error.code).toBe(code);
+  } finally { await app.close(); }
+});

@@ -11,8 +11,9 @@ import type { AppRoutePath } from "../app/routes.js";
 import { clearFocusedAgentTarget, clearProductTourStep, readDeferredGuidanceStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
 import { useGuidanceProgress } from "../app/use-guidance-progress.js";
 import { isCampaignPromptSessionReady, isCampaignPromptSurfaceReady } from "../app/campaign-prompt-state.js";
-import { isCreditsPreviewMode } from "../app/credits-preview-mode.js";
 import { describeCreditPool } from "../app/credits-preview-quota.js";
+import { useCreditAccount } from "../app/use-credit-account.js";
+import { formatCreditAmount } from "../app/credit-display.js";
 import { useCreditDemo } from "../app/use-credit-demo.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { buildOnboardingStepCompletedEvent } from "../analytics/onboarding-analytics.js";
@@ -342,11 +343,15 @@ export function AppFrame(props: AppFrameProps) {
     unsetName: t("appFrame.unsetName"),
     unsetMeta: t("appFrame.unsetMeta")
   });
-  const creditAccountMenu = isCreditsPreviewMode() && state.bootstrap?.app.userMode === "account";
-  const creditDemo = useCreditDemo(creditAccountMenu);
-  const creditPool = creditAccountMenu ? describeCreditPool(creditDemo.demo, creditDemo.now) : null;
-  const creditQuota = creditPool ? { ...creditPool, balance: creditPool.totalRemaining } : null;
-  const profileMeta = creditQuota
+  const creditAccountMenu = state.bootstrap?.app.userMode === "account";
+  const creditAccount = useCreditAccount();
+  const creditDemo = useCreditDemo(creditAccountMenu && !creditAccount.live);
+  const creditPool = creditAccountMenu && !creditAccount.live ? describeCreditPool(creditDemo.demo, creditDemo.now) : null;
+  const creditQuota = creditAccount.live
+    // The menu is labelled "balance"; spendable (balance minus in-flight holds) swings to 0 on every call.
+    ? { plan: creditAccount.summary?.plan.code.toLowerCase(), balance: creditAccount.summary?.account.balance }
+    : creditPool ? { plan: creditPool.plan, balance: creditPool.totalRemaining } : null;
+  const profileMeta = creditQuota?.plan
     ? (t(creditQuota.plan === "pro" ? "plan.pro.name" : "plan.free.name"))
     : accountSummary.meta;
   const accountNameLine = truncateAccountDisplayText(accountSummary.name, SIDEBAR_PROFILE_NAME_MAX_VISUAL_WIDTH);
@@ -1198,7 +1203,7 @@ export function AppFrame(props: AppFrameProps) {
                         onClick={() => props.settingsNav?.onSelectTab(item.id)}
                       >
                         <span className="shrink-0">{icon}</span>
-                        <span className="flex-1 text-left">{t(item.labelKey)}</span>
+                        <span className="flex-1 text-left">{t(item.id === "tokens" && state.bootstrap?.app.userMode === "account" ? "credits.balance.title" : item.labelKey)}</span>
                       </button>
                     </div>
                   );
@@ -1695,15 +1700,15 @@ export function AppFrame(props: AppFrameProps) {
               <button type="button" className="app-frame-sidebar-menu__quota-figures" role="menuitem" onClick={openCreditBalance}>
                 <span>
                   <span>{t("credits.menu.plan")}</span>
-                  <strong>{t(creditQuota.plan === "pro" ? "plan.pro.name" : "plan.free.name")}</strong>
+                  <strong>{creditQuota.plan ? t(creditQuota.plan === "pro" ? "plan.pro.name" : "plan.free.name") : "—"}</strong>
                 </span>
                 <span>
                   <span>{t("credits.balance.title")}</span>
                   <strong>
-                    {creditQuota.balance.toLocaleString(language === "en-US" ? "en-US" : "zh-CN", {
+                    {typeof creditQuota.balance === "string" ? formatCreditAmount(creditQuota.balance, language) : creditQuota.balance?.toLocaleString(language === "en-US" ? "en-US" : "zh-CN", {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2
-                    })}
+                    }) ?? "—"}
                   </strong>
                 </span>
               </button>
@@ -1713,13 +1718,14 @@ export function AppFrame(props: AppFrameProps) {
                 role="menuitem"
                 aria-label={t("credits.balance.refresh")}
                 title={creditRefreshedAt ? t("credits.refreshed", { time: creditRefreshedAt.toLocaleTimeString(language) }) : t("credits.balance.refresh")}
-                onClick={() => { creditDemo.reload(); setCreditRefreshedAt(new Date()); }}
+                onClick={() => { if (creditAccount.live) creditAccount.reload(); else creditDemo.reload(); setCreditRefreshedAt(new Date()); }}
               >
                 <RefreshCw size={13} aria-hidden="true" />
               </button>
             </div>
           </div>
           <div className="app-frame-sidebar-menu__divider" />
+          {creditAccount.live && (creditAccount.error || (creditAccount.loading && !creditAccount.summary)) && <p role={creditAccount.error ? "alert" : "status"}>{t(creditAccount.error === "auth" ? "credits.live.auth" : creditAccount.error ? creditAccount.summary ? "credits.live.stale" : "credits.live.error" : "credits.live.loading")}</p>}
           {(
             <button type="button" className="app-frame-sidebar-menu__item app-frame-sidebar-menu__quota-upgrade" role="menuitem" onClick={openCreditPlans}>
               <span className="app-frame-sidebar-menu__item-icon"><ArrowUpRight size={13} /></span>
@@ -1812,9 +1818,9 @@ export function AppFrame(props: AppFrameProps) {
           onLearnMore={() => void openExternalUrl(getLegalLinkUrl("data", language, state.bootstrap?.legal))}
           showGift={
             state.bootstrap?.promotions?.improvementGift === true
-            && (state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0) > 0
+            && Number(state.bootstrap?.promotions?.improvementGiftRewardCredits ?? 0) > 0
           }
-          giftTokens={state.bootstrap?.promotions?.improvementGiftRewardTokens ?? 0}
+          giftCredits={state.bootstrap?.promotions?.improvementGiftRewardCredits ?? "0.00"}
         />
       )}
       <SearchPalette

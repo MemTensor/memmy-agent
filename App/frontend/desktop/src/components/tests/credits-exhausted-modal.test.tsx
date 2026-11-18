@@ -24,14 +24,15 @@ describe("CreditsExhaustedModal", () => {
     document.body.replaceChildren();
   });
 
-  it("shows the shared free-plan copy, reset time, and published application link", async () => {
+  it("shows the original PRD layout with real cycle time and an in-app upgrade action", async () => {
+    const onApplyMore = vi.fn();
     const onUseOwnModel = vi.fn();
     const onDismiss = vi.fn();
     await act(async () => {
       root.render(<I18nProvider language="zh-CN"><CreditsExhaustedModal
         plan="free"
         nextReset={nextReset}
-        upgradeUrl="https://example.com/form"
+        onApplyMore={onApplyMore}
         onUseOwnModel={onUseOwnModel}
         onViewDetails={vi.fn()}
         onDismiss={onDismiss}
@@ -41,9 +42,12 @@ describe("CreditsExhaustedModal", () => {
     const dialog = document.body.querySelector('[role="dialog"]');
     expect(dialog?.textContent).toContain("Agent 任务和记忆加工等平台模型功能暂不可用");
     expect(dialog?.textContent).toMatch(/免费版.*下次套餐积分重置.*2026.*12.*02.*17:30/);
+    expect(dialog?.querySelector("strong")?.textContent).toMatch(/2026.*12.*02.*17:30/);
     expect(dialog?.textContent).not.toContain("0.00");
-    expect(dialog?.querySelector<HTMLAnchorElement>("a")?.href).toBe("https://example.com/form");
-    expect(dialog?.querySelectorAll("button")).toHaveLength(2);
+    expect(dialog?.querySelector("a")).toBeNull();
+    expect(dialog?.querySelectorAll("button")).toHaveLength(3);
+    await act(async () => [...dialog!.querySelectorAll("button")].find(button => button.textContent === "申请升级")?.click());
+    expect(onApplyMore).toHaveBeenCalledTimes(1);
     await act(async () => {
       [...dialog!.querySelectorAll("button")].find((button) => button.textContent === "使用自有模型")?.click();
     });
@@ -61,7 +65,7 @@ describe("CreditsExhaustedModal", () => {
       root.render(<I18nProvider language="zh-CN"><CreditsExhaustedModal
         plan="pro"
         nextReset={nextReset}
-        upgradeUrl="https://example.com/form"
+        onApplyMore={vi.fn()}
         onUseOwnModel={onUseOwnModel}
         onViewDetails={onViewDetails}
         onDismiss={vi.fn()}

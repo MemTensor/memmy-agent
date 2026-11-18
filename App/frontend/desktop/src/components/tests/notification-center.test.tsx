@@ -4,6 +4,7 @@ import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
+import { NOTIFICATION_EXIT_MS } from "../notification-toast.js";
 import {
   NOTIFICATION_STACK_MAX_VISIBLE,
   NotificationCenterProvider,
@@ -50,6 +51,25 @@ describe("NotificationCenter", () => {
   afterEach(() => {
     act(() => root.unmount());
     document.body.replaceChildren();
+  });
+
+  it("slides out and dismisses itself after autoDismissMs", () => {
+    vi.useFakeTimers();
+    const onClose = vi.fn();
+    act(() => {
+      center?.notify({ title: "签到成功", autoDismissMs: 1000, onClose });
+    });
+    expect(stackItems()).toHaveLength(1);
+
+    act(() => vi.advanceTimersByTime(1000));
+    // Still mounted while the exit animation plays, then removed.
+    expect(stackItems()[0]?.classList.contains("memmy-notification--leaving")).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+
+    act(() => vi.advanceTimersByTime(NOTIFICATION_EXIT_MS));
+    expect(stackItems()).toHaveLength(0);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 
   it("caps visible notifications and queues the overflow", () => {

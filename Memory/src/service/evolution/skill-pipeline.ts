@@ -1,3 +1,4 @@
+import { isCreditModelError } from "../../model/http.js";
 import {
   SKILL_CRYSTALLIZE_PROMPT,
   SKILL_REBUILD_PROMPT,
@@ -945,6 +946,7 @@ private async enhanceSkillDraft(
         }
       };
     } catch (error) {
+      if (isCreditModelError(error)) throw error;
       return { ok: false, reason: `llm-failed: ${errorMessageFromUnknown(error) ?? "unknown"}` };
     }
   }

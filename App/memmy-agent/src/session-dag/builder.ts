@@ -284,6 +284,7 @@ export class SessionDagBuilder {
       systemPrompt: DAG_BUILDER_SYSTEM_PROMPT,
       userPayload: payload,
       chatArgs: {
+        billingOperation: "SESSION_DAG",
         model: this.model,
         messages: [
           { role: "system", content: DAG_BUILDER_SYSTEM_PROMPT },

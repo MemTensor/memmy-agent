@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import {
   AccountProfileViewSchema,
+  CreditAccountStateSchema,
   AccountSessionViewSchema,
   type AccountChannel,
   type AccountProfileView,
@@ -201,6 +202,7 @@ export function createAccountSessionRepository(db: DatabaseSync, secretStore: Se
         authenticated: true,
         isNewUser,
         profile: AccountProfileViewSchema.parse({
+          ...CreditAccountStateSchema.parse(input.profile),
           userId: input.profile.userId,
           email: input.profile.email,
           phoneNumber: input.profile.phoneNumber,
@@ -435,6 +437,7 @@ function readRawProfileString(value: unknown): string | null {
  */
 function toProfileView(row: AccountSessionRow): AccountProfileView {
   return AccountProfileViewSchema.parse({
+    ...CreditAccountStateSchema.parse(row.raw_profile_json ? parseRawProfile(row.raw_profile_json) ?? {} : {}),
     userId: row.user_id,
     email: row.email,
     phoneNumber: row.phone,

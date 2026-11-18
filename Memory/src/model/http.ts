@@ -1,3 +1,4 @@
+import { creditCheckpoint } from "./credit-checkpoint.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import type { ActualModelContext } from "../contracts/index.js";
 
@@ -18,6 +19,15 @@ export class ModelHttpError extends Error {
   }
 }
 
+/** Credit failures must reach the job owner before any retry or fallback model call. */
+export function isCreditModelError(error: unknown): boolean {
+  const codes = ["CREDIT_INSUFFICIENT", "CREDIT_BALANCE_RESERVED", "CREDIT_CALL_UNCERTAIN", "40308", "40309"];
+  if (error instanceof ModelHttpError && error.errorCode !== undefined) {
+    return codes.includes(error.errorCode.toUpperCase());
+  }
+  return error instanceof Error && /\b(?:CREDIT_INSUFFICIENT|CREDIT_BALANCE_RESERVED|CREDIT_CALL_UNCERTAIN|40308|40309)\b/i.test(error.message);
+}
+
 export async function postJsonWithRetry<T>(
   input: {
     provider: string;
@@ -31,6 +41,9 @@ export async function postJsonWithRetry<T>(
     actualModelContext?: Readonly<ActualModelContext>;
   }
 ): Promise<T> {
+  const checkpoint = creditCheckpoint(input.operation, input.body);
+  const completed = checkpoint?.read();
+  if (completed !== undefined) return completed as T;
   let lastError: unknown;
   for (let attempt = 0; attempt <= input.maxRetries; attempt += 1) {
     try {
@@ -58,13 +71,21 @@ export async function postJsonWithRetry<T>(
             input.actualModelContext
           );
         }
-        return parseJsonResponse<T>(input.provider, response, text);
+        const result = parseJsonResponse<T>(input.provider, response, text);
+        checkpoint?.save(result);
+        return result;
       } finally {
         clearTimeout(timeout);
       }
     } catch (error) {
+      // Without a cloud call ID, transport failure cannot prove the paid request was not accepted.
+      if (input.actualModelContext?.source === "account" &&
+          (!(error instanceof ModelHttpError) || error.httpStatus >= 500)) {
+        error = new ModelHttpError("平台调用结果待核实，已停止自动重试", input.provider, 502,
+          "CREDIT_CALL_UNCERTAIN", "平台调用结果待核实；请先核对消费明细，再手动重试未完成步骤。", input.actualModelContext);
+      }
       lastError = error;
-      if (attempt < input.maxRetries && isRetryableModelRequestError(error)) {
+      if (!isCreditModelError(error) && input.actualModelContext?.source !== "account" && attempt < input.maxRetries && isRetryableModelRequestError(error)) {
         const delayMs = Math.min(1_000 * Math.pow(2, attempt), 8_000);
         logger.warn("request.retry_scheduled", {
           provider: input.provider,
@@ -172,7 +193,7 @@ function parseProviderFailure(text: string): {
       ? String(rawCode)
       : undefined;
     const normalizedCode = errorCode?.trim().toLowerCase();
-    const isQuotaCode = normalizedCode === "40309";
+    const isQuotaCode = ["40309", "40308", "credit_insufficient"].includes(normalizedCode ?? "");
     if (typeof parsed.error === "string" && parsed.error.trim()) {
       return { detail: parsed.error, errorCode, isBusinessError: true, message: parsed.error.trim() };
     }

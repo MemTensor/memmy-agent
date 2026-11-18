@@ -34,7 +34,7 @@ describe("credit error examples", () => {
   it("keeps the Agent's visible reply and editable draft after pausing", async () => {
     const original = readCreditDemo();
     await show("agent", <CreditsLimitsPage/>);
-    expect(host.textContent).toContain("积分不足，当前任务已暂停。可申请升级，权益开通后再继续任务");
+    expect(host.textContent).toContain("积分不足，当前任务已暂停。已完成内容保留，积分恢复或切换自有模型后，请手动继续。");
     expect(host.querySelector('[aria-label="Agent 任务积分不足"] button')).toBeNull();
     expect(host.querySelector(".agent-model-error-notice")).toBeNull();
     expect(host.textContent).toContain("已展示的回复、工具结果和用户输入保留");
@@ -70,7 +70,7 @@ describe("credit error examples", () => {
     await show("agent&credits-recovered=1", <CreditsLimitsPage/>);
     const rendered = host.textContent ?? "";
     const partial = rendered.indexOf("恢复方式还在整理中。");
-    const warning = rendered.indexOf("积分不足，当前任务已暂停。可申请升级，权益开通后再继续任务");
+    const warning = rendered.indexOf("积分不足，当前任务已暂停。已完成内容保留，积分恢复或切换自有模型后，请手动继续。");
     const newUser = rendered.indexOf("积分已经补足。请继续整理恢复方式。");
     const newReply = rendered.indexOf("恢复方式补充如下");
     expect(partial).toBeGreaterThanOrEqual(0);
@@ -85,10 +85,14 @@ describe("credit error examples", () => {
     expect(host.textContent).toContain("10/10");
     expect(host.querySelector('[aria-labelledby="mk-create-title"]')).toBeNull();
     const createButton = host.querySelector<HTMLButtonElement>(".mk-new-btn");
-    expect(createButton?.disabled).toBe(true);
-    expect(createButton?.getAttribute("aria-label")).toContain("10/10");
+    expect(createButton?.disabled).toBe(false);
+    await act(async () => createButton!.click());
+    expect(host.querySelector('.mk-limit-toast[role="alert"]')?.textContent).toContain("知识库数量已达上限（10/10）");
     expect(host.querySelector('[aria-labelledby="mk-create-title"]')).toBeNull();
-    expect([...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent?.trim() === "直接上传")?.disabled).toBe(false);
+    const upload = [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent?.trim() === "直接上传")!;
+    expect(upload.disabled).toBe(false);
+    await act(async () => upload.click());
+    expect([...host.querySelectorAll('[role="menuitem"]')].some(item => item.textContent?.trim() === "本地文件")).toBe(true);
     expect(host.textContent).toContain("积分产品方案.pdf");
     expect(host.textContent).not.toContain("购买积分");
     expect(host.textContent).not.toContain("升级进阶版");
@@ -125,15 +129,15 @@ describe("credit error examples", () => {
     expect(readCreditDemo().plan).toBe("pro");
     expect(host.textContent).toContain("50/50");
     const createButton = host.querySelector<HTMLButtonElement>(".mk-new-btn");
-    expect(createButton?.disabled).toBe(true);
-    expect(createButton?.getAttribute("aria-label")).toContain("50/50");
+    expect(createButton?.disabled).toBe(false);
+    await act(async () => createButton!.click());
+    expect(host.querySelector('.mk-limit-toast[role="alert"]')?.textContent).toContain("知识库数量已达上限（50/50）");
     expect(host.querySelector('[aria-labelledby="mk-create-title"]')).toBeNull();
   });
-  it("does not suggest upgrading an exhausted Plus plan", async () => {
+  it("explains manual recovery for the domestic Pro plan", async () => {
     await show("agent&credits-plan=pro", <CreditsLimitsPage/>);
     const notice = host.querySelector('[aria-label="Agent 任务积分不足"]');
-    expect(notice?.textContent).toContain("可查看积分来源或切换自有模型后继续");
-    expect(notice?.textContent).not.toContain("升级套餐");
+    expect(notice?.textContent).toContain("积分不足，当前任务已暂停。已完成内容保留，积分恢复或切换自有模型后，请手动继续。");
   });
   it("keeps error prompts plan-neutral in the international edition", async () => {
     vi.stubEnv("MEMMY_APP_EDITION", "intl");

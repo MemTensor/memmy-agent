@@ -1,3 +1,4 @@
+import { isCreditModelError } from "../../model/http.js";
 import { isRecord } from "../../utils/json.js";
 
 export class SummaryModelUnconfiguredError extends Error {
@@ -305,6 +306,7 @@ export class EmbeddingJobProcessor {
   }
 
   enqueueEmbeddingRetryAfterFailure(item: PreparedEmbeddingJob, error: unknown): boolean {
+    if (isCreditModelError(error)) return false;
     if (this.deps.repos.processing.get(item.memory.id)) return false;
     const retry = this.deps.enqueueEmbeddingRetry(
       item.memory,

@@ -81,6 +81,25 @@ afterEach(() => {
 });
 
 describe("memmy-agent client", () => {
+  it("opens the global prompt for live platform credit failures, not replays or BYOK quota", async () => {
+    const dispatchEvent = vi.fn(); vi.stubGlobal("window", {dispatchEvent});
+    const sockets: FakeSocket[] = [];
+    const client = createMemmyAgentClient({baseUrl:"https://agent.local:18980",clientId:"frontend-test",
+      fetchFn:vi.fn(async () => json(bootstrap)) as typeof fetch,
+      webSocketFactory:url => { const socket=new FakeSocket(url); sockets.push(socket); return socket; }});
+    const connection = await connectReady(client,sockets);
+    const event = {event:"message",chat_id:"chat-1",content:"Error calling LLM: 积分不足",
+      model_error:{category:"quota_exhausted",source:"account"}};
+    sockets[0]!.emit({...event,replayed:true});
+    sockets[0]!.emit({...event,model_error:{category:"quota_exhausted",source:"byok"}});
+    sockets[0]!.emit({...event,content:"Error calling LLM: CREDIT_BALANCE_RESERVED",model_error:{category:"model_failed",source:"account",detail:"CREDIT_BALANCE_RESERVED"}});
+    expect(dispatchEvent).not.toHaveBeenCalled();
+    sockets[0]!.emit(event);
+    expect(dispatchEvent).toHaveBeenCalledTimes(1);
+    expect(dispatchEvent.mock.calls[0]![0].type).toBe("memmy:credits-exhausted-prompt");
+    connection.close();
+  });
+
   it("preserves application-wide Excel status on the compatible Excel routes", async () => {
     let enabled = false;
     const writes: unknown[] = [];

@@ -78,10 +78,8 @@ For complete installation and configuration instructions, see the [Getting Start
 Download Memmy from the [official website](https://memmy.bot/) or [GitHub Releases](https://github.com/MemTensor/memmy-agent/releases).
 
 > [!TIP]
-> Sign up for Memmy to receive free tokens and try the complete Memory + Agent Runtime.<br>
-> **Trial credits:**<br>
-> Registration grants Agent task trial tokens; the current balance and usage are shown in the app.<br>
-> When the trial credits run out, switch to BYOK mode and use your own model API.
+> Sign up for Memmy to receive 1,000 free credits every month and try the complete Memory + Agent Runtime.<br>
+> When your credits run out, apply for an upgrade or switch to BYOK mode and use your own model API.
 
 #### 2. Use the `memmy` CLI / TUI
 
