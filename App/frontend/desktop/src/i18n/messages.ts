@@ -597,7 +597,7 @@ export const zhCNMessages = {
   "collab.sessions.empty.task.title": "新建任务",
   "collab.sessions.empty.task.body": "在侧栏该项目下点击「＋」新建任务。任务在本机执行，默认共享给成员，发出第一条消息后进入项目；可在输入框旁关闭「共享给成员」。",
   "collab.sessions.empty.associate.title": "关联已有任务",
-  "collab.sessions.empty.associate.body": "点击右上角「关联任务」，将你在 Claude Code、Cursor、WorkBuddy 等 Agent 中的任务纳入项目。按组关联后，该组新增的任务也会进入项目。在其他 Agent 中工作时，也可以直接在对话里说明，例如「帮我把这个会话共享给 Memmy 的 xx 项目」，由 Agent 完成纳入。",
+  "collab.sessions.empty.associate.body": "点击右上角「关联任务」，将你在 Claude Code、Cursor、WorkBuddy 等 Agent 中的任务添加至项目。按组关联后，该组新增的任务也会进入项目。在其他 Agent 中工作时，也可以直接在对话里说明，例如「帮我把这个会话共享给 Memmy 的 xx 项目」，由 Agent 完成添加。",
   "collab.contextTip.text": "{who}已在这里留下 {count} 条对话。输入 @ 可引用其中一条，Agent 会读到全文。",
   "collab.contextTip.textAnon": "成员已在这里留下 {count} 条对话。输入 @ 可引用其中一条，Agent 会读到全文。",
   "collab.contextTip.dismiss": "知道了",
