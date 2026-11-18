@@ -8,7 +8,7 @@ import { PluginCapabilityHost } from "../plugin-capability-host.js";
 import { RecordingEntryPage, useRecordingEntry, type RecordingEntryController } from "../recording-entry.js";
 import { readRecordingArchive, saveRecordingArchiveEntry } from "../../lib/recording-archive.js";
 import { PluginUiProvider, usePluginUi, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import type { RecordingPanelSession } from "../interview-recording-panel.js";
+import type { RecordingPanelSession } from "../recording-transcript.js";
 import type { UploadAgentMediaInput } from "../../api/memmy-agent-client.js";
 import type { AsrRecordingTranscription } from "../asr-recorder.js";
 

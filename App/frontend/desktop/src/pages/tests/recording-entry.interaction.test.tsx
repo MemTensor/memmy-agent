@@ -95,6 +95,18 @@ describe("RecordingEntryPage", () => {
       .toBe("示例-制造企业用工访谈13:05");
   });
 
+  it("keeps a live transcription warning on its recording row and current detail", async () => {
+    const warning = "实时转写暂时超时，录音不受影响；结束录音后将重试转写。";
+    const value = session({ status: "paused", liveWarning: warning });
+    await render(value);
+    expect(container.querySelector(".recording-page__error")).toBeNull();
+    expect(container.querySelector(".recording-page__list-row--active .recording-page__live-warning")?.textContent).toBe(warning);
+    expect(container.querySelector(".recording-page__list-row:not(.recording-page__list-row--active) .recording-page__live-warning")).toBeNull();
+    await render({ ...value, view: "live" });
+    expect(container.querySelector(".recording-page > .recording-page__live-warning")?.textContent).toBe(warning);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it("starts recording and opens upload directly from the list header", async () => {
     const value = session();
     await render(value);
@@ -435,7 +447,7 @@ describe("RecordingEntryCard", () => {
     const failed = { ...entry, status: "failed" as const };
     const render = (value: RecordingEntrySession) => act(async () => root.render(
       <I18nProvider language="zh-CN"><RecordingEntryCard session={value}
-        onClose={vi.fn()} onOpenList={vi.fn()} /></I18nProvider>
+        onClose={vi.fn()} /></I18nProvider>
     ));
     try {
       await render(session({ live: failed, error: "API接口错误: ASR upstream request failed" }));

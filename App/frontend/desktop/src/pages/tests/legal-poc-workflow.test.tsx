@@ -243,8 +243,8 @@ it("uses the pending plugin recorder from the list and blocks a second microphon
   expect(pluginStart).toHaveBeenCalledTimes(1); expect(localStart).not.toHaveBeenCalled();
   await act(async () => root.render(wrap(<RecordingEntryPage session={session} onStart={pluginStart} uploadBlocked
     externalRecording={{ title: "现场访谈", elapsedMs: 2000, status: "recording", onOpen: openLive }} />)));
-  expect(container.querySelector<HTMLButtonElement>(".recording-panel__action--primary")!.disabled).toBe(true);
-  expect(container.querySelector<HTMLButtonElement>(".recording-panel__action:not(.recording-panel__action--primary)")!.disabled).toBe(true);
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="开始录音"]')!.disabled).toBe(true);
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="上传录音"]')!.disabled).toBe(true);
   await act(async () => container.querySelector<HTMLButtonElement>(".recording-page__list-open")!.click());
   expect(openLive).toHaveBeenCalledTimes(1); expect(localStart).not.toHaveBeenCalled();
 }));

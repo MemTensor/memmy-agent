@@ -15,7 +15,7 @@ import {
   type AgentThreadPanelController,
 } from "../agent-thread-panel.js";
 import { THREAD_TEXT_PREVIEW_MAX_BYTES, THREAD_OFFICE_PREVIEW_MAX_BYTES, type ThreadPreviewContext } from "../agent-thread-panel-preview.js";
-import type { RecordingPanelSession } from "../interview-recording-panel.js";
+import type { RecordingPanelSession } from "../recording-transcript.js";
 import type { RecordingEntrySession } from "../recording-entry.js";
 import { requestBrowserNewTab, takePendingBrowserNewTab } from "../browser-panel.js";
 
@@ -176,7 +176,7 @@ describe("AgentThreadPanel", () => {
       onController: (value) => { panel = value; } });
     act(() => panel.openTab({ id: PLUGIN_RECORDING_TAB_ID, type: "recording", name: "录音" }));
     expect(tabTitles()).toEqual(["录音"]);
-    expect(container.querySelector(".thread-panel__main .workspace-artifact-preview-pane--embedded")).not.toBeNull();
+    expect(container.querySelector(".thread-panel__main .recording-page")).not.toBeNull();
     expect(container.querySelector(".thread-panel__main .sidebar-resize-handle")).toBeNull();
 
     act(() => panel.openTab({ id: "file:/repo/notes.md", type: "file", name: "notes.md", path: "/repo/notes.md" }));

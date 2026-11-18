@@ -26,8 +26,8 @@ import type { I18nContextValue } from "../i18n/i18n-provider.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { enUSMessages, zhCNMessages } from "../i18n/messages.js";
 import { mergeLiveLines, type AsrLiveLine } from "../lib/asr-live-transcription.js";
-import type { RecordingPanelTranscript } from "./interview-recording-panel.js";
-import { formatClock, RecordingPlayer, TranscriptTurns } from "./interview-recording-panel.js";
+import type { RecordingPanelSession, RecordingPanelTranscript } from "./recording-transcript.js";
+import { formatClock, RecordingPlayer, TranscriptTurns } from "./recording-transcript.js";
 import { blobToAudioBase64, isLiveAsrTimeout, useAsrRecorder } from "./asr-recorder.js";
 import { pushWaveformLevel } from "../lib/audio-pcm-tap.js";
 import { persistRecording, persistRecordingAudio } from "../lib/recording-deliverables.js";
@@ -82,6 +82,8 @@ export interface RecordingArchiveEntry {
 
 /** Everything the recording page renders. */
 export interface RecordingEntrySession {
+  /** A recoverable live-transcription issue belonging only to the current capture. */
+  liveWarning?: string | null;
   /** Which of the page's three views is showing. */
   view: "list" | "live" | "transcript";
   status: "idle" | "starting" | "recording" | "paused" | "transcribing";
@@ -160,6 +162,8 @@ export function applySidebarRecordingAction(
 export interface RecordingEntryController {
   open: boolean;
   compactOpen: boolean;
+  compactSession: RecordingEntrySession;
+  compactBlocked: boolean;
   toggleCompact(): void;
   closeCompact(): void;
   toggle(): void;
@@ -203,6 +207,8 @@ export function useRecordingEntry(
   deliver?: RecordingDeliverFn,
   archiveOptions?: {
     scope: string; sessionKey?: string; onArchived?(entry: RecordingArchiveEntry): void; resolveAudio(entry: RecordingArchiveEntry): Promise<string | null>;
+    /** Includes draft conversations that do not yet have an archival session key. */
+    conversationKey?: string;
     deleteFiles?(paths: string[]): Promise<void>; onRemoved?(entry: RecordingArchiveEntry): void;
     /** The recording was stored before transcription, so it can be staged for the diagnosis card now. */
     onHandedOver?(recording: { audio: UploadedAgentMedia; transcriptName: string }): void;
@@ -211,7 +217,9 @@ export function useRecordingEntry(
 ): RecordingEntryController {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  const [compactOpen, setCompactOpen] = useState(false);
+  const conversationOwner = JSON.stringify([archiveOptions?.scope ?? "", archiveOptions?.conversationKey ?? archiveOptions?.sessionKey ?? ""]);
+  const [compactOwners, setCompactOwners] = useState<ReadonlySet<string>>(() => new Set());
+  const [captureOwner, setCaptureOwner] = useState<string | null>(null);
   const [levels, setLevels] = useState<number[]>([]);
   const [view, setView] = useState<RecordingEntrySession["view"]>("list");
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -253,6 +261,7 @@ export function useRecordingEntry(
   }, [archiveOptions?.scope]);
   const [deliverables, setDeliverables] = useState<UploadedAgentMedia[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [liveWarning, setLiveWarning] = useState<string | null>(null);
   /** Rows whose transcription is being tried again, by row id. */
   const [retrying, setRetrying] = useState<ReadonlySet<string>>(() => new Set());
   // Guards a second click before React has re-rendered with the row marked.
@@ -284,12 +293,15 @@ export function useRecordingEntry(
   const recorder = useAsrRecorder(asrClient, {
     live: {
       onLevel: (level) => setLevels((current) => pushWaveformLevel(current, level, WAVE_BARS)),
-      onLine: (line) => setLines((current) => mergeLiveLines(current, line)),
+      onLine: (line) => {
+        setLines((current) => mergeLiveLines(current, line));
+        setLiveWarning(null);
+      },
       // Same reasoning as the plugin's recording card: a failed live segment
       // or a streaming connection that never opens must not look like nothing
       // happened. Only the first message is kept, so a doomed fallback that
       // keeps retrying every few seconds does not overwrite it with a repeat.
-      onError: (liveError) => setError((current) => current ?? (isLiveAsrTimeout(liveError) ? t("plugin.ui.audio.liveTimeout") : liveError.message))
+      onError: (liveError) => setLiveWarning((current) => current ?? (isLiveAsrTimeout(liveError) ? t("plugin.ui.audio.liveTimeout") : liveError.message))
     }
   });
 
@@ -466,10 +478,13 @@ export function useRecordingEntry(
   const start = useCallback(() => {
     if (!recordingAllowed || !asrClient || startInFlight.current || finishInFlight.current || recorder.isRecording || recorder.isStarting || recorder.isTranscribing) return;
     recordingOrigin.current = { sessionKey: archiveOptions?.sessionKey };
+    setCaptureOwner(conversationOwner);
     startInFlight.current = true;
     setOpen(true);
     setLevels([]);
     setError(null);
+    setLiveWarning(null);
+    setOpened(null);
     setLive(null);
     setElapsedMs(0);
     setLines([]);
@@ -481,7 +496,7 @@ export function useRecordingEntry(
       viewRef.current = "list";
       setView("list");
     }).finally(() => { startInFlight.current = false; });
-  }, [asrClient, recorder, recordingAllowed, archiveOptions?.sessionKey]);
+  }, [asrClient, recorder, recordingAllowed, archiveOptions?.sessionKey, conversationOwner]);
 
   const upload = useCallback((file: File) => {
     if (!recordingAllowed) return;
@@ -683,6 +698,7 @@ export function useRecordingEntry(
       audioUrl: opened.audioUrl ?? allRecordings.find((row) => row.id === opened.id)?.audioUrl ?? null } : null,
     deliverables,
     error: !asrClient ? t("plugin.ui.audio.unavailable") : error ?? (status !== "idle" ? recorder.error?.message : null) ?? null,
+    liveWarning: status === "recording" || status === "paused" ? liveWarning : null,
     start,
     pause: () => recorder.pause(),
     resume: () => recorder.resume(),
@@ -733,15 +749,28 @@ export function useRecordingEntry(
     reset
   }), [
     asrClient, deliverables, elapsedMs, error, finish, lines, levels, live, opened, recorder, allRecordings, archiveOptions,
-    reset, retry, retrying, remove, start, status, t, upload, deliver, view, archive
+    reset, retry, retrying, remove, start, status, t, upload, deliver, view, archive, liveWarning
   ]);
 
+  const ownsCapture = captureOwner === null || captureOwner === conversationOwner;
+  const compactSession = ownsCapture ? session : {
+    ...session, status: "idle" as const, elapsedMs: 0, lines: [], levels: [], live: null,
+    opened: null, deliverables: [], error: null, liveWarning: null
+  };
   return {
     archive,
     open,
-    compactOpen,
-    toggleCompact: () => setCompactOpen((current) => !current),
-    closeCompact: () => setCompactOpen(false),
+    compactOpen: compactOwners.has(conversationOwner),
+    compactSession,
+    compactBlocked: !ownsCapture && status !== "idle",
+    toggleCompact: () => setCompactOwners((current) => {
+      const next = new Set(current);
+      if (next.has(conversationOwner)) next.delete(conversationOwner); else next.add(conversationOwner);
+      return next;
+    }),
+    closeCompact: () => setCompactOwners((current) => {
+      const next = new Set(current); next.delete(conversationOwner); return next;
+    }),
     toggle,
     close,
     session
@@ -751,9 +780,9 @@ export function useRecordingEntry(
 /** Compact composer recorder; hiding it leaves the shared microphone running. */
 export function RecordingEntryCard(props: {
   session: RecordingEntrySession;
+  onStart?(): void;
   disabled?: boolean;
   onClose(): void;
-  onOpenList(): void;
 }): ReactNode {
   const { t } = useTranslation();
   const session = props.session;
@@ -765,9 +794,9 @@ export function RecordingEntryCard(props: {
   const levels = session.levels ?? [];
   return <div className={`recording-bar recording-bar--interview recording-entry-card${recording ? " recording-bar--live" : ""}`}>
     <span className="recording-bar__icon" aria-hidden="true"><Mic size={18} /></span>
-    <p className="recording-bar__title">{recording
+    <p className="recording-bar__title" role="status">{recording
       ? t(session.status === "paused" ? "plugin.ui.audio.paused" : "plugin.ui.audio.recording")
-      : t("recording.page.title")}</p>
+      : t(session.status === "transcribing" ? "recording.page.transcribingShort" : "recording.page.title")}</p>
     <span className="recording-bar__clock" role="timer" aria-label={t("plugin.ui.audio.elapsed")}>{formatClock(session.elapsedMs)}</span>
     <RecordingWaveform levels={levels} active={session.status === "recording"} idle={session.status === "idle"} />
     <div className="recording-bar__actions">
@@ -777,13 +806,12 @@ export function RecordingEntryCard(props: {
         </button>
         <button type="button" className="recording-bar__button recording-bar__button--primary" onClick={session.finish}>{t("plugin.ui.audio.stop")}</button>
       </> : <button type="button" className="recording-bar__button recording-bar__button--primary"
-        disabled={props.disabled || busy} onClick={session.start}>{t("plugin.ui.audio.start")}</button>}
-      {session.live ? <button type="button" className="recording-bar__button" onClick={props.onOpenList}>{t("recording.page.list")}</button> : null}
+        disabled={props.disabled || busy} onClick={props.onStart ?? session.start}>{t("plugin.ui.audio.start")}</button>}
       <button type="button" className="recording-bar__close" aria-label={t("plugin.ui.dismissCard")} onClick={props.onClose}><X size={16} /></button>
     </div>
-    {session.status === "transcribing" ? <span className="recording-bar__note" role="status">{t("plugin.ui.audio.transcribing")}</span> : null}
     {session.error && !previousTranscriptionFailed
       ? <span className="recording-bar__note recording-bar__note--warning" role="alert">{session.error}</span> : null}
+    {session.liveWarning ? <span className="recording-bar__note" role="status">{session.liveWarning}</span> : null}
   </div>;
 }
 
@@ -896,7 +924,7 @@ export function RecordingEntryPage(props: {
           {props.externalRecording ? <RecordingActiveRow title={props.externalRecording.title}
             status={props.externalRecording.status} elapsedMs={props.externalRecording.elapsedMs} onOpen={props.externalRecording.onOpen} /> : null}
           {showActiveRow ? <RecordingActiveRow title={session.status === "transcribing" && session.live ? recordingDisplayTitle(session.live) : t("recording.page.title")}
-            status={session.status} elapsedMs={session.elapsedMs} onOpen={session.showLive}
+            status={session.status} elapsedMs={session.elapsedMs} onOpen={session.showLive} warning={session.liveWarning}
             onPause={session.pause} onResume={session.resume} onFinish={session.finish} /> : null}
           {filteredRows.map((row) => {
             // A retry is in flight for this row, whether or not the row itself
@@ -1002,7 +1030,7 @@ function RecordingNameEditor(props: { title: string; onSave(name: string): void;
   </span>;
 }
 
-function RecordingActiveRow(props: { title: string; status: string; elapsedMs: number; onOpen(): void; onPause?(): void; onResume?(): void; onFinish?(): void }): ReactNode {
+function RecordingActiveRow(props: { title: string; status: string; elapsedMs: number; warning?: string | null; onOpen(): void; onPause?(): void; onResume?(): void; onFinish?(): void }): ReactNode {
   const { t } = useTranslation();
   return <li className="recording-page__list-row recording-page__list-row--table recording-page__list-row--active">
     <button type="button" className="recording-page__list-open" onClick={props.onOpen}>
@@ -1014,6 +1042,7 @@ function RecordingActiveRow(props: { title: string; status: string; elapsedMs: n
         </span>
           <span className="recording-page__list-status">{t(props.status === "paused" ? "plugin.ui.audio.paused"
             : props.status === "transcribing" ? "plugin.ui.audio.transcribing" : "plugin.ui.audio.recording")}</span>
+          {props.warning ? <span className="recording-page__live-warning" role="status">{props.warning}</span> : null}
         </span>
         <span className="recording-page__list-meta">{formatClock(props.elapsedMs)}</span>
       </span>
@@ -1060,7 +1089,11 @@ function RecordingDeleteDialog(props: { entry: RecordingArchiveEntry; session: R
     onCancel={() => { if (!inFlight.current) props.onClose(); }} onConfirm={() => void remove()} />, document.body);
 }
 
-function LiveView(props: { session: RecordingEntrySession }): ReactNode {
+function LiveView(props: {
+  session: Pick<RecordingEntrySession, "status" | "elapsedMs" | "lines" | "live" | "error" | "liveWarning" | "back" | "pause" | "resume" | "finish">;
+  title?: string;
+  backLabel?: string;
+}): ReactNode {
   const { t } = useTranslation();
   const session = props.session;
   const recording = session.status === "recording" || session.status === "paused";
@@ -1069,10 +1102,10 @@ function LiveView(props: { session: RecordingEntrySession }): ReactNode {
   return (
     <div className="recording-page">
       <header className="recording-page__bar">
-        <button type="button" className="recording-page__back" aria-label={t("recording.page.backToList")} onClick={session.back}>
+        <button type="button" className="recording-page__back" aria-label={props.backLabel ?? t("recording.page.backToList")} onClick={session.back}>
           <ChevronLeft size={16} aria-hidden="true" />
         </button>
-        <h2 className="recording-page__title">{t("recording.page.title")}</h2>
+        <h2 className="recording-page__title">{props.title ?? t("recording.page.title")}</h2>
       </header>
       <div className="recording-live" data-status={session.status}>
       <div className="recording-panel__status recording-live__status" role="status">
@@ -1106,6 +1139,7 @@ function LiveView(props: { session: RecordingEntrySession }): ReactNode {
       <div className="recording-page__transcript-tabs">
         <h3 className="recording-page__transcript-heading">{t("recording.page.transcriptTitle")}</h3>
       </div>
+      {session.liveWarning ? <p className="recording-page__live-warning" role="status">{session.liveWarning}</p> : null}
       <div className="recording-panel__lines">
         {session.lines.length === 0
           ? recording || session.status === "starting" ? <p className="recording-panel__empty">{t(session.status === "paused" ? "plugin.ui.audio.paused" : "recording.page.listening")}</p> : null
@@ -1166,45 +1200,77 @@ function RecordingDetailsMenu(props: { entry: RecordingArchiveEntry; session: Re
 
 function TranscriptView(props: { session: RecordingEntrySession; entry: RecordingArchiveEntry }): ReactNode {
   const { t } = useTranslation();
-  const [seek, setSeek] = useState<{ ms: number; sequence: number } | undefined>();
   const [renaming, setRenaming] = useState(false);
   const pending = props.entry.status === "transcribing" || props.session.retrying?.has(props.entry.id) === true;
   const failed = props.entry.status === "failed" && !pending;
   const ready = !failed && !pending;
-  return (
-    <div className="recording-page">
-      <header className="recording-page__bar recording-page__bar--detail">
-        <button type="button" className="recording-page__back" aria-label={t("recording.page.backToList")} onClick={props.session.back}>
-          <ChevronLeft size={16} aria-hidden="true" />
-        </button>
-        {renaming ? <div className="recording-page__title"><RecordingNameEditor title={recordingDisplayTitle(props.entry)}
-          onSave={(name) => { props.session.rename?.(props.entry, name); setRenaming(false); }} onCancel={() => setRenaming(false)} /></div>
-          : <h2 className="recording-page__title" title={recordingDisplayTitle(props.entry)}>{recordingDisplayTitle(props.entry)}</h2>}
-        {ready || failed || props.session.rename || props.session.remove ? <div className="thread-preview__actions">
-          {ready ? <>
-            <Tooltip content={t("recording.page.summarize")}><button type="button" className="thread-preview__action recording-page__summary-action" aria-label={t("recording.page.summarize")}
-              onClick={() => props.session.deliver(props.entry, "summarize")}><FileText size={16} aria-hidden="true" /></button></Tooltip>
-          </> : null}
-          {failed && props.session.retry ? <button type="button" className="thread-preview__action" aria-label={t("recording.page.retry")}
-            title={t("recording.page.retry")} onClick={() => props.session.retry?.(props.entry)}>
-            <RotateCw size={16} aria-hidden="true" />
-          </button> : null}
-          {ready || props.session.rename || props.session.remove
-            ? <RecordingDetailsMenu entry={props.entry} session={props.session} allowAttach={ready} onRename={() => setRenaming(true)} /> : null}
-        </div> : null}
-      </header>
-      {props.entry.audioUrl ? <RecordingPlayer src={props.entry.audioUrl} durationMs={props.entry.durationMs} seek={seek} /> : null}
-      <div className="recording-page__transcript-tabs">
-        <h3 className="recording-page__transcript-heading">{t("recording.page.transcriptTitle")}</h3>
-      </div>
-      {!ready ? <div className={`recording-page__transcription-state${pending ? " recording-page__transcription-state--pending" : ""}`} role="status">
-        <span className="recording-page__transcription-label">{pending ? <Loader2 size={16} className="recording-page__transcribing-spinner" aria-hidden="true" /> : null}
-          {failed ? props.entry.transcriptionError || (props.session.live?.id === props.entry.id ? props.session.error : null)
-            || t("recording.page.transcriptionFailed") : t("plugin.ui.audio.transcribing")}</span>
+  return <RecordingTranscriptPage audioUrl={props.entry.audioUrl} durationMs={props.entry.durationMs}
+    transcript={props.entry.transcript} status={pending ? "transcribing" : failed ? "failed" : "ready"}
+    error={props.entry.transcriptionError || (props.session.live?.id === props.entry.id ? props.session.error : null)}
+    onBack={props.session.back} header={<>
+      {renaming ? <div className="recording-page__title"><RecordingNameEditor title={recordingDisplayTitle(props.entry)}
+        onSave={(name) => { props.session.rename?.(props.entry, name); setRenaming(false); }} onCancel={() => setRenaming(false)} /></div>
+        : <h2 className="recording-page__title" title={recordingDisplayTitle(props.entry)}>{recordingDisplayTitle(props.entry)}</h2>}
+      {ready || failed || props.session.rename || props.session.remove ? <div className="thread-preview__actions">
+        {ready ? <>
+          <Tooltip content={t("recording.page.summarize")}><button type="button" className="thread-preview__action recording-page__summary-action" aria-label={t("recording.page.summarize")}
+            onClick={() => props.session.deliver(props.entry, "summarize")}><FileText size={16} aria-hidden="true" /></button></Tooltip>
+        </> : null}
+        {failed && props.session.retry ? <button type="button" className="thread-preview__action" aria-label={t("recording.page.retry")}
+          title={t("recording.page.retry")} onClick={() => props.session.retry?.(props.entry)}>
+          <RotateCw size={16} aria-hidden="true" />
+        </button> : null}
+        {ready || props.session.rename || props.session.remove
+          ? <RecordingDetailsMenu entry={props.entry} session={props.session} allowAttach={ready} onRename={() => setRenaming(true)} /> : null}
       </div> : null}
-      {ready ? <TranscriptTurns transcript={props.entry.transcript} onSeek={props.entry.audioUrl ? (ms) => setSeek((current) => ({ ms, sequence: (current?.sequence ?? 0) + 1 })) : undefined} /> : null}
+    </>} />;
+}
+
+function RecordingTranscriptPage(props: {
+  header: ReactNode;
+  onBack(): void;
+  backLabel?: string;
+  audioUrl: string | null;
+  durationMs?: number;
+  transcript: RecordingPanelTranscript;
+  status: "transcribing" | "failed" | "ready";
+  error?: string | null;
+}): ReactNode {
+  const { t } = useTranslation();
+  const [seek, setSeek] = useState<{ ms: number; sequence: number } | undefined>();
+  return <div className="recording-page">
+    <header className="recording-page__bar recording-page__bar--detail">
+      <button type="button" className="recording-page__back" aria-label={props.backLabel ?? t("recording.page.backToList")} onClick={props.onBack}>
+        <ChevronLeft size={16} aria-hidden="true" />
+      </button>
+      {props.header}
+    </header>
+    {props.audioUrl ? <RecordingPlayer src={props.audioUrl} durationMs={props.durationMs} seek={seek} /> : null}
+    <div className="recording-page__transcript-tabs">
+      <h3 className="recording-page__transcript-heading">{t("recording.page.transcriptTitle")}</h3>
     </div>
-  );
+    {props.status !== "ready" ? <div className={`recording-page__transcription-state${props.status === "transcribing" ? " recording-page__transcription-state--pending" : ""}`} role="status">
+      <span className="recording-page__transcription-label">{props.status === "transcribing" ? <Loader2 size={16} className="recording-page__transcribing-spinner" aria-hidden="true" /> : null}
+        {props.status === "failed" ? props.error || t("recording.page.transcriptionFailed") : t("plugin.ui.audio.transcribing")}</span>
+    </div> : null}
+    {props.status === "ready" ? <TranscriptTurns transcript={props.transcript} onSeek={props.audioUrl ? (ms) => setSeek((current) => ({ ms, sequence: (current?.sequence ?? 0) + 1 })) : undefined} /> : null}
+  </div>;
+}
+
+/** Plugin-owned capture uses the same live and transcript pages as account recordings. */
+export function PluginRecordingPage(props: { session: RecordingPanelSession; onClose?: () => void }): ReactNode {
+  const { t } = useTranslation();
+  const session = props.session;
+  const close = props.onClose ?? session.onClose;
+  if (session.transcript) return <RecordingTranscriptPage
+    header={<h2 className="recording-page__title" title={session.title}>{session.title}</h2>}
+    onBack={close} backLabel={t("common.close")} audioUrl={session.audioUrl} durationMs={session.elapsedMs}
+    transcript={session.transcript} status="ready" />;
+  return <LiveView title={session.title} backLabel={t("common.close")} session={{
+    status: session.status === "done" ? "idle" : session.status,
+    elapsedMs: session.elapsedMs, lines: session.lines, live: null, error: null,
+    back: close, pause: session.onPause, resume: session.onResume, finish: session.onFinish
+  }} />;
 }
 
 /**

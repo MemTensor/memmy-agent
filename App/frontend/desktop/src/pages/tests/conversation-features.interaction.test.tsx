@@ -12,7 +12,7 @@ import type { AgentChatMessage } from "../../state/agent-chat-slice.js";
 const mocks = vi.hoisted(() => ({
   chatId: null as string | null,
   invoke: vi.fn(async () => ({ callId: "guide-call" })),
-  list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(),
+  list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(), recordingStart: vi.fn(),
   openArtifact: vi.fn(() => true),
   ensureConversation: vi.fn(async (_title: string) => "created-chat" as string | null),
   send: vi.fn(async () => true), sending: false,
@@ -36,9 +36,11 @@ vi.mock("../recording-entry.js", async (original) => {
   return { ...actual, useRecordingEntry: (_asr: unknown, _upload: unknown, deliver: typeof mocks.recordingDeliver) => {
     mocks.recordingDeliver = deliver;
     const [compactOpen, setCompact] = useState(false);
-    return { compactOpen, toggleCompact: () => setCompact((open) => !open), closeCompact: () => setCompact(false),
-      close() {}, archive() {}, session: { status: "idle", elapsedMs: 0, live: null, error: null, lines: [], recordings: [],
-        start() {}, pause() {}, resume() {}, finish() {} } };
+    const session = { status: "idle", elapsedMs: 0, live: null, error: null, lines: [], recordings: [],
+      start: mocks.recordingStart, pause() {}, resume() {}, finish() {} };
+    return { compactOpen, compactSession: session, compactBlocked: false,
+      toggleCompact: () => setCompact((open) => !open), closeCompact: () => setCompact(false),
+      close() {}, archive() {}, session };
   } };
 });
 
@@ -142,17 +144,35 @@ describe("conversation feature integration", () => {
     expect(features.scenarios).toEqual([]);
   });
 
-  it("publishes an idle interview for the shared right task panel", async () => {
-    mocks.chatId = "legal-chat";
-    await act(async () => render());
-    await act(async () => ui.receive({ pluginId: "legal-labor", capabilityId: "material-collect",
-      callId: "interview", conversationId: "legal-chat", origin: "agent",
-      event: { type: "interaction", request: { interactionId: "record", type: "audio-record", payload: {} } } }));
+  it("opens the interview panel only after starting recording and clears it if startup fails", async () => {
+    let rejectMicrophone!: (error: Error) => void;
+    const getUserMedia = vi.fn(() => new Promise<MediaStream>((_resolve, reject) => { rejectMicrophone = reject; }));
+    vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
+    vi.stubGlobal("MediaRecorder", class {});
+    try {
+      mocks.chatId = "legal-chat";
+      await act(async () => render());
+      await act(async () => ui.receive({ pluginId: "legal-labor", capabilityId: "material-collect",
+        callId: "interview", conversationId: "legal-chat", origin: "agent",
+        event: { type: "interaction", request: { interactionId: "record", type: "audio-record", payload: {} } } }));
 
-    expect(container.textContent).toContain("开始录音");
-    expect(features.sidePanel).toBeNull();
-    expect(features.sidePanelWidth).toBeNull();
-    expect(features.pluginRecordingSession?.status).toBe("idle");
+      expect(container.textContent).toContain("开始录音");
+      expect(features.sidePanel).toBeNull();
+      expect(features.sidePanelWidth).toBeNull();
+      expect(features.pluginRecordingSession).toBeNull();
+      expect(getUserMedia).not.toHaveBeenCalled();
+
+      await act(async () => button("开始录音")!.click());
+      expect(getUserMedia).toHaveBeenCalledOnce();
+      expect(features.pluginRecordingSession?.status).toBe("starting");
+
+      await act(async () => rejectMicrophone(new Error("Microphone unavailable")));
+      expect(features.pluginRecordingSession).toBeNull();
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain("Microphone unavailable");
+      expect(button("开始录音")?.disabled).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("highlights the composer recording shortcut only for its own card", () => {
@@ -268,6 +288,16 @@ describe("conversation feature integration", () => {
     expect(features.waiting).toBe(false);
     await act(async () => button("访谈录音")!.click());
     expect(container.querySelector(".recording-entry-card")).toBeNull();
+  });
+
+  it("focuses the current recording page only when the compact card starts recording", async () => {
+    await enterLegalConversation();
+    await act(async () => button("访谈录音")!.click());
+    expect(mocks.openRecording).not.toHaveBeenCalled();
+    expect(mocks.recordingStart).not.toHaveBeenCalled();
+    await act(async () => container.querySelector<HTMLButtonElement>(".recording-entry-card .recording-bar__button--primary")!.click());
+    expect(mocks.openRecording).toHaveBeenCalledOnce();
+    expect(mocks.recordingStart).toHaveBeenCalledOnce();
   });
 
   it("does not route the button-only legal actions from slash input", async () => {

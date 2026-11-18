@@ -1,6 +1,6 @@
 import { buildPluginCapabilityLabels } from "./plugin-tool-activity.js";
 import { SHARED_ROW_MIN_PANE_WIDTH, SHARED_ROW_PRIMARY_RESERVE } from "./sidebar-resize.js";
-import type { RecordingPanelSession } from "./interview-recording-panel.js";
+import type { RecordingPanelSession } from "./recording-transcript.js";
 import { buildAgentRoutedPluginPrompt, buildLegalDiagnosisContinuation, collectPluginScenarios, pressPinnedPluginCommand, pluginInteractionSignature, reconcileHiddenPluginCalls, PinnedPluginCommandBar, selectConversationPinnedCommands, selectPinnedCommandsForLegalWorkflow, selectOpenPinnedCapabilities } from "./plugin-conversation-controls.js";
 import "./conversation-features.css";
 import { cloneElement, useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ComponentProps } from "react";
@@ -190,6 +190,7 @@ export function useConversationFeatures(options: {
       }
     }, {
       scope: String(state.account.userId ?? "local"),
+      conversationKey: normalizePluginConversationId(conversationId) ?? options.scopeKey,
       ...(state.agent.currentChatId ? { sessionKey: conversationId } : {}),
       onArchived: archiveRecording,
       ...(clients ? { deleteFiles: (paths: string[]) => clients.memmyAgent.deleteRecordingFiles(paths) } : {}),
@@ -307,8 +308,9 @@ export function useConversationFeatures(options: {
         if (!await latest.current.onSend(buildLegalDiagnosisContinuation(call))) throw new Error(t("home.media.error.sendFailed"));
       }} /> : null;
   const cards = <><div ref={setRecordingBar} />{host(presented, "flow")}{host(presented, "pinned")}
-    {recording.compactOpen && !legalQuestionOwnsComposer ? <RecordingEntryCard session={recording.session}
-      disabled={!clients?.asr} onClose={recording.closeCompact} onOpenList={() => openRecording()} /> : null}
+    {recording.compactOpen && !legalQuestionOwnsComposer ? <RecordingEntryCard session={recording.compactSession}
+      onStart={() => { openRecording(); recording.session.start(); }}
+      disabled={!clients?.asr || recording.compactBlocked} onClose={recording.closeCompact} /> : null}
     {error?.conversationId === conversationId ? <div role="alert" className="text-sm text-red-600">{error.message}</div> : null}</>;
   // Microphone owners stay mounted while navigation only moves/hides their control bar.
   const recorderGroups = new Map<string, PluginUiCall[]>();
@@ -324,6 +326,7 @@ export function useConversationFeatures(options: {
   const recordingOwner = normalizePluginConversationId(conversationId)!;
   const pluginRecording = pluginRecordings.get(recordingOwner);
   const openRecording = () => {
+    setPreview(null);
     setHiddenRecordings((current) => new Set(current).add(recordingOwner));
     options.onOpenRecording();
   };
@@ -368,7 +371,9 @@ export function useConversationFeatures(options: {
     };
   };
   return { cards, recorders, shortcuts, scenarios, recording, openRecording, closeSidePanel, closePluginRecording,
-    pluginRecordingSession: pluginRecording && !hiddenRecordings.has(recordingOwner) ? pluginRecording : null, capabilityLabels,
+    // Keep the pending recorder in the composer until the user starts it.
+    pluginRecordingSession: pluginRecording && pluginRecording.status !== "idle" && !hiddenRecordings.has(recordingOwner)
+      ? pluginRecording : null, capabilityLabels,
     hasConversationActivity: Boolean(state.agent.currentChatId && calls.length),
     processInteraction,
     capturePendingInputRelease,

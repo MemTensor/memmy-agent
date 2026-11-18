@@ -1,5 +1,5 @@
-import { RecordingEntryPage, type RecordingEntrySession } from "./recording-entry.js";
-import { InterviewRecordingPanel, type RecordingPanelSession } from "./interview-recording-panel.js";
+import { PluginRecordingPage, RecordingEntryPage, type RecordingEntrySession } from "./recording-entry.js";
+import type { RecordingPanelSession } from "./recording-transcript.js";
 import {
   useCallback,
   useEffect,
@@ -790,7 +790,7 @@ export function AgentThreadPanel(props: {
             {activeTab.type === "recording"
               ? activeTab.id === PLUGIN_RECORDING_TAB_ID
                 ? props.pluginRecordingSession
-                  ? <InterviewRecordingPanel embedded session={props.pluginRecordingSession} onClose={props.onClosePluginRecording} /> : null
+                  ? <PluginRecordingPage session={props.pluginRecordingSession} onClose={props.onClosePluginRecording} /> : null
                 : props.recordingAuthenticated || (props.recordingSession && props.recordingSession.status !== "idle")
                   ? props.recordingSession ? <RecordingEntryPage session={props.recordingSession} /> : null
                   : <div className="recording-sign-in"><LockKeyhole size={24} /><p>{t("recording.page.signInTitle")}</p>
