@@ -1809,17 +1809,23 @@
   text-decoration: line-through;
 }
 
+/* 顶部一次性提示：白底黑字，细边框加浅阴影，不用深色块抢视线 */
 .toast {
   position: fixed;
   left: 50%;
   top: 24px;
   z-index: 60;
+  max-width: min(560px, calc(100vw - 48px));
   transform: translateX(-50%);
   padding: 9px 16px;
+  border: 1px solid var(--collab-line);
   border-radius: 10px;
-  background: var(--collab-ink);
-  color: #fff;
+  background: var(--color-background-paper, #fff);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--collab-ink) 10%, transparent), 0 1px 2px color-mix(in srgb, var(--collab-ink) 6%, transparent);
+  color: var(--collab-ink);
   font-size: 13px;
+  line-height: 1.5;
+  text-align: center;
   pointer-events: none;
 }
 

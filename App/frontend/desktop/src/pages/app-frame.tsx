@@ -42,6 +42,7 @@ import {
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
 import { collabEnabledFor } from "../app/collab-mode.js";
+import { demoCleanupBaseline, demoSessionKey, demoTasksToRemove, removeDemoTasks } from "../app/collab-demo-cleanup.js";
 import {
   demoGuideBoundLocalProject,
   dismissDemoGuideBeforeProject,
@@ -513,8 +514,95 @@ export function AppFrame(props: AppFrameProps) {
   const notifications = useOptionalNotificationCenter();
   const collabDecisions = collabSnapshot.decisions;
   const collabProjectIds = collabSnapshot.projects;
+  /** 新手引导的状态：收场时要清理引导期间新建的任务，光知道「在不在演示中」不够。 */
+  const demoGuideState = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState);
   /** 新手引导进行中：演示自己就是主角，顶上「已加入「…」」这类一次性提示不抢镜。 */
-  const demoGuideActive = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState).status === "active";
+  const demoGuideActive = demoGuideState.status === "active";
+  /**
+   * 引导结束后清掉引导期间在这个项目里新建的任务。
+   *
+   * 引导的体验段点一次「继续任务」就会在这个项目里新建一条任务并默认共享出去；引导一收场，这条任务就该跟着消失。
+   * 要删哪几条只认磁盘上的会话文件（`listProjectTasks` 按 `records.projectId` 扫出来）：界面任务清单要等一次刷新
+   * 才有新任务，而引导收场那一拍往往还没刷新，照清单判断会漏掉刚建出来的那一条，清单只用兜底。
+   * 完成弹窗一出现就动手（那一屏不会再用到这条任务），同一次演示只处理一遍。
+   */
+  const demoCleanupRef = useRef<{ cloudProjectId: string; localProjectId: string | null; pending: Promise<Set<string>> } | null>(null);
+  /** 已经清理过的演示项目：收场后状态会再变几次，同一个项目只处理一遍。 */
+  const demoCleanedRef = useRef<Set<string>>(new Set());
+  /** 这一轮引导是否真的走过（status 只有 active/complete/ended，分不出「没开始」与「已收场」）。 */
+  const demoWasActiveRef = useRef(false);
+  const agentTasksRef = useRef(state.agent.tasks);
+  agentTasksRef.current = state.agent.tasks;
+  const currentSessionKeyRef = useRef(state.agent.currentSessionKey);
+  currentSessionKeyRef.current = state.agent.currentSessionKey;
+  const currentChatIdRef = useRef(state.agent.currentChatId);
+  currentChatIdRef.current = state.agent.currentChatId;
+  const currentPathRef = useRef(state.navigation.currentPath);
+  currentPathRef.current = state.navigation.currentPath;
+  const demoCleanupProjectId = demoGuideState.localProjectId;
+  const demoCleanupCloudId = demoGuideState.projectId;
+  const demoCleanupStatus = demoGuideState.status;
+  useEffect(() => {
+    if (demoCleanupStatus === "active") {
+      demoWasActiveRef.current = true;
+      // 云端 id 在开始演示时就有了；本机 id 要等绑定回调，所以只按云端 id 记一次快照。
+      if (!demoCleanupCloudId || !collabClient) return;
+      if (demoCleanupRef.current?.cloudProjectId === demoCleanupCloudId) {
+        if (demoCleanupProjectId && demoCleanupRef.current.localProjectId !== demoCleanupProjectId) {
+          demoCleanupRef.current = { ...demoCleanupRef.current, localProjectId: demoCleanupProjectId };
+        }
+        return;
+      }
+      demoCleanupRef.current = {
+        cloudProjectId: demoCleanupCloudId,
+        localProjectId: demoCleanupProjectId,
+        pending: collabClient.listProjectTasks(demoCleanupCloudId)
+          .then((tasks) => demoCleanupBaseline(tasks.map((task) => task.conversationId)))
+          .catch(() => demoCleanupBaseline([]))
+      };
+      return;
+    }
+    // 完成弹窗一出现就动手：有人会直接切走、不点「完成」，那一屏后面可能再没有机会收尾。
+    // 从没开始过的空状态与「已收场」在 status 上分不出来，用「这一轮曾经演示过」来区分。
+    if (!demoWasActiveRef.current) return;
+    const cloudProjectId = demoCleanupCloudId ?? demoCleanupRef.current?.cloudProjectId ?? null;
+    const localProjectId = demoCleanupProjectId ?? demoCleanupRef.current?.localProjectId ?? null;
+    if (!cloudProjectId) return;
+    if (demoCleanedRef.current.has(cloudProjectId)) return;
+    const memmyAgent = clients?.memmyAgent;
+    if (!memmyAgent || !collabClient) return;
+    demoCleanedRef.current.add(cloudProjectId);
+    // 快照是同一个项目就等它回来，否则（这次没拍到）按空集处理：演示项目本来就是这次新建的。
+    const baseline = demoCleanupRef.current?.cloudProjectId === cloudProjectId
+      ? demoCleanupRef.current.pending
+      : Promise.resolve(demoCleanupBaseline([]));
+    // 界面清单里同项目、没归档的任务也一并交给清理：磁盘读不到时还有这一路。
+    const known = agentTasksRef.current
+      .filter((task) => task.projectId === localProjectId && !task.archived)
+      .map((task) => (task.sessionKey.startsWith("websocket:") ? task.sessionKey.slice("websocket:".length) : task.sessionKey));
+    void (async () => {
+      const snapshot = await baseline;
+      const tasks = await collabClient.listProjectTasks(cloudProjectId).catch(() => null);
+      const conversations = tasks?.map((task) => task.conversationId) ?? [];
+      const targets = demoTasksToRemove(conversations, snapshot, known);
+      if (!targets.length) return;
+      const removed = await removeDemoTasks({
+        conversationIds: targets,
+        cloudProjectId,
+        unshare: (projectId, conversationId) => collabClient.setTaskSharing(projectId, conversationId, false),
+        deleteSession: (sessionKey) => memmyAgent.deleteSession(sessionKey)
+      });
+      if (!removed.length) return;
+      const keys = removed.flatMap((conversationId) => [conversationId, demoSessionKey(conversationId)]);
+      taskBus.removeTasksBySessionIds(keys);
+      // 删掉的正好是当前打开的那条：换一张新会话，别停在一条已经不存在的任务上。
+      // 只停在对话页时才换：［完成］会先把人带到看板，刚删完又跳回对话页很突兀。
+      const current = keys.includes(currentSessionKeyRef.current ?? "")
+        || keys.includes(currentChatIdRef.current ?? "");
+      if (current && currentPathRef.current === "/main") openNewAgent();
+      refreshAgentTasks();
+    })();
+  }, [demoCleanupStatus, demoCleanupProjectId, demoCleanupCloudId, clients, collabClient, taskBus]);
   useEffect(() => {
     // 演示一结束这一条会随依赖变化再跑一次：还没提示过的结果不会丢。
     if (demoGuideActive) return;

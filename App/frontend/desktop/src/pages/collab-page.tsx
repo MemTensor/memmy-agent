@@ -87,7 +87,8 @@ import { withoutDemoGuideHint } from "../lib/demo-guide-hint.js";
 
 export { memberColor };
 
-const TOAST_MS = 1_800;
+/** 一次性提示（如共享范围已保存）停留时长：文案短，留够看清的时间。 */
+const TOAST_MS = 3_000;
 /** The board shows ten sessions at a time, so a long project stays scannable. */
 const SESSION_PAGE_SIZE = 10;
 /**
