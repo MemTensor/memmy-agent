@@ -1,0 +1,111 @@
+/*
+ * 邀请方的审核弹窗：谁申请加入哪个项目、以及「同意 / 拒绝」。
+ * 版式与项目设置、授权弹窗一致：460px 宽、28px 内边距，正文只放一个人的一条申请。
+ */
+
+:global(.modal).dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(460px, calc(100vw - 32px));
+}
+
+/* 一层浅遮罩，不做整窗模糊：与看板上的弹窗一致。 */
+:global(.modal-backdrop).backdrop {
+  background: rgba(17, 29, 28, 0.12);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* 页脚不画分隔线；左右与正文对齐，按钮不贴着窗口边。 */
+:global(.modal-footer).footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 28px 20px;
+}
+
+.hint {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--color-text-muted, #6b6f76);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* ---------- 正文：申请人一行 ---------- */
+
+.person {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 0 14px;
+}
+
+.avatar {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.who {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.who strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-ink, #111d1c);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.who span {
+  font-size: 12px;
+  color: var(--color-text-muted, #6b6f76);
+}
+
+.badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--color-text-muted, #6b6f76);
+  background: var(--color-surface-muted, #f4f6f5);
+}
+
+.note {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-muted, #6b6f76);
+}
+
+.error {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--color-danger, #c0392b);
+}

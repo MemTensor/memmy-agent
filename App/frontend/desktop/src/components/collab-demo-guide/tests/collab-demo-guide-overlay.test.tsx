@@ -58,11 +58,8 @@ function activeState(phase: DemoGuideState["phase"]): DemoGuideState {
     memberName: "小饭团",
     copy: DEMO_GUIDE_COPY_FALLBACK,
 error: null,
-    done: { task: false, ask: false, help: false },
-    skipped: { task: false, ask: false, help: false },
-    askSeen: false,
-    askDelivered: false,
-    askTurnEnded: false,
+    done: { task: false },
+    skipped: { task: false },
     scan: { status: "idle", count: 0 },
     prefill: null,
     endReason: null,
@@ -187,6 +184,16 @@ describe("demo guide overlay tracking", () => {
     for (const element of Array.from(document.querySelectorAll("[data-demo-guide]"))) element.remove();
   });
 
+  it("keeps the step name but drops the pointless 1 / 1 progress on the single hands-on step", async () => {
+    await mount("reader");
+
+    const text = cardText();
+    // 动手体验只有一步：进度「1 / 1」不说任何事，头部只留步骤名。
+    expect(text).toContain("接续成员的任务");
+    expect(text).not.toContain("1 / 1");
+    expect(document.querySelector(`.${styles.head}`)).not.toBeNull();
+  });
+
   it("covers the settled target and keeps tracking while it is still moving", async () => {
     await mount("reader");
 
@@ -292,32 +299,6 @@ describe("demo guide overlay tracking", () => {
     expect(left).toBeGreaterThanOrEqual(336 + 528);
   });
 
-  it("only says the request was sent after the cloud has it", async () => {
-    anchor("conversation", () => rect({ left: 794, top: 74, width: 432, height: 400 }), "section");
-    await mount("ask-waiting");
-    // 还没确认请求建出来：只能说正在发，不能说对方正在执行。
-    expect(cardText()).toContain("正在向小饭团发出协助请求…");
-    expect(cardText()).not.toContain("协助请求已发出");
-
-    await act(async () => {
-      root.render(
-        <I18nProvider language="zh-CN">
-          <CollabDemoGuideOverlay
-            state={{ ...activeState("ask-waiting"), askSeen: true }}
-            onNext={vi.fn()}
-            onSkip={vi.fn()}
-            onExit={vi.fn()}
-            onRetry={vi.fn()}
-            onCloseComplete={vi.fn()}
-            onInvite={vi.fn()}
-          />
-        </I18nProvider>
-      );
-    });
-    await frames(6);
-    expect(cardText()).toContain("协助请求已发出，小饭团电脑上的 Agent 正在执行…");
-  });
-
   it("lights the link-a-task button during the tour without ringing it", async () => {    anchor("board-associate", () => rect({ left: 1060, top: 250, width: 92, height: 28 }), "button");
     await mount("tour-associate");
 
@@ -327,8 +308,8 @@ describe("demo guide overlay tracking", () => {
     expect(innerRingOf()).toBeNull();
 
     const text = cardText();
-    // 导览段没有「1 / 3」这种进度，只有一个「介绍」徽章；也没有「跳过这一步」。
-    expect(text).not.toContain("1 / 3");
+    // 导览段没有「1 / 1」这种进度，只有一个「介绍」徽章；也没有「跳过这一步」。
+    expect(text).not.toContain("1 / 1");
     expect(text).toContain("介绍");
     expect(text).not.toContain("跳过这一步");
     expect(text).toContain("下一步");
@@ -446,7 +427,7 @@ describe("demo guide overlay tracking", () => {
             state={{
               ...activeState("complete"),
               status: "complete",
-              done: { task: true, ask: true, help: true },
+              done: { task: true },
               endReason: "finished"
             }}
             onNext={vi.fn()}
@@ -462,10 +443,8 @@ describe("demo guide overlay tracking", () => {
 
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
     expect(dialog?.textContent).toContain("体验完成");
-    // 三步的回顾只说做了什么，不再复述剧本内容（内容随云端剧本走，见 copy 测试）。
+    // 回顾只说做了什么，不再复述剧本内容（内容随云端剧本走，见 copy 测试）。
     expect(dialog?.textContent).toContain("接续了成员的任务，写一段分享会的通知");
-    expect(dialog?.textContent).toContain("请成员协助，结果回写到任务里");
-    expect(dialog?.textContent).toContain("响应了成员的协助请求");
     // 那段讲机制的话已经不显示了：完成弹窗只列做过的事，再加一句说明与两个按钮。
     expect(dialog?.textContent).not.toContain("项目协作以项目内的上下文为基础");
     expect(dialog?.textContent).toContain("成员之间可以直接接着推进");
@@ -557,23 +536,51 @@ describe("demo guide overlay tracking", () => {
   });
 
   it("never prints a raw placeholder on the card", async () => {
-    // settings-open 这一句里的名字按定稿写死，不再走占位符：渲染出来不能有任何 { 。
-    anchor("board-settings", () => rect({ left: 1060, top: 60, width: 28, height: 28 }), "button");
-    await mount("settings-open");
+    // 任务页那几句带成员名与剧本内容：渲染出来不能留下任何 { 占位符。
+    anchor("conversation", () => rect({ left: 794, top: 74, width: 432, height: 400 }), "section");
+    await mount("reply-done");
 
-    expect(cardText()).toContain(zhCNMessages["collab.demo.settings.body"]);
+    expect(cardText()).toContain(zhCNMessages["collab.demo.reply.title"]);
     expect(cardText()).not.toContain("{");
     expect(document.body.textContent).not.toContain("{name}");
   });
 
-  it("stands in the task itself on the last step and names who gets the result", async () => {
-    anchor("assist-task", () => rect({ left: 100, top: 60, width: 1000, height: 620 }));
-    await mount("help-running");
+  it("points a breathing arrow at the one control a screen asks people to click", async () => {
+    // 第一步亮的是一整条任务行：箭头从下往上指着行下沿中点，尖钉在边沿上、箭身整个在行外。
+    anchor("board-task-row", () => rect({ left: 90, top: 300, width: 1000, height: 100 }));
+    await mount("task-row");
 
-    // 人在那条任务里，卡片说清结果会发给谁；第三步的亮区就是这个任务页。
-    expect(holeOf()).toEqual({ left: 94, top: 54, right: 1106, bottom: 686 });
-    expect(document.body.textContent).toContain("3 / 3");
-    expect(document.body.textContent).toContain("正在本机执行，完成后结果会回传给小饭团");
+    const hint = document.querySelector<HTMLElement>("[data-demo-click-hint]");
+    expect(hint).toBeTruthy();
+    // 描边是任务行外扩 3px（87,297,1006,106）：尖 = 横向中点、下沿。
+    expect(hint!.dataset.demoClickHint).toBe("bottom");
+    expect(Number.parseFloat(hint!.style.left)).toBe(590);
+    expect(Number.parseFloat(hint!.style.top)).toBe(403);
+    // 朝控件指：从下往上指就是整体转 180°。
+    expect(hint!.style.getPropertyValue("--hint-turn")).toBe("180deg");
+    // 一枚箭头 + 两圈波纹：呼吸由 CSS 负责，波纹圆心就是箭尖这一个定位点。
+    expect(hint!.querySelectorAll("." + styles.clickRipple)).toHaveLength(2);
+    expect(hint!.querySelector("." + styles.clickArrow)).toBeTruthy();
+    // 箭头不接点击：压在控件边沿也不能把它挡掉。
+    expect(hint!.getAttribute("aria-hidden")).toBe("true");
+
+    // 小控件（只读面板头部的「继续任务」）：尖落在按钮下沿中点，整个箭头在按钮外面，不盖住字。
+    await mount("reader");
+    const small = document.querySelector<HTMLElement>("[data-demo-click-hint]");
+    expect(small).toBeTruthy();
+    // 描边是「继续任务」外扩 3px（1127,93,80,34）：尖 = 横向中点、下沿。
+    expect(small!.dataset.demoClickHint).toBe("bottom");
+    expect(Number.parseFloat(small!.style.left)).toBe(1167);
+    expect(Number.parseFloat(small!.style.top)).toBe(127);
+
+    // 只介绍或只等结果的屏一个箭头都不摆：看板导览每一站、等一位成员回话。
+    anchor("board-list", () => rect({ left: 90, top: 132, width: 1000, height: 560 }));
+    await mount("tour-board");
+    expect(document.querySelector("[data-demo-click-hint]")).toBeNull();
+    anchor("conversation", () => rect({ left: 100, top: 60, width: 1000, height: 620 }));
+    await mount("reply-waiting");
+    expect(holeOf()).not.toBeNull();
+    expect(document.querySelector("[data-demo-click-hint]")).toBeNull();
   });
 
   it("waits for the target instead of drawing an overlay over nothing", async () => {

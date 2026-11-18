@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { isWorkspacePromptSurfaceReady } from "../app/workspace-prompt-readiness.js";
 import { hasCollabLaunchPromptClaimedThisRun, isCollabLaunchPromptOpen } from "../app/collab-launch-prompt-state.js";
 import { isDemoGuideActive } from "../app/collab-demo-guide-store.js";
+import { reportOnboardingPromptOpen } from "../app/onboarding-activity.js";
 import { resolveLaunchGiftPrompt } from "../app/task-token-gift-prompt.js";
 import { useGuidanceDone } from "../app/use-guidance-progress.js";
 import { useOptionalApiClients } from "../app/providers.js";
@@ -42,6 +43,12 @@ export function TaskTokenGiftPromptHost() {
       setOffer(null);
     }
   }, [offer, ready, state.account.userId]);
+  useEffect(() => {
+    // 与协作项目的大卡共享「屏幕上有没有既有提示」：赠送提示关掉之后大卡才重新开始计时。
+    reportOnboardingPromptOpen("task-token-gift", offer !== null);
+    return () => reportOnboardingPromptOpen("task-token-gift", false);
+  }, [offer]);
+
   useEffect(() => {
     promptOpen = offer !== null;
     return () => { promptOpen = false; };

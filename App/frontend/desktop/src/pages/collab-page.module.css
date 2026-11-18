@@ -66,27 +66,28 @@
 
 /*
  * 头部操作（邀请 / 收起配置 / 项目设置）：按钮自己要够大才点得中。
- * 逐个按钮给 36px 高的热区，图标按钮做成 36×36 的正方形；彼此只隔 6px，鼠标在两个按钮之间移动时始终落在其中一个上。
+ * 逐个按钮给 40px 高的热区，图标按钮做成 40×40 的正方形；彼此只隔 8px，鼠标在两个按钮之间移动时始终落在其中一个上。
  * ghost 的默认悬停底色几乎看不出来，这里换成薄荷浅底 + 强调色文字，扫过就能看出是可点的。
  */
 .boardActions {
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 :global(.button).boardAction {
-  min-height: 36px;
-  gap: 6px;
-  padding: 0 14px;
+  min-height: 40px;
+  gap: 7px;
+  padding: 0 16px;
   color: var(--collab-ink-2);
+  font-size: 13px;
   font-weight: 650;
 }
 
 :global(.button).boardIconAction {
-  width: 36px;
-  min-width: 36px;
+  width: 40px;
+  min-width: 40px;
   padding: 0;
   color: var(--collab-muted);
 }
@@ -144,7 +145,7 @@
 }
 
 /*
- * 「任务」与「协助」两个 tab：看板内容的分区，不是筛选。
+ * 看板内容的分区（现在只有「任务」），不是筛选。
  * 一行文字 + 底部细线，选中项用加深的文字与 2px 强调色下划线，不用胶囊，免得与下面成员筛选的三段胶囊混淆。
  */
 .boardTabs {
@@ -197,20 +198,6 @@
   border-radius: 6px;
   outline: 1.5px solid color-mix(in srgb, var(--collab-accent-deep) 55%, transparent);
   outline-offset: 3px;
-}
-
-/* 「协助」的工具条：左边一句可见范围说明，右边只留刷新与多选，所以不必换行 */
-.assistToolbar {
-  flex-wrap: nowrap;
-}
-
-.assistToolbarHint {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--collab-ter);
-  font-size: 12.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /*
@@ -408,7 +395,7 @@
 }
 
 /*
- * 多选里的删除、协助工具条里的「全部停止」：保留警示色，用文字按钮，避免整块红底压住工具条。
+ * 多选里的删除：保留警示色，用文字按钮，避免整块红底压住工具条。
  * 类名写两遍是为了提高优先级：全局 .button-ghost 在 styles.css 里、加载在这份模块样式之后，
  * 只写一个类会被它的灰色盖掉，按钮看起来就是普通次要按钮。
  */
@@ -681,28 +668,19 @@
   position: relative;
 }
 
-/* 空项目：说明这个标签页收集什么、能做什么 */
+/* 空项目：说明这个标签页收集什么、能做什么。不画边框：主区本身是白底，说明块直接落在页面上，与列表左缘对齐 */
 .guide {
   margin-top: 14px;
-  padding: 24px 26px 20px;
-  border: 1px solid var(--collab-line);
-  border-radius: 14px;
-  background: var(--color-background-paper, #fff);
+  padding: 20px 0 4px;
 }
 
-.guideTitle {
-  display: block;
-  color: var(--collab-ink);
-  font-size: 15px;
-  font-weight: 800;
+/* 没有标题与引导句的空状态：直接从第一条说明开始，不要空出来的段落间距 */
+.guideBare {
+  padding-top: 6px;
 }
 
-.guideLead {
-  margin: 8px 0 0;
-  max-width: 640px;
-  color: var(--collab-muted);
-  font-size: 13px;
-  line-height: 1.75;
+.guideBare .guideList {
+  margin-top: 12px;
 }
 
 .guideList {
@@ -814,88 +792,6 @@
 .contextTipAction:hover {
   background: color-mix(in srgb, var(--collab-accent) 16%, transparent);
   color: var(--collab-ink-2);
-}
-
-/* 等你处理的协助：与上面的取用提示同一种提示条，右侧按钮用主色，点了就去处理 */
-.assistWaiting {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-top: 10px;
-  padding: 8px 8px 8px 12px;
-  border: 1px solid color-mix(in srgb, var(--collab-accent) 30%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--collab-active) 55%, var(--color-background-paper, #fff));
-  font-size: 12.5px;
-  line-height: 1.6;
-}
-
-.assistWaitingIcon {
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  color: var(--collab-accent-deep);
-}
-
-.assistWaitingText {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--collab-ink-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.assistWaitingAction {
-  flex: 0 0 auto;
-  height: 26px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--collab-accent-deep);
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.assistWaitingAction:hover {
-  background: color-mix(in srgb, var(--collab-accent) 16%, transparent);
-}
-
-/* 「协助」列表底部：收起的未执行请求与上限说明，都是一行小字。
- * 不设左右内边距：工具条没有内边距、列表行用 -14/+14 抵消，这里也贴齐内容左边缘。
- * 那段留白不能靠调工具条或列表行来凑，否则整块列表会往左偏。 */
-.assistFooter {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  margin-top: 8px;
-  padding: 0;
-}
-
-.assistFooterToggle {
-  padding: 4px 0;
-  border: 0;
-  background: transparent;
-  color: var(--collab-muted);
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-
-.assistFooterToggle:hover {
-  color: var(--collab-ink-2);
-  text-decoration: underline;
-}
-
-.assistFooterNote {
-  margin: 0;
-  color: var(--collab-ter);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 .configKnowledgeList {
@@ -1051,6 +947,16 @@
   --collab-accent-deep: var(--color-accent-deep, #2f8f7f);
 }
 
+/*
+ * Windows 的标题栏是窗口最上面独立的一行（46px），最小化 / 最大化 / 关闭由系统画在这一行最上层。
+ * 面板与遮罩挂在 body 上、从窗口顶端开始，右上角的「继续任务」与关闭正好压在系统按钮下面：
+ * 点了没反应，看起来就是叠在一起。让开这一行，面板跟着矮下来。
+ */
+:global(body.memmy-platform-windows) .readerLayer,
+:global(body:has(.windows-titlebar)) .readerLayer {
+  top: var(--codex-toolbar-height, 46px);
+}
+
 /* 点击面板外关闭。薄雾只有 6%：看得出有一层在上，又不会把看板压成灰底 */
 .readerScrim {
   position: absolute;
@@ -1085,7 +991,7 @@
 }
 
 /*
- * 面板左边缘的拖动条（读任务与协助会话共用，见 collab-reader-resize.tsx）：沿用侧栏的 sidebar-resize-handle
+ * 面板左边缘的拖动条（任务阅读面板，见 collab-reader-resize.tsx）：沿用侧栏的 sidebar-resize-handle
  * （悬停与拖动时出现一条细线、col-resize 光标），只是贴在浮起卡片的内侧。上下让开圆角，线不会画到圆角外面；
  * 面板裁掉溢出，所以去掉手柄原有的负边距。
  */
@@ -1381,7 +1287,7 @@
 }
 
 /*
- * 筛选没结果时的说明卡片：和「协助」空态同一套边框与图标，内容左对齐。
+ * 筛选没结果时的说明卡片：和空态同一套边框与图标，内容左对齐。
  * 单独一类，不改 .empty：没有项目时的页面级空态仍按整块居中、文字居中显示。
  */
 .filterEmpty {
@@ -1431,7 +1337,17 @@
 }
 
 :global(.modal).pickModal {
-  width: min(880px, calc(100vw - 32px));
+  width: min(640px, calc(100vw - 32px));
+}
+
+/*
+ * 新手引导里的展示模式：弹窗给左侧的说明卡让位。
+ *
+ * 卡片宽 340、间距加上边距约占 360：窗口放宽一点时弹窗保持 600，窗口收窄时二者一起收，
+ * 卡片就不会被挤到弹窗上、挡住刚扫出来的会话列表。
+ */
+:global(.modal).pickModalDemo {
+  width: min(600px, max(420px, calc(100vw - 620px)));
 }
 
 /*
@@ -1477,9 +1393,24 @@
   font-size: 13.5px;
 }
 
-.fieldHint {
-  color: var(--collab-ter);
+
+.joinNicknameInput::placeholder {
+  color: color-mix(in srgb, var(--collab-ter) 92%, transparent);
+  font-size: 13px;
+}
+
+.joinNicknameInvalid {
+  border-color: color-mix(in srgb, #c4553d 45%, #fff) !important;
+}
+
+.joinNicknameError {
+  margin: 0;
+  color: #c4553d;
   font-size: 12px;
+  line-height: 1.5;
+}
+.fieldHint {
+  color: var(--collab-ter);  font-size: 12px;
   line-height: 1.6;
 }
 
@@ -1657,21 +1588,14 @@
   background: color-mix(in srgb, var(--collab-accent) 26%, transparent);
 }
 
-.addAgentText {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 1px;
-}
-
+/* 入口只有一行：说明收进悬停提示，这一列放不下两行文字 */
 .addAgentLabel {
+  min-width: 0;
+  overflow: hidden;
   font-size: 12.5px;
   font-weight: 600;
-}
-
-.addAgentHint {
-  color: var(--collab-ter);
-  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 
@@ -1937,17 +1861,17 @@
   padding: 16px 24px 20px;
 }
 
-.simpleCreateFooter :global(.button) {
-  min-height: 38px;
-  padding: 0 14px;
-  border-radius: 9px;
-  box-shadow: none;
-  font-size: 13px;
+/*
+ * 页脚三个按钮同一套尺寸：按钮本身不写字号，会继承 16px 正文，和弹窗里 13.5px 的字不是一套；
+ * 「加入项目」原本是 sm（30px、12px），和右侧两个差一档。这里统一成 36px 高、14px、600 字重。
+ * 写成 `:global(.button).xxx` 是为了压过全局 `.button-sm` / `.button-md` 的 min-height 与 padding。
+ */
+:global(.button).simpleCreateFooterButton {
+  min-height: 36px;
+  padding: 0 16px;
+  border-radius: var(--radius-btn, 8px);
+  font-size: 14px;
   font-weight: 600;
-}
-
-.simpleCreateFooter :global(.button:hover:not(:disabled)) {
-  transform: none;
 }
 
 /* 名称：整行输入框，图标与竖线在框内左侧，聚焦时整框描主题色 */
@@ -2100,28 +2024,23 @@
   color: var(--collab-ink-2);
 }
 
-/* 共享：与名称框同高、同边框的一个字段，图标与文字和名称框对齐；开启后整框铺一层浅薄荷色 */
+/* 共享是一个开关行，不是又一个输入框：不描边、不铺白底，悬停才铺一层浅底；开启与否由图标颜色和开关本身表达 */
 .simpleShareField {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 44px;
-  margin-top: 12px;
+  height: 40px;
+  margin-top: 8px;
   padding: 0 12px;
-  border: 1px solid var(--collab-line);
-  border-radius: 10px;
-  background: var(--color-background-paper, #fff);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
   cursor: pointer;
-  transition: border-color var(--duration-fast) ease, background-color var(--duration-fast) ease;
+  transition: background-color var(--duration-fast) ease;
 }
 
 .simpleShareField:hover {
-  border-color: color-mix(in srgb, var(--collab-accent) 45%, var(--collab-line));
-}
-
-.simpleShareFieldOn {
-  border-color: color-mix(in srgb, var(--collab-accent) 55%, var(--collab-line));
-  background: color-mix(in srgb, var(--collab-accent) 7%, var(--color-background-paper, #fff));
+  background: color-mix(in srgb, var(--color-canvas-oat, #f2f2ec) 62%, transparent);
 }
 
 .simpleShareIcon {
@@ -2392,11 +2311,6 @@
 
 .settingsRowHint + .settingsRowControl {
   margin-left: 0;
-}
-
-/* 接收协助请求：开关一行，下面跟着限时授权；左缘与名称对齐（行内边距 10 + 图标 16 + 间距 10） */
-.settingsAssist .grantList {
-  padding: 4px 10px 10px 36px;
 }
 
 .settingsRowError {
@@ -2776,28 +2690,26 @@
   margin-left: -8px;
 }
 
-.joinNotes {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
+/* 说明只有文字，没有图标（2026-11-17 按评审删掉左侧两个图标，同年同日删掉第二句）。 */
 .joinNote {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  margin: 0;
   color: var(--collab-muted);
   font-size: 13.5px;
   line-height: 1.6;
 }
 
-.joinNoteIcon {
-  flex: none;
-  margin-top: 3px;
-  color: var(--collab-accent-deep);
+/*
+ * 加入项目：正文只剩一句说明。宽度仍与新建项目一致（520），这一句刚好一行放下，不会被折成
+ * 两行、留下孤零零几个字；删掉第二句后高度自己就收下来了，不再另调宽度。
+ */
+:global(.modal).createModal.joinModal {
+  width: min(520px, calc(100vw - 32px));
+}
+
+/* 正文与标题同一套左右留白（24），卡片与说明之间 12px，比默认的 14 紧密一点。 */
+:global(.modal-body).joinBody {
+  gap: 12px;
+  padding: 0 24px 4px;
 }
 
 /* 项目配置：卡片式列表，宽 300px，可收起（PRD 3.8） */
@@ -3008,33 +2920,6 @@
   .actionLabel {
     display: none;
   }
-}
-
-/*
- * 成员协助在看板上的一行：图标代替头像，标题前一个「协助」标签，行尾写清谁请谁、由哪个 Agent 执行、现在的状态。
- * 只用现有的薄荷绿主题变量。
- */
-.assistIcon {
-  background: color-mix(in srgb, var(--color-accent-mint, #5cbfae) 14%, var(--color-background-paper, #fff));
-  color: var(--color-accent-deep, #2f8f7f);
-}
-
-.assistTag {
-  display: inline-block;
-  margin-right: 7px;
-  padding: 0 6px;
-  border: 1px solid color-mix(in srgb, var(--color-accent-mint, #5cbfae) 45%, transparent);
-  border-radius: 5px;
-  color: var(--color-accent-deep, #2f8f7f);
-  font-size: 11.5px;
-  font-weight: 600;
-  line-height: 18px;
-  vertical-align: 1px;
-}
-
-/* 还没结束的协助：状态用主题色，一眼看得出哪几条还在进行。 */
-.assistMetaOpen {
-  color: var(--color-accent-deep, #2f8f7f);
 }
 
 /* 筛选栏「协助」后面的待处理数量。 */

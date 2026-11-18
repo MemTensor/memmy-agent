@@ -4,6 +4,7 @@ import { requestComputerHistoryLaunchEnable } from "../app/computer-history-laun
 import { isComputerHistorySupported } from "../app/computer-history-platform.js";
 import { isWorkspacePromptSessionReady, isWorkspacePromptSurfaceReady } from "../app/workspace-prompt-readiness.js";
 import { hasCollabLaunchPromptClaimedThisRun, isCollabLaunchPromptOpen } from "../app/collab-launch-prompt-state.js";
+import { reportOnboardingPromptOpen } from "../app/onboarding-activity.js";
 import {
   deferOtherPromptsForHistoryLaunch,
   markHistoryLaunchPromptActioned,
@@ -82,6 +83,12 @@ export function HistoryLaunchPromptHost() {
       }
     };
   }, [open, sessionReady, state.navigation.currentPath, surfaceReady]);
+
+  useEffect(() => {
+    // 与协作项目的大卡共享「屏幕上有没有既有提示」：关掉之后大卡才重新开始计时。
+    reportOnboardingPromptOpen("history-launch", open);
+    return () => reportOnboardingPromptOpen("history-launch", false);
+  }, [open]);
 
   if (!open) return null;
 

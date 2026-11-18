@@ -46,6 +46,17 @@ vi.mock("../../app/use-guidance-progress.js", () => ({
   useGuidanceDone: () => mocks.guidanceDone
 }));
 
+// The quiet window itself is covered in collab-launch-prompt-guidance.wait.test.tsx; here the existing guidance is
+// either over (and the workspace already settled) or still running.
+vi.mock("../../app/use-onboarding-quiet.js", () => ({
+  ONBOARDING_QUIET_MS: 4_000,
+  useOnboardingQuiet: () => ({
+    complete: mocks.guidanceDone,
+    stepQueued: !mocks.guidanceDone,
+    quiet: mocks.guidanceDone
+  })
+}));
+
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 class MemoryStorage implements Storage {
@@ -165,15 +176,15 @@ describe("collab launch prompt", () => {
     expect(document.querySelector(".collab-launch-status")).toBeNull();
   });
 
-  it("keeps the picture hidden while the five progress pieces stay reachable", async () => {
+  it("keeps the picture hidden while the four progress pieces stay reachable", async () => {
     await renderHost();
 
     const progress = document.querySelector<HTMLElement>(".collab-launch-progress");
     expect(progress).not.toBeNull();
-    expect(document.querySelectorAll(".collab-launch-progress__segment")).toHaveLength(5);
-    // 五段可点，所以不在舞台的 aria-hidden 里；画面本身仍然不报给辅助技术。
+    expect(document.querySelectorAll(".collab-launch-progress__segment")).toHaveLength(4);
+    // 四段可点，所以不在舞台的 aria-hidden 里；画面本身仍然不报给辅助技术。
     expect(progress?.closest("[aria-hidden='true']")).toBeNull();
-    expect(progress?.querySelectorAll("button")).toHaveLength(5);
+    expect(progress?.querySelectorAll("button")).toHaveLength(4);
   });
 
   it("says which language the card is written in, for the browser's own text layout", async () => {
@@ -369,19 +380,19 @@ describe("collab launch card", () => {
     await render();
     await flush();
 
-    // 卡面上不再有「重播」按钮，重看靠左下角的五段进度。
+    // 卡面上不再有「重播」按钮，重看靠左下角的四段进度。
     expect(document.querySelector(".collab-launch-replay")).toBeNull();
     const pieces = Array.from(document.querySelectorAll<HTMLButtonElement>(".collab-launch-progress__segment"));
-    expect(pieces).toHaveLength(5);
+    expect(pieces).toHaveLength(4);
     expect(pieces[0]?.getAttribute("aria-label")).toBe("从第 1 段重新播放：人与各自的 Agent，组成独当一面的超级个体");
-    expect(pieces[4]?.getAttribute("aria-label")).toBe("从第 5 段重新播放：Agent 时代超级个体的协作方式");
+    expect(pieces[3]?.getAttribute("aria-label")).toBe("从第 4 段重新播放：Agent 时代超级个体的协作方式");
 
-    // 第四段是成员协助。
+    // 第四段是收尾一幕。
     await click(pieces[3] ?? null);
 
-    // 跳到第四幕的第一帧，字幕跟着换。
-    expect(caption()).toBe("需要跨端配合时，直接请成员的 Agent 协助执行");
-    expect(captionSub()).toBe("本人只需确认授权，任务即可在对方本机完成并传回结果");
+    // 跳到最后一幕的第一帧，字幕跟着换。
+    expect(caption()).toBe("Agent 时代超级个体的协作方式");
+    expect(captionSub()).toBe("协作不止于人的沟通，而是记忆在 Agent 之间直接流转");
     expect(dialog()).not.toBeNull();
     expect(close).not.toHaveBeenCalled();
     expect(createProject).not.toHaveBeenCalled();

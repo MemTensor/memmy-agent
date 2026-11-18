@@ -363,6 +363,7 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     configClient,
     byokTokenUsageClient,
     tokenQuotaClient,
+    collabClient,
     update,
     track = noopTrackAnalyticsEvent,
     activeTab: activeTabProp,
@@ -1405,7 +1406,17 @@ export function SettingsPageView(props: SettingsPageViewProps) {
     if (!nextNickname) {
       return;
     }
+    // 名字没改就不用走一遍检查：这一步只在真的要换成别的名字时才有意义。
+    if (nextNickname === state.account.nickname) {
+      setIsEditingNickname(false);
+      return;
+    }
 
+    await commitNickname(nextNickname);
+  }
+
+  /** 真正写入昵称：一次调用就能改完，重名不再拦。 */
+  async function commitNickname(nextNickname: string) {
     setAccountBusy(true);
     setAccountError(null);
     try {

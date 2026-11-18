@@ -76,9 +76,7 @@ describe("add agent support dialog", () => {
   it("says what Memmy will do, then how it is used afterwards", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("添加 Agent 支持");
-    expect(text).toContain("填写 Agent 名称即可");
-    // 「只在本机」紧跟在「会新建一条任务」后面，读起来才连贯。
-    expect(text).toMatch(/找到这个 Agent 并让它能够使用协作项目。本次新建的任务只在本机，不会共享给成员。/u);
+    expect(text).toContain("确认后 Memmy 会新建任务，为 Agent 安装协作组件，使其能够使用协作项目");
     // 说明块提示以后怎么用：在对话中说明即可，并给一句能照着说的话。
     expect(text).toContain("在对话中说明即可，无需返回 Memmy");
     expect(text).toContain("例如「把这个任务加入 MemOS 项目」");

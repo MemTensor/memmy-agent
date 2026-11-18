@@ -1,9 +1,8 @@
 /**
  * 说明卡上的字：一句都不能漏掉占位符。
  *
- * `formatMessage` 只替换传进来的那几项，没传的 `{name}` 会原样留在句子里——之前 `settings-open`
- * 就是这么把「{name}的问题」印到卡片上的。这里把每个子状态、两种语言的卡片都生成一遍，
- * 断言正文里不出现字面的 `{`；顺带把导览四步与那句无名字的文案钉住。
+ * `formatMessage` 只替换传进来的那几项，没传的 `{name}` 会原样留在句子里。这里把每个子状态、
+ * 两种语言的卡片都生成一遍，断言正文里不出现字面的 `{`；顺带把导览四步与那句无名字的文案钉住。
  */
 import { describe, expect, it } from "vitest";
 import { formatMessage, messageCatalogs, type MessageKey } from "../../../i18n/messages.js";
@@ -28,7 +27,6 @@ const PHASES: DemoGuidePhase[] = [
   "create-project",
   "joined",
   "tour-board",
-  "tour-tabs",
   "tour-associate",
   "tour-associate-pick",
   "tour-new-task",
@@ -37,16 +35,6 @@ const PHASES: DemoGuidePhase[] = [
   "compose",
   "reply-waiting",
   "reply-done",
-  "ask-compose",
-  "ask-waiting",
-  "ask-done",
-  "settings-open",
-  "settings-assist",
-  "help-waiting",
-  "help-dialog",
-  "help-running",
-  "help-done",
-  "help-rejected",
   "complete"
 ];
 
@@ -59,12 +47,9 @@ function stateFor(phase: DemoGuidePhase): DemoGuideState {
     memberUserId: "9001",
     memberName: "小饭团",
     copy: DEMO_GUIDE_COPY_FALLBACK,
-error: null,
-    done: { task: false, ask: false, help: false },
-    skipped: { task: false, ask: false, help: false },
-    askSeen: false,
-    askDelivered: false,
-    askTurnEnded: false,
+    error: null,
+    done: { task: false },
+    skipped: { task: false },
     scan: { status: "done", count: 12 },
     prefill: null,
     endReason: null,
@@ -90,37 +75,41 @@ describe("the demo guide copy", () => {
     }
   });
 
-  it("keeps the approved wording for the step whose name is written out", () => {
-    const t = translate("zh-CN");
-    // 第三步的这句话按定稿写死了演示成员的名字，卡片上不出现字面的 {name}。
-    expect(demoGuideCard(stateFor("settings-open"), t).body)
-      .toBe("现在小饭团也需要你电脑上的信息。先去项目设置，打开「接收协助请求」。");
-    expect(demoGuideCard(stateFor("settings-open"), translate("en-US")).body)
-      .toBe("Now Xiaofantuan needs something from your computer. Open project settings and turn on Accept assistance requests.");
-    // 不带人名的句子照旧不写死叫法：执行中的状态只说结果回传给发起的人。
-    expect(demoGuideCard(stateFor("help-running"), t).status)
-      .toBe("正在本机执行，完成后结果会回传给小饭团。");
+  it("makes the continued task the last screen, with a done button", () => {
+    // 接续成员的任务就是引导的最后一步：拿到回复之后主按钮直接收场。
+    const zh = demoGuideCard(stateFor("reply-done"), translate("zh-CN"));
+    expect(zh.action).toBe("done");
+    expect(zh.step).toBe(1);
+    expect(demoGuideCard(stateFor("complete"), translate("zh-CN")).action).toBeNull();
   });
 
-  it("keeps the five tour steps in the approved words", () => {
-    const zh = [0, 1, 2, 3, 4].map((index) => demoGuideTourCard(index, translate("zh-CN")));
-    expect(zh.map((card) => card.stepName)).toEqual(["任务列表", "协助", "关联任务", "关联会话", "新建任务"]);
-    expect(zh.map((card) => card.body)).toEqual([
-      "成员共享的任务都在这里。每项任务的完整对话与进展都能读到，也可以接着往下推进，不用反复同步背景。",
-      "有些信息和操作只在成员自己的电脑上，比如他的本地文件、本机环境。任务里需要这些时，向成员发起协助请求，他确认后由他电脑上的 Agent 执行，结果回写到你的任务中。双方的协助记录都在这里。",
-      "你在 Claude Code、Cursor 等外部工具里做的工作，成员默认看不到。把那段会话关联进项目，成员就能读到完整上下文并接着处理，不用再讲一遍；关联整个分组后，该分组新增的会话也会自动进入项目。",
-      "之后可以在这里选择对应的会话内容，共享给其他成员，不过这次我们先进入下面的环节吧。",
-      "需要开展新工作时，从这里新建任务。项目内新建的任务默认对成员可见，方便他们查看进展、接着推进或发起协助。"
+  it("keeps four tour steps numbered one to four, without any raw placeholder", () => {
+    // 导览四站：任务列表 → 关联任务 → 关联会话 → 新建任务，key 与序号一一对应。
+    const zh = translate("zh-CN");
+    const en = translate("en-US");
+    expect([0, 1, 2, 3].map((index) => demoGuideTourCard(index, zh).stepName)).toEqual([
+      "任务列表",
+      "关联任务",
+      "关联会话",
+      "新建任务"
     ]);
-    const en = [0, 1, 2, 3, 4].map((index) => demoGuideTourCard(index, translate("en-US")));
-    expect(en.map((card) => card.stepName)).toEqual(["Task list", "Assistance", "Linked tasks", "Linked sessions", "New task"]);
-    expect(en.map((card) => card.body)).toEqual([
-      "Tasks shared by members live here. You can read each task's full conversation and progress, and carry on from where it stopped without briefing each other again.",
-      "Some information and actions only exist on a member's own computer, such as their local files or their machine's environment. When a task needs them, send the member an assistance request; once they confirm, the Agent on their computer runs it and the result is written back to your task. Requests from both sides are listed here.",
-      "Work you did in Claude Code, Cursor and other external tools is invisible to members by default. Link that session to the project and members can read the full context and carry on, without you retelling it. Link a whole group and its new sessions come in automatically.",
-      "Later you can pick which sessions to share with members here. For now, let's move on to the next part.",
-      "Start new work here. New tasks in this project are visible to members by default, so they can follow progress, carry on, or ask for assistance."
+    expect([0, 1, 2, 3].map((index) => demoGuideTourCard(index, en).stepName)).toEqual([
+      "Task list",
+      "Linked tasks",
+      "Linked sessions",
+      "New task"
     ]);
+    for (const language of ["zh-CN", "en-US"] as const) {
+      const t = translate(language);
+      const cards = [0, 1, 2, 3].map((index) => demoGuideTourCard(index, t));
+      for (const card of cards) {
+        for (const text of [card.stepName, card.body]) {
+          if (!text) continue;
+          expect(text, `tour ${language}`).not.toContain("{");
+          expect(text.length, `tour ${language}`).toBeGreaterThan(0);
+        }
+      }
+    }
   });
 
   it("asks for the authorization on the link-session step before it can scan anything", () => {
@@ -160,25 +149,14 @@ describe("the demo guide copy", () => {
     expect(empty.status).toBe("这台电脑上暂时没有可以关联的会话。");
   });
 
-  it("names the three experience steps the way the prototype does", () => {
-    const names = (language: "zh-CN" | "en-US") => [1, 2, 3]
-      .map((step) => translate(language)(("collab.demo.stepName." + String(step)) as MessageKey));
-    expect(names("zh-CN")).toEqual(["接续成员的任务", "请求成员协助", "处理成员的协助请求"]);
-    expect(names("en-US")).toEqual(["Continue a member's task", "Request a member's assistance", "Handle a member's assistance request"]);
+  it("names the single experience step the way the prototype does", () => {
+    const zh = translate("zh-CN")("collab.demo.stepName.1" as MessageKey);
+    expect(zh).toBe("接续成员的任务");
+    const en = translate("en-US")("collab.demo.stepName.1" as MessageKey);
+    expect(en).toBe("Continue a member's task");
   });
 
-  it("reads the authorization step with a title and the notice that follows", () => {
-    // 授权弹窗那一步：标题写谁发来的请求，正文说他为什么需要这台电脑，并顺带说明执行方可以换。
-    expect(demoGuideCard(stateFor("help-dialog"), translate("zh-CN"))).toMatchObject({
-      title: "小饭团发来了一条协助请求",
-      body: "他请你电脑上的 Agent 确认这台电脑的系统版本。可以选择其他本地 Agent 执行，不过这次就先交给 Memmy 吧。"
-    });
-    // 拒绝之后只有一句「已拒绝本次协助请求，这台电脑未执行任何操作。」，没有额外的标题。
-    expect(demoGuideCard(stateFor("help-rejected"), translate("zh-CN"))).toMatchObject({
-      title: null,
-      body: "已拒绝本次协助请求，这台电脑未执行任何操作。"
-    });
-  });
+
 
   it("reads the scenario content from the cloud instead of writing its own", () => {
     // 剧本一句都不该在客户端写死：云端换了任务名与要接着做的事，卡片上的字跟着换。
@@ -186,17 +164,13 @@ describe("the demo guide copy", () => {
     const custom = {
       taskTitle: "下周五的团队分享会",
       taskNext: "写一段分享会的通知",
-      askSentence: "查一下上次分享会一共来了多少人",
-      helpSentence: "确认这台电脑的系统版本"
+      askSentence: "查一下上次分享会一共来了多少人"
     };
     const t = translate("zh-CN");
     const state = (phase: DemoGuidePhase): DemoGuideState => ({ ...stateFor(phase), copy: custom });
 
     expect(demoGuideCard(state("task-row"), t).body).toContain("下周五的团队分享会");
     expect(demoGuideCard(state("reader"), t).body).toContain("写一段分享会的通知");
-    // 授权弹窗这一屏必须说清对方要这台电脑做什么，内容同样来自云端。
-    expect(demoGuideCard(state("help-dialog"), t).body).toContain("确认这台电脑的系统版本");
-    expect(demoGuideCard(state("help-done"), t).body).toContain("确认这台电脑的系统版本");
     // 换了剧本，客户端原来那套内容不得再出现。
     const bodies = PHASES
       .map((phase) => demoGuideCard(state(phase), t))
@@ -218,7 +192,7 @@ describe("the demo guide copy", () => {
       ["collab.demo.intro.body", "你好，我是小饭团，接下来由我带你体验项目协作。开始前，先看创建项目时的几项设置。", "Hi, I am Xiaofantuan. I will take you through project collaboration. Before we start, a look at the settings when creating a project."],
       ["collab.demo.name.body", "项目建好后会按这个名字显示在左侧栏，成员看到的名称和你一致。本次已预填，可以直接使用。", "The project appears under this name in the sidebar, and members see the same name. It is already filled in for this walkthrough."],
       ["collab.demo.folder.body", "在这里指定 Agent 工作的本地文件夹。读写都在你的电脑上完成，文件夹内容不会上传。", "This is the local folder the Agent works in. Reading and writing happen on your computer, and the folder is not uploaded."],
-      ["collab.demo.collab.body", "开启后成员可以加入这个项目、共享任务并互相请求协助；关闭后只作为你个人的本地项目。", "While it is on, members can join the project, share tasks and ask each other for assistance; turned off, it is only your own local project."],
+      ["collab.demo.collab.body", "开启后成员可以加入这个项目、共享任务；关闭后只作为你个人的本地项目。", "While it is on, members can join the project and share tasks; turned off, it is only your own local project."],
       ["collab.demo.joinEntry.body", "如果其他成员已经建好项目并邀请了你，可以从这里直接加入。", "If a member has already created a project and invited you, you can join it right here."],
       ["collab.demo.submit.body", "各项已就绪，点击「创建项目」，接下来进入项目看板。", "Everything is ready. Choose Create and we move on to the project board."],
       ["collab.demo.joined.body", "项目里还没有其他成员。这次先由我加入项目，带你完成一次协作。", "There are no other members in this project yet. Let me join for this walkthrough and run one collaboration with you."],

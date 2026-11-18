@@ -177,6 +177,7 @@ import { composeRecordingMenuBarBitmap } from "./menu-bar-recording-indicator.js
 import { runApprovedEmbeddedUpload } from './browser-embedded-upload-access.js';
 import { createPIPTrayRecovery } from './computer-use-pip-tray.js';
 import { attachRendererRecovery, rendererRecoveryUrl, type RendererRecoveryDiagnostic } from './renderer-recovery.js';
+import { findInviteLink, INVITE_LINK_CHANNEL, INVITE_LINK_SCHEME, parseInviteLink, TAKE_INVITE_LINKS_CHANNEL } from './invite-link.js';
 
 let mainWindow: BrowserWindow | null = null;
 let memmyPermissionOnboarding: ReturnType<typeof createComputerUseOnboarding> | null = null;
@@ -1679,6 +1680,12 @@ function registerIpcHandlers(): void {
     rendererReadyWebContentsIds.add(senderId);
     rendererReadyWaiters.get(senderId)?.(true);
     rendererRecoveries.get(senderId)?.markReady();
+    // 界面已能收邀请：把启动前排队的那几条发出去。
+    flushPendingInviteCodes(event.sender);
+  });
+  ipcMain.handle(TAKE_INVITE_LINKS_CHANNEL, (event) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return [];
+    return pendingInviteCodes.splice(0);
   });
   ipcMain.on('memmy:browser:select-tab', (event, tabId: unknown) => {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
@@ -5535,6 +5542,84 @@ function activateMainWindow(): void {
   triggerAgentSourceAutoInject("activate_main_window");
 }
 
+/**
+ * 邀请链接（memmy://invite/<code>）：浏览器落地页靠它直接拉起 Memmy 并弹出「加入项目」。
+ *
+ * <p>链接有三条来路：macOS 的 open-url、Windows/Linux 的 second-instance 命令行、以及
+ * 冷启动时就写在 argv 里的情况。三条路都只把邀请码交给界面，界面自己再向云端预览项目。</p>
+ */
+
+/** 冷启动时链接比界面先到：先排队，界面报到后一起发。 */
+const pendingInviteCodes: string[] = [];
+
+/**
+ * 记下一个待发的邀请码，重复的不记两次。
+ *
+ * @param code 已校验过的邀请码。
+ */
+function queueInviteCode(code: string): void {
+  if (!pendingInviteCodes.includes(code)) pendingInviteCodes.push(code);
+}
+
+/**
+ * 把邀请码交给界面；应用或界面还没就绪就先记下。
+ *
+ * @param code 已校验过的邀请码。
+ */
+function deliverInviteCode(code: string): void {
+  if (isQuitting) return;
+  if (!isBootReady) {
+    queueInviteCode(code);
+    return;
+  }
+  activateMainWindow();
+  const target = mainWindow;
+  if (!target || target.isDestroyed() || !rendererReadyWebContentsIds.has(target.webContents.id)) {
+    queueInviteCode(code);
+    return;
+  }
+  target.webContents.send(INVITE_LINK_CHANNEL, code);
+}
+
+/**
+ * 读一条深链接：不是邀请链接就安静忽略。
+ *
+ * @param raw 命令行参数或 open-url 给出的原始链接。
+ */
+function acceptInviteLink(raw: unknown): void {
+  const code = parseInviteLink(raw);
+  if (code) deliverInviteCode(code);
+}
+
+/**
+ * 把排队中的邀请发给刚就绪的界面。
+ *
+ * @param target 刚报到的渲染进程。
+ */
+function flushPendingInviteCodes(target: WebContents): void {
+  if (!pendingInviteCodes.length) return;
+  for (const code of pendingInviteCodes.splice(0)) target.send(INVITE_LINK_CHANNEL, code);
+}
+
+/**
+ * 注册 memmy:// 协议。
+ *
+ * <p>打包后由 electron-builder 写进 Info.plist / 注册表；开发态要手动指到 Electron 本体与本次入口，
+ * 否则浏览器唤起的是另一个 Electron 应用。</p>
+ */
+function registerInviteProtocolClient(): void {
+  try {
+    if (app.isPackaged) {
+      app.setAsDefaultProtocolClient(INVITE_LINK_SCHEME);
+      return;
+    }
+    const entry = process.argv[1] ? resolve(process.argv[1]) : undefined;
+    app.setAsDefaultProtocolClient(INVITE_LINK_SCHEME, process.execPath, entry ? [entry] : []);
+  } catch (error) {
+    console.warn("[invite] could not register the memmy protocol:", error);
+  }
+}
+
 function triggerAgentSourceAutoInject(reason: string): void {
   const config = runtimeConfig;
   if (!config || agentSourceAutoInjectInFlight) {
@@ -5929,6 +6014,14 @@ const MACOS_PERMISSION_RELAUNCH_ARG = '--memmy-permission-relaunch';
 const wasMacPermissionRelaunch = process.platform === 'darwin' && process.argv.includes(MACOS_PERMISSION_RELAUNCH_ARG);
 const appProcessStartedAt = Date.now();
 
+// 邀请链接（memmy://invite/<code>）的三条来路：macOS 的 open-url、冷启动的 argv（在获得单实例锁后读）、
+// Windows/Linux 的 second-instance（在它的监听里读）。open-url 必须在 ready 之前就注册。
+registerInviteProtocolClient();
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  acceptInviteLink(url);
+});
+
 /**
  * Waits for the single-instance lock while a previous instance finishes exiting.
  *
@@ -5975,11 +6068,15 @@ function shouldIgnoreStaleReopenQuit(context: MacPermissionQuitContext | null): 
     && context.quitReason === "rlgo" && wasMacPermissionRelaunch);
 }
 
-app.on("second-instance", () => {
+app.on("second-instance", (_event, argv) => {
   if (isQuitting || isQuitCleanupInProgress) {
     // The other instance is a replacement waiting for this instance's lock; let it take over.
     return;
   }
+
+  // Windows 与 Linux 把 memmy://invite/... 当作参数交给已经在跑的实例；链接不该被下面的防抖吃掉。
+  const inviteCode = findInviteLink(argv);
+  if (inviteCode) deliverInviteCode(inviteCode);
 
   // A waiting replacement instance retries the lock every few hundred milliseconds and each retry
   // fires second-instance; debounce so a healthy primary does not keep re-stealing focus.
@@ -6067,6 +6164,10 @@ app.whenReady().then(async () => {
     app.quit();
     return;
   }
+
+  // 冷启动时链接就在 argv 里（Windows / Linux）：这时界面还没起来，先排进待发队列，界面报到后一起发。
+  const launchInviteCode = findInviteLink(process.argv);
+  if (launchInviteCode) queueInviteCode(launchInviteCode);
 
   const windowsUpgradeLockPath = resolveWindowsUpgradeRelayLockPath();
   if (windowsUpgradeLockPath && existsSync(windowsUpgradeLockPath)) {

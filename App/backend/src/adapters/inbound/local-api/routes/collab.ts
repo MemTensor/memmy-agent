@@ -161,7 +161,12 @@ const PreviewInviteSchema = z.object({ reference: InviteReferenceSchema }).stric
 const JoinSchema = z.object({
   reference: InviteReferenceSchema,
   /** The folder the person picked for the project's tasks; a managed folder is used when absent. */
-  directory: z.string().trim().min(1).max(4_000).optional()
+  directory: z.string().trim().min(1).max(4_000).optional(),
+  /**
+   * 加入时顺手改的昵称，可不填：不填就沿用账号原来的名字。
+   * 填了要跟本项目现有成员不重名，由云端判定，这里只卡长度。
+   */
+  nickname: z.string().trim().max(32, "昵称不超过 32 个字").optional()
 }).strict();
 
 export function registerCollabRoutes(app: FastifyInstance, options: RegisterCollabRoutesOptions): void {
@@ -174,6 +179,10 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
   // and the cloud only knows the generated source id.
   app.get("/api/collab/agents", guard, withErrorEnvelope(async (_request, reply) =>
     reply.send({ agents: await options.collab.listAddedAgents() })));
+
+  // 等自己审核的加入申请，跨项目一次给出：邀请人的 Memmy 轮询它并在屏幕上弹窗。
+  app.get("/api/collab/join-requests", guard, withErrorEnvelope(async (_request, reply) =>
+    reply.send({ requests: await options.collab.joinRequests() })));
 
   app.post("/api/collab/projects", guard, withErrorEnvelope(async (request, reply) => {
     const input = CreateProjectSchema.parse(request.body ?? {});
@@ -354,7 +363,7 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
 
   app.post("/api/collab/invites/join", guard, withErrorEnvelope(async (request, reply) => {
     const input = JoinSchema.parse(request.body ?? {});
-    return reply.send(await options.collab.joinProject(input.reference, input.directory));
+    return reply.send(await options.collab.joinProject(input.reference, input.directory, input.nickname));
   }));
 
   app.delete<{ Params: { projectId: string; sessionId: string } }>("/api/collab/projects/:projectId/sessions/:sessionId", guard, withErrorEnvelope(async (request, reply) => {

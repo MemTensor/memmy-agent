@@ -30,7 +30,7 @@ describe("collab dialog widths", () => {
     // 读取视图不再是弹窗，改成右侧浮起的面板，所以这里只剩两个弹窗。
     const expected = {
       createModal: "width: min(540px, calc(100vw - 32px));",
-      pickModal: "width: min(880px, calc(100vw - 32px));"
+      pickModal: "width: min(640px, calc(100vw - 32px));"
     };
 
     for (const [className, width] of Object.entries(expected)) {

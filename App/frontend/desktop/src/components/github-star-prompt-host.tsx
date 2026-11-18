@@ -10,6 +10,7 @@ import {
   shouldOfferGithubStarPrompt
 } from "../app/github-star-prompt-state.js";
 import { isDemoGuideActive } from "../app/collab-demo-guide-store.js";
+import { reportOnboardingPromptOpen } from "../app/onboarding-activity.js";
 import { communityLinks } from "../community/community-links.js";
 import { useAppState } from "../state/app-state.js";
 import { openExternalUrl } from "../utils/open-url.js";
@@ -47,6 +48,12 @@ export function GithubStarPromptHost() {
     markGithubStarPromptShown(storage);
     setOpen(true);
   }, [open, state.agent.lastTaskCompletion]);
+
+  useEffect(() => {
+    // 与协作项目的大卡共享「屏幕上有没有既有提示」：星标提示关掉之后大卡才重新开始计时。
+    reportOnboardingPromptOpen("github-star", open);
+    return () => reportOnboardingPromptOpen("github-star", false);
+  }, [open]);
 
   if (!open) {
     return null;

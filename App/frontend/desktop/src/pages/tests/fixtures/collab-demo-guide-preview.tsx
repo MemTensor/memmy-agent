@@ -1,11 +1,11 @@
 /**
- * 新手引导的预览页：`assist-preview.html?view=demo-guide&step=<步骤>`。
+ * 新手引导的预览页：按 `step` 摆出某一屏的样子（见 {@link DEMO_GUIDE_PREVIEW_STEPS}）。
  *
- * 用一套假的项目与成员数据摆出看板、只读面板、输入框、协助弹窗与「协助」列表，再把真正的蒙版画在上面，
+ * 用一套假的项目与成员数据摆出看板、只读面板与输入框，再把真正的蒙版画在上面，
  * 这样不连本机接口也能逐步检查亮区位置、说明卡会不会挡住目标、窄窗口下是否溢出。
  */
 import type { CSSProperties, ReactNode } from "react";
-import { Check, LifeBuoy, Link2, MessageSquarePlus, Search, Settings, Send, UserPlus } from "lucide-react";
+import { Link2, MessageSquarePlus, Search, Settings, UserPlus } from "lucide-react";
 import { I18nProvider } from "../../../i18n/i18n-provider.js";
 import { CollabDemoGuideOverlay } from "../../../components/collab-demo-guide/collab-demo-guide-overlay.js";
 import { demoGuideIsTourPhase, type DemoGuidePhase, type DemoGuideState } from "../../../app/collab-demo-guide-store.js";
@@ -14,8 +14,8 @@ import board from "../../collab-page.module.css";
 /**
  * 预览里的步骤：卡片上的名字与 {@link DemoGuidePhase} 一一对应。
  *
- * `0-*` 是建项目之前的那一段（新建弹窗上的六屏，加上加入项目之后看板上的成员亮区），`t-*` 是五步看板导览
- * （纯介绍），`1-*`「2-*」`3-*` 是体验段三步。
+ * `0-*` 是建项目之前的那一段（新建弹窗上的六屏，加上加入项目之后看板上的成员亮区），`t-*` 是四步看板导览
+ * （纯介绍），`1-*` 是体验段的那一步。
  */
 export const DEMO_GUIDE_PREVIEW_STEPS = {
   "0-intro": "intro",
@@ -26,7 +26,6 @@ export const DEMO_GUIDE_PREVIEW_STEPS = {
   "0-create-project": "create-project",
   "0-joined": "joined",
   "t-board": "tour-board",
-  "t-tabs": "tour-tabs",
   "t-associate": "tour-associate",
   "t-associate-pick": "tour-associate-pick",
   // 同一站、还没授权：弹窗是授权说明，「下一步」换成「授权并查看」。
@@ -36,17 +35,7 @@ export const DEMO_GUIDE_PREVIEW_STEPS = {
   "1-reader": "reader",
   "1-compose": "compose",
   "1-waiting": "reply-waiting",
-  "1-done": "reply-done",
-  "2-compose": "ask-compose",
-  "2-waiting": "ask-waiting",
-  "2-done": "ask-done",
-  "3-gear": "settings-open",
-  "3-settings": "settings-assist",
-  "3-waiting": "help-waiting",
-  "3-dialog": "help-dialog",
-  "3-running": "help-running",
-  "3-done": "help-done",
-  "3-rejected": "help-rejected"
+  "1-done": "reply-done"
 } as const satisfies Record<string, DemoGuidePhase>;
 
 export type DemoGuidePreviewStep = keyof typeof DEMO_GUIDE_PREVIEW_STEPS | "complete" | "error";
@@ -71,8 +60,6 @@ function stateFor(step: DemoGuidePreviewStep): DemoGuideState {
     ? (step === "complete" ? "complete" : "reply-waiting")
     : DEMO_GUIDE_PREVIEW_STEPS[step];
   const beforeProject = PRE_PROJECT_PHASES.includes(phase);
-  // 第三步的这几个阶段意味着前两步都走过了：完成弹窗与卡片都按它列条目。
-  const lateStep = step === "3-gear" || step === "3-settings" || step === "3-waiting" || step === "3-dialog" || step === "3-running" || step === "3-done";
   return {
     status: step === "complete" ? "complete" : "active",
     phase,
@@ -81,15 +68,8 @@ function stateFor(step: DemoGuidePreviewStep): DemoGuideState {
     memberUserId: beforeProject ? null : "9001",
     memberName: beforeProject ? "" : MEMBER,
     error: step === "error" ? "Agent 没有给出回复。" : null,
-    done: {
-      task: step === "complete" || lateStep,
-      ask: step === "complete" || lateStep,
-      help: step === "complete" || step === "3-done"
-    },
-    skipped: { task: false, ask: false, help: false },
-    askSeen: false,
-    askDelivered: step === "2-done",
-    askTurnEnded: false,
+    done: { task: step === "complete" },
+    skipped: { task: false },
     // 「关联会话」那一屏：预览里直接摆扫完的样子（列表 + 计数），主按钮可用；`t-associate-lock` 摆未授权的样子。
     scan: phase === "tour-associate-pick"
       ? (step === "t-associate-lock" ? { status: "locked", count: 0 } : { status: "done", count: 12 })
@@ -146,7 +126,7 @@ function PreviewSidebar() {
 }
 
 /** 看板的一列：标题、任务行、右侧项目配置，与真实看板同一套类名与外观。 */
-function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; withSidebar?: boolean; withMembersAnchor?: boolean }) {
+function BoardSurface(props: { withSidebar?: boolean; withMembersAnchor?: boolean }) {
   return (
     <div
       className={board.page}
@@ -173,9 +153,7 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; wi
           </header>
           <div className={board.boardTabs} role="tablist" data-demo-guide="board-tabs">
             <button type="button" role="tab" aria-selected className={`${board.boardTab} ${board.boardTabOn}`}>任务</button>
-            <button type="button" role="tab" aria-selected={false} className={board.boardTab}>
-              协助<span className={board.segCount}>{props.withAssistRow ? "2" : "0"}</span>
-            </button>
+            <button type="button" role="tab" aria-selected={false} className={board.boardTab}>归档</button>
           </div>
           <div className={board.toolbar}>
             <label className={board.searchBox}>
@@ -183,7 +161,7 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; wi
               <input readOnly placeholder="搜索任务" className={board.search} />
             </label>
             <span className={board.grow} />
-            {/* 「关联任务」：演示第二步唯一亮起来的控件。 */}
+            {/* 「关联任务」：看板导览那一站亮起来的地方。 */}
             <button type="button" className="button button-primary button-sm" data-demo-guide="board-associate">
               <Link2 size={14} aria-hidden="true" />关联任务
             </button>
@@ -200,30 +178,6 @@ function BoardSurface(props: { withSettings: boolean; withAssistRow: boolean; wi
               </div>
               <span className={board.meta}>{MEMBER} · 10:24</span>
             </li>
-            {props.withAssistRow ? (
-              <>
-                <li className={`${board.row} ${board.rowOpenable}`} data-demo-guide="assist-row">
-                  <span className={`${board.avatar} ${board.assistIcon}`} aria-hidden="true">
-                    <LifeBuoy size={15} />
-                  </span>
-                  <div className={board.rowText}>
-                    <span className={board.rowTitle}>确认这台电脑的系统版本</span>
-                    <span className={board.rowSummary}>分享会要现场演示，他想先确认这台电脑的系统版本。</span>
-                  </div>
-                  <span className={`${board.meta} ${board.assistMetaOpen}`}>{MEMBER} → 你 · Memmy · 执行中</span>
-                </li>
-                <li className={`${board.row} ${board.rowOpenable}`}>
-                  <span className={`${board.avatar} ${board.assistIcon}`} aria-hidden="true">
-                    <LifeBuoy size={15} />
-                  </span>
-                  <div className={board.rowText}>
-                    <span className={board.rowTitle}>查一下上次分享会来了多少人</span>
-                    <span className={board.rowSummary}>签到表在{MEMBER}的电脑上，他的 Agent 去查。</span>
-                  </div>
-                  <span className={`${board.meta} ${board.assistMetaOpen}`}>你 → {MEMBER} · Memmy · 已完成</span>
-                </li>
-              </>
-            ) : null}
           </ul>
         </div>
       </div>
@@ -273,18 +227,30 @@ function CreateProjectSurface() {
         </div>
         <div
           data-demo-guide="create-collab"
-          style={{ ...field, marginTop: 12, background: "color-mix(in srgb, #5cbfae 7%, #fff)", borderColor: "color-mix(in srgb, #5cbfae 55%, rgba(16,26,25,.14))" }}
+          style={{ ...field, height: 40, marginTop: 8, border: "none", borderRadius: 8, background: "transparent" }}
         >
           <span style={{ color: "#2f8f7f" }} aria-hidden="true">◉</span>
           <span style={{ flex: 1 }}>开启项目协作</span>
           <button type="button" role="switch" aria-checked="true" aria-label="开启项目协作" className={board.settingsSwitchOn} />
         </div>
-        {/* 左下是「加入项目」，右下是取消与创建：与真实弹窗的页脚一致。 */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 20 }}>
-          <button type="button" className="button button-secondary button-md" data-demo-guide="create-join">加入项目</button>
+        {/* 左下是「加入项目」，右下是取消与创建：与真实弹窗的页脚一致（三个按钮同一尺寸）。 */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 20 }}>
+          <button
+            type="button"
+            className={`button button-secondary ${board.simpleCreateFooterButton}`}
+            data-demo-guide="create-join"
+          >
+            加入项目
+          </button>
           <span style={{ display: "flex", gap: 8 }}>
-            <button type="button" className="button button-ghost">取消</button>
-            <button type="button" className="button button-primary" data-demo-guide="create-project-submit">创建项目</button>
+            <button type="button" className={`button button-ghost ${board.simpleCreateFooterButton}`}>取消</button>
+            <button
+              type="button"
+              className={`button button-primary ${board.simpleCreateFooterButton}`}
+              data-demo-guide="create-project-submit"
+            >
+              创建项目
+            </button>
           </span>
         </div>
       </div>
@@ -341,7 +307,7 @@ function ReaderSurface() {
 
 /** 对话页：输入框、发送按钮与对话区。 */
 function ChatSurface(props: { phase: DemoGuidePhase }) {
-  const waiting = props.phase === "reply-waiting" || props.phase === "ask-waiting";
+  const waiting = props.phase === "reply-waiting";
   return (
     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", background: "var(--color-canvas-oat, #f4f7f6)" }}>
       <div style={{ flex: 1, overflow: "auto", padding: "40px 56px" }} data-demo-guide="conversation">
@@ -364,9 +330,7 @@ function ChatSurface(props: { phase: DemoGuidePhase }) {
           style={{ ...card, border: "1px solid rgba(16,26,25,.08)", padding: "16px 16px 46px", position: "relative" }}
         >
           <p style={{ margin: 0, fontSize: 13, color: "rgba(16,26,25,.62)" }}>
-            {props.phase === "ask-compose"
-              ? `请${MEMBER}查一下上次分享会一共来了多少人`
-              : "接着小饭团的安排，写一段分享会的通知"}
+            {"接着小饭团的安排，写一段分享会的通知"}
           </p>
           <button type="button" className="composer-action-submit" data-demo-guide="composer-send" style={{ position: "absolute", right: 14, bottom: 12 }}>
             发送
@@ -377,38 +341,8 @@ function ChatSurface(props: { phase: DemoGuidePhase }) {
   );
 }
 
-/** 项目设置里「协作」的一组：接收协助请求的开关。 */
-function SettingsSurface() {
-  return (
-    <div style={{ position: "absolute", inset: 0, background: "rgba(16,26,25,.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ width: 520, background: "#fff", borderRadius: 16, padding: 22, boxShadow: "0 18px 44px rgba(16,26,25,.18)" }}>
-        <b style={{ fontSize: 15 }}>项目设置</b>
-        <div className={board.settingsSectionLabel}>文件夹</div>
-        <div className={board.settingsGroup}>
-          <div className={board.settingsRow}>
-            <span className={board.settingsRowLabel}>项目协作体验</span>
-          </div>
-        </div>
-        <div className={board.settingsSectionLabel}>协作</div>
-        <div className={board.settingsGroup} data-demo-guide="settings-assist">
-          <div className={board.settingsRow}>
-            <span className={board.settingsRowLabel}>共享给成员的任务</span>
-            <span className={board.settingsRowValue}>1 / 1</span>
-          </div>
-          <div className={board.settingsRow}>
-            <span className={board.settingsRowLabel}>接收协助请求</span>
-            <span className={board.settingsRowControl}>
-              <button type="button" role="switch" aria-checked="false" className={board.settingsSwitch} data-demo-guide="settings-assist-switch" />
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /**
- * 关联会话弹窗：标题、Agent 列与扫出来的会话列表，底部一行写明只做展示。
+ * 关联会话弹窗：标题、Agent 列与扫出来的会话列表；展示模式没有底部。
  *
  * 真实组件还连本机接口真扫；预览只摆布局与亮区锚点，名字与真实弹窗的 `data-demo-guide` 一致。
  */
@@ -471,118 +405,8 @@ function AssociatePickSurface({ locked = false }: { locked?: boolean }) {
           </div>
         </div>
         )}
-        <footer style={{ padding: "10px 18px 14px", fontSize: 11.5, color: "rgba(16,26,25,.45)", borderTop: "1px solid rgba(16,26,25,.06)" }}>
-          {locked ? "授权后才能读取这台电脑上的会话。" : "这里只做展示，不会改动任何任务。"}
-        </footer>
+
       </section>
-    </div>
-  );
-}
-
-/** 协助授权弹窗：谁请求、做什么、由谁执行与允许方式。 */
-function AssistDialogSurface() {  return (
-    <div style={{ position: "absolute", inset: 0, background: "rgba(16,26,25,.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div
-        data-demo-guide="assist-dialog"
-        style={{ width: 520, background: "#fff", borderRadius: 16, padding: 22, boxShadow: "0 18px 44px rgba(16,26,25,.18)" }}
-      >
-        <h2 style={{ margin: "0 0 10px", fontSize: 16 }}>{MEMBER}请求你的电脑协助</h2>
-        <p style={{ margin: "0 0 14px", fontSize: 13, lineHeight: 1.6, color: "rgba(16,26,25,.62)" }}>
-          分享会要现场演示，他想先确认这台电脑的系统版本。
-        </p>
-        <div style={{ padding: 14, borderRadius: 10, background: "rgba(16,26,25,.03)", marginBottom: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>确认这台电脑的系统版本</div>
-          <div style={{ fontSize: 12.5, lineHeight: 1.6, color: "rgba(16,26,25,.62)" }}>
-            查看这台电脑的系统版本，把结果回传。
-          </div>
-        </div>
-        <div style={{ padding: 14, borderRadius: 10, border: "1px solid rgba(16,26,25,.08)", marginBottom: 14 }}>
-          <div style={{ fontSize: 12, color: "rgba(16,26,25,.55)", marginBottom: 8 }}>由谁执行</div>
-          {["Memmy", "Claude Code", "Codex"].map((agent) => (
-            <div key={agent} style={{ fontSize: 13, padding: "6px 0" }}>{agent}</div>
-          ))}
-        </div>
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button type="button" className="button button-ghost">拒绝</button>
-          <button type="button" className="button button-primary" data-demo-guide="assist-allow">允许</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/**
- * 任务页：面包屑之下一条协助条（谁的请求、仅这一次、状态），下面是请求卡片与执行过程，
- * 底部「结果已发给谁」。第四步点〔允许〕之后人应该站在这一页上，而不是看板的「协助」里。
- * `done` 为真是执行完成之后的样子，为假时停在执行中。
- */
-function AssistTaskSurface(props: { done: boolean }) {
-  const bar = {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "8px 20px",
-    background: "color-mix(in srgb, #5cbfae 8%, #fff)",
-    borderBottom: "1px solid rgba(16,26,25,.08)",
-    fontSize: 12.5
-  } as const;
-  const bubble = (mine: boolean): CSSProperties => ({
-    ...card,
-    padding: 16,
-    alignSelf: mine ? "flex-end" : "flex-start",
-    maxWidth: 620
-  });
-  return (
-    <div
-      data-demo-guide="assist-task"
-      style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", background: "var(--color-canvas-oat, #f4f7f6)" }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "14px 20px", fontSize: 12.5, color: "rgba(16,26,25,.55)" }}>
-        <span>新手引导项目</span>
-        <span aria-hidden="true">/</span>
-        <span>Memmy 任务</span>
-      </div>
-      {/* 执行方的协助条：谁发来的、授权到什么程度、这一次的状态。 */}
-      <div style={bar} data-collab-assist-bar="">
-        <span style={{ display: "inline-flex", width: 20, height: 20, borderRadius: 999, background: "#8fb6ae", color: "#fff", alignItems: "center", justifyContent: "center", fontSize: 11 }} aria-hidden="true">小</span>
-        <span>{`${MEMBER}的 Memmy 请求 · 仅这一次 · ${props.done ? "已完成" : "执行中"}`}</span>
-      </div>
-      <div style={{ flex: 1, overflow: "auto", padding: "28px 56px", display: "flex", flexDirection: "column", gap: 14 }}>
-        <div style={bubble(false)}>
-          <b style={{ fontSize: 13 }}>{MEMBER} · 请求</b>
-          <p style={{ margin: "8px 0 0", fontSize: 13, lineHeight: 1.6 }}>确认这台电脑的系统版本</p>
-          <p style={{ margin: "6px 0 0", fontSize: 12.5, lineHeight: 1.6, color: "rgba(16,26,25,.62)" }}>
-            分享会要现场演示，他想先确认这台电脑的系统版本。
-          </p>
-        </div>
-        <div style={bubble(false)}>
-          <b style={{ fontSize: 13 }}>Memmy</b>
-          <p style={{ margin: "8px 0 0", fontSize: 13, lineHeight: 1.6 }}>
-            {props.done
-              ? "系统版本已确认：macOS 26.1（Darwin 25.1.0），芯片 Apple M3。"
-              : "正在确认这台电脑的系统版本…"}
-          </p>
-        </div>
-        {props.done ? (
-          <div style={{ ...bubble(false), display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "rgba(16,26,25,.62)" }}>
-            <Check size={13} aria-hidden="true" />
-            <span>执行完成</span>
-          </div>
-        ) : null}
-      </div>
-      {/* 任务底部：结果发出去之后写明发给了谁。真实页面上它与输入框一起在居中的那一列里。 */}
-      <div style={{ width: 784, margin: "0 auto", paddingBottom: 28 }}>
-        <div
-          style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 0 8px", fontSize: 12.5, color: "rgba(16,26,25,.62)" }}
-          data-collab-assist-dock=""
-        >
-          <Send size={13} aria-hidden="true" />
-          <span>{props.done ? `结果已发给${MEMBER}` : `执行中，结果会发给${MEMBER}`}</span>
-        </div>
-        <div style={{ ...card, padding: "14px 16px", fontSize: 13, color: "rgba(16,26,25,.4)" }}>
-          继续问点什么…
-        </div>
-      </div>
     </div>
   );
 }
@@ -606,31 +430,26 @@ export function DemoGuidePreview(props: { step: DemoGuidePreviewStep }) {
   const stage = demoGuidePreviewStage();
 
   const phase = state.phase;
-  const chat = phase === "compose" || phase === "reply-waiting" || phase === "reply-done" || phase === "ask-compose" || phase === "ask-waiting" || phase === "ask-done";
-  // 看板导览的五步：只摆看板（「关联会话」多一张弹窗，最后一步多一条侧栏），不换页。
+  const chat = phase === "compose" || phase === "reply-waiting" || phase === "reply-done";
+  // 看板导览的四步：只摆看板（「关联会话」多一张弹窗，最后一步多一条侧栏），不换页。
   const tour = demoGuideIsTourPhase(phase);
   let surface: ReactNode;
   // 建项目之前的六个阶段全在新建弹窗上，只换亮区。
   if (PRE_PROJECT_PHASES.includes(phase)) surface = <CreateProjectSurface />;
   // 加入之后人已经在看板上：亮区只套住头部的成员徽章，没有独立的提示窗。
-  else if (phase === "joined") surface = <BoardSurface withSettings withAssistRow={false} withMembersAnchor />;
+  else if (phase === "joined") surface = <BoardSurface withMembersAnchor />;
   else if (chat) surface = <ChatSurface phase={phase} />;
   else if (tour) {
     surface = (
       <>
-        <BoardSurface withSettings withAssistRow={false} withSidebar={phase === "tour-new-task"} />
+        <BoardSurface withSidebar={phase === "tour-new-task"} />
         {phase === "tour-new-task" ? <PreviewSidebar /> : null}
         {phase === "tour-associate-pick" ? <AssociatePickSurface locked={props.step === "t-associate-lock"} /> : null}
       </>
     );
   }
-  else if (phase === "reader") surface = (<><BoardSurface withSettings={false} withAssistRow={false} /><ReaderSurface /></>);
-  else if (phase === "settings-assist") surface = <SettingsSurface />;
-  else if (phase === "help-dialog") surface = <AssistDialogSurface />;
-  // 允许之后人就在那条任务里：协助条、执行过程与「结果已发给谁」都在这一页。
-  else if (phase === "help-running") surface = <AssistTaskSurface done={false} />;
-  else if (phase === "help-done") surface = <AssistTaskSurface done />;
-  else surface = <BoardSurface withSettings withAssistRow={phase === "help-running" || phase === "help-done" || phase === "help-rejected"} />;
+  else if (phase === "reader") surface = (<><BoardSurface /><ReaderSurface /></>);
+  else surface = <BoardSurface />;
 
   return (
     <I18nProvider language="zh-CN">

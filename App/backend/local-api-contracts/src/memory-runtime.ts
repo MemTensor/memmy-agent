@@ -1065,7 +1065,6 @@ export const ApiErrorCodeSchema = z.enum([
   "config_write_busy",
   "account_model_preset_conflict",
   "collab_quota_exceeded",
-  "collab_assist_not_receiving",
   "plugin_entitlement_required"
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;

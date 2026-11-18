@@ -192,13 +192,6 @@ export interface CollabProject {
   localProjectId: string | null;
   /** 项目指令全文；成员只读。未设定时为空串。 */
   instructions: string;
-  /** 本人在这个项目里是否接收协助请求；旧云端不返回时为 false。 */
-  acceptAssist: boolean;
-  /**
-   * 开启了接收协助请求的成员（含本人）。只有项目列表带这一项，单个项目的接口不带，此时为空数组。
-   * 发起方的 Agent 据此知道在哪个项目里请谁。
-   */
-  assistReceivers: Array<{ userId: string; name: string; mine: boolean }>;
   /**
    * 新手引导的演示：只有演示进行中的项目带它。云端给 null / 不返回时按普通项目处理，
    * 桌面端不自己判断「是不是演示项目」，也不认任何写死的账号或昵称。
@@ -353,8 +346,6 @@ export interface CollabMember {
   /** The signed-in person, labelled「（你）」. */
   mine: boolean;
   joinedAt: string | null;
-  /** 这位成员是否在这个项目里接收协助请求；旧云端不返回时为 false。 */
-  acceptAssist: boolean;
   /** 演示成员那一行为 true：成员列表据此显示「官方」标记，不认 userId 或昵称。 */
   demo: boolean;
 }
@@ -365,6 +356,16 @@ export interface CollabJoinRequest {
   /** Whose link the person applied through. */
   inviterName: string;
   createdAt: string | null;
+}
+
+/**
+ * 等自己审核的加入申请，带上项目：邀请人的 Memmy 靠它在屏幕上弹窗。
+ *
+ * <p>一个人可能是多个项目的所有者或管理员，所以列表是跨项目的；云端只返回他能审核的项目。</p>
+ */
+export interface CollabManagedJoinRequest extends CollabJoinRequest {
+  projectId: string;
+  projectName: string;
 }
 
 export interface CollabMembers {
@@ -654,6 +655,11 @@ export interface CollabService {
   }): Promise<{ text: string; ok?: true }>;
   /** Who is in the project and how people join it; owners and admins also get the requests waiting for them. */
   listMembers(projectId: string): Promise<CollabMembers>;
+  /**
+   * 等自己审核的加入申请，跨项目一次给出。邀请人的 Memmy 轮询它并在屏幕上弹窗：申请由对方在别的电脑上提交，
+   * 本机没有推送通道。
+   */
+  joinRequests(): Promise<CollabManagedJoinRequest[]>;
   /** The person's own invite link to the project; any member may invite. */
   createInvite(projectId: string): Promise<CollabInvite>;
   setJoinMode(projectId: string, joinMode: CollabJoinMode): Promise<{ joinMode: CollabJoinMode }>;
@@ -682,9 +688,10 @@ export interface CollabService {
   previewInvite(reference: string): Promise<{ invite: CollabInvitePreview }>;
   /**
    * Joins through an invite. A chosen `directory` is kept for the project, so the local project made once the person
-   * is in — now, or after approval — runs its tasks there.
+   * is in — now, or after approval — runs its tasks there. `nickname` is optional: when given, the account's nickname
+   * is changed along with the join. Duplicate names are allowed.
    */
-  joinProject(reference: string, directory?: string): Promise<CollabJoinResult>;
+  joinProject(reference: string, directory?: string, nickname?: string): Promise<CollabJoinResult>;
 }
 
 export interface SessionSearchInput {
@@ -2203,6 +2210,12 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       return view;
     },
 
+    async joinRequests() {
+      // 云端只返回调用者是所有者或管理员的项目：成员看不到这些申请，本机也不要自己再筛。
+      const data = await cloud(`/join-requests`);
+      return list(data.requests).map(toManagedJoinRequest);
+    },
+
     async demoHeartbeat(projectId, step) {
       const data = await cloud(`/projects/${encodeURIComponent(projectId)}/demo/heartbeat`, {
         method: "POST",
@@ -2304,10 +2317,15 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       return { invite: toInvitePreview(data.invite) };
     },
 
-    async joinProject(reference, directory) {
+    async joinProject(reference, directory, nickname) {
       const account = requireAccount();
       const code = requireInviteCode(reference);
-      const data = await cloud(`/invites/${encodeURIComponent(code)}/join`, { method: "POST", body: {} });
+      const wanted = nickname?.trim() ?? "";
+      const data = await cloud(`/invites/${encodeURIComponent(code)}/join`, {
+        method: "POST",
+        // 昵称留空就不传：云端把缺字段当成「不改」，而不是把名字改成空。
+        body: wanted ? { nickname: wanted } : {}
+      });
       const status = data.status === "joined" || data.status === "pending" || data.status === "member" ? data.status : null;
       const project = data.project === undefined || data.project === null ? null : toProject(data.project);
       const projectId = project?.id || text(data.projectId);
@@ -2800,17 +2818,6 @@ interface MemmySessionRecords {
 }
 
 /**
- * 成员协助的结果送回发起方任务时是一条以 {@code <memmy_assist_result} 开头的消息，内容来自执行方的电脑，
- * 只有协助双方看得到。发起方把这条任务共享到项目时，这一轮的提问只留下面这句说明，不把结果带给全体成员；
- * 发起方 Agent 收到后的分析是发起方自己的内容，照常共享。
- */
-export const ASSIST_RESULT_PLACEHOLDER = "（这里是一次成员协助的结果，只有协助双方看得到）";
-
-export function isAssistResult(content: string): boolean {
-  return /^\s*<memmy_assist_result\b/u.test(content);
-}
-
-/**
  * 一个 Memmy 任务文件的会话 id：`key` 里带着时用它，否则按文件名推（`websocket_xxx.jsonl` → `xxx`）。
  * 取末段必须用 `basename`：Windows 上这个路径是全反斜杠的，按 `/` 切分会把整串路径当成文件名。
  * `platform` 只为让测试能在 macOS 上验证 Windows 的取法，实际调用都用本机平台。
@@ -2865,9 +2872,8 @@ async function readSessionRecords(path: string): Promise<MemmySessionRecords | n
     const role = text(raw.role);
     if (role === "user") {
       if (current) turns.push(current);
-      // 协助结果送回发起方任务的那条消息：内容来自执行方的电脑，只有协助双方看得到。这条任务共享到项目时只留一句说明。
-      const question = isAssistResult(text(raw.content)) ? ASSIST_RESULT_PLACEHOLDER : text(raw.content);
-      if (!isAssistResult(text(raw.content))) lastQuestion = question;
+      const question = text(raw.content);
+      lastQuestion = question;
       current = { question, reply: "", steps: [], startedAt: timestamp };
       continue;
     }
@@ -3027,12 +3033,7 @@ function toProject(raw: unknown): CollabProject {
     localProjectId: null,
     // A cloud from before instructions existed omits the field; the board then shows the empty state.
     instructions: text(project.instructions).trim(),
-    acceptAssist: project.acceptAssist === true,
-    demo: toDemo(project.demo),
-    assistReceivers: list(project.assistReceivers).map((raw) => {
-      const member = record(raw);
-      return { userId: text(member.userId), name: text(member.name), mine: member.mine === true };
-    }).filter((member) => member.userId)
+    demo: toDemo(project.demo)
   };
 }
 
@@ -3072,7 +3073,6 @@ function toMember(raw: unknown): CollabMember {
     role: toRole(member.role),
     mine: member.mine === true,
     joinedAt: nullableText(member.joinedAt),
-    acceptAssist: member.acceptAssist === true,
     demo: member.demo === true
   };
 }
@@ -3096,6 +3096,15 @@ function toJoinRequest(raw: unknown): CollabJoinRequest {
     name: text(request.name),
     inviterName: text(request.inviterName),
     createdAt: nullableText(request.createdAt)
+  };
+}
+
+function toManagedJoinRequest(raw: unknown): CollabManagedJoinRequest {
+  const request = record(raw);
+  return {
+    ...toJoinRequest(request),
+    projectId: text(request.projectId),
+    projectName: text(request.projectName)
   };
 }
 
@@ -3168,11 +3177,6 @@ function summarizeSteps(steps: readonly string[]): string {
 const LOCAL_CODE_BY_CLOUD_CODE: Readonly<Record<number, ApiErrorCode>> = Object.freeze({
   /** 云端 ErrorCode.COLLAB_QUOTA：每人可创建的在线项目数量达到上限。 */
   41004: "collab_quota_exceeded",
-  /**
-   * 云端 ErrorCode.COLLAB_ASSIST_NOT_RECEIVING：对方没有在这个项目里开启接收协助请求。
-   * 消息原样保留（「李四还没有在「某项目」中开启接收协助请求」），命令行与界面直接给人看。
-   */
-  41005: "collab_assist_not_receiving"
 });
 
 function errorCode(status: number): ApiErrorCode {

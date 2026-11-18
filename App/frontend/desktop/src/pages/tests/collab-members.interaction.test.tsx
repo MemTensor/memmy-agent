@@ -95,7 +95,7 @@ describe("project members dialog", () => {
       requests: []
     });
     expect(hasText("邀请成员")).toBe(true);
-    expect(hasText("成员加入后可查看项目中的任务与对话，也可将自身的任务纳入项目；成员的 Agent 均可参考。")).toBe(true);
+    expect(hasText("成员加入后可查看项目中的任务与对话，也可将自身的任务纳入项目，成员的 Agent 均可参考")).toBe(true);
     expect(hasText("用户A（你）")).toBe(true);
     expect(hasText("获得链接者")).toBe(true);
     expect(button("申请后加入")).toBeTruthy();
@@ -107,19 +107,18 @@ describe("project members dialog", () => {
     expect(onToast).toHaveBeenCalledWith("邀请链接已复制");
   });
 
-  it("lets owners and admins review requests and set other members' roles", async () => {
+  it("lets owners and admins review requests", async () => {
     await open({
       project,
       joinMode: "approval",
       canManage: true,
       members: [
         { userId: "7", name: "用户A", role: "owner", mine: false, joinedAt: null },
-        { userId: "8", name: "用户B", role: "admin", mine: true, joinedAt: null },
         { userId: "9", name: "用户C", role: "member", mine: false, joinedAt: null }
       ],
       requests: [{ userId: "10", name: "用户D", inviterName: "用户C", createdAt: null }]
     });
-    expect(hasText("项目成员 · 3")).toBe(true);
+    expect(hasText("项目成员 · 2")).toBe(true);
     expect(hasText("加入申请 · 1")).toBe(true);
     expect(hasText("通过 用户C 的邀请链接申请")).toBe(true);
 
@@ -129,14 +128,13 @@ describe("project members dialog", () => {
     expect(collab.approveRequest).toHaveBeenCalledWith("cloud-1", "10");
     expect(onToast).toHaveBeenCalledWith("用户D 已加入项目");
 
-    // The owner has a tag, oneself a plain role; only the other member gets a picker.
+    // The owner has a tag, oneself a plain role; only the other member gets a picker, and it offers no other role.
     expect(hasText("所有者")).toBe(true);
     const pickers = Array.from(document.querySelectorAll<HTMLButtonElement>("button[aria-haspopup='menu']"));
     expect(pickers.map((picker) => picker.textContent?.trim())).toEqual(["申请后加入", "成员"]);
     await act(async () => pickers[1]!.click());
-    await act(async () => button("管理员").click());
-    await flush();
-    expect(collab.setMemberRole).toHaveBeenCalledWith("cloud-1", "9", "admin");
+    expect(document.querySelectorAll("[role='menuitemradio']")).toHaveLength(1);
+    expect(collab.setMemberRole).not.toHaveBeenCalled();
   });
 
   it("shows members a plain list without management controls", async () => {
@@ -154,6 +152,25 @@ describe("project members dialog", () => {
     expect(hasText("获得链接者")).toBe(false);
     expect(document.querySelectorAll("button[aria-haspopup='menu']")).toHaveLength(0);
     expect(button("复制邀请链接")).toBeTruthy();
+  });
+
+  /** 云端的老项目里可能还剩 admin 成员：界面不再提供这个角色，已有的按普通成员展示，不报错也不留空。 */
+  it("shows an existing admin member as a plain member", async () => {
+    await open({
+      project: { ...project, role: "member" },
+      joinMode: "approval",
+      canManage: false,
+      members: [
+        { userId: "7", name: "用户A", role: "owner", mine: false, joinedAt: null },
+        { userId: "8", name: "用户B", role: "admin", mine: true, joinedAt: null }
+      ],
+      requests: []
+    });
+    const list = document.querySelector("section[aria-label^='项目成员']");
+    expect(list).toBeTruthy();
+    expect(list!.textContent).toContain("用户B（你）");
+    expect(list!.textContent).toContain("成员");
+    expect(document.body.textContent).not.toContain("管理员");
   });
 
   /** 轮询用假定时器：申请在别的电脑上提交，这里只等一个周期就能看到。 */
@@ -214,7 +231,6 @@ describe("join project dialog", () => {
   const onJoined = vi.fn();
   const onApplied = vi.fn();
   const onClose = vi.fn();
-  const onCreateProject = vi.fn();
   const invite = {
     code: "AbCdEfGhIjKlMnOpQrStUv",
     projectId: "cloud-1",
@@ -240,7 +256,6 @@ describe("join project dialog", () => {
             onClose={onClose}
             onJoined={onJoined}
             onApplied={onApplied}
-            onCreateProject={onCreateProject}
           />
         </I18nProvider>
       );
@@ -264,15 +279,17 @@ describe("join project dialog", () => {
   it("applies by default and says the request was sent", async () => {
     await paste(invite);
     expect(hasText("用户A 邀请你加入项目")).toBe(true);
-    expect(hasText("你在项目中的任务记录同步至云端，对项目成员可见；本地文件不会上传。")).toBe(true);
-    expect(hasText("项目中已有成员同步的任务。在输入框输入 @ 引用任务，Agent 将读取其完整对话。")).toBe(true);
-    expect(hasText("任务在该目录中执行。未选择时，任务不访问本地文件。")).toBe(true);
+    // 一句说明，分号已改逗号；原本讲 @ 引用的第二句按评审删掉了。
+    expect(hasText("你在项目中的任务记录同步至云端，对项目成员可见，本地文件不会上传")).toBe(true);
+    expect(hasText("项目中已有成员同步的任务")).toBe(false);
+    // 目录说明已按设计删除：标签里的「可选」与目录名本身已够说明。
+    expect(hasText("任务在该目录中执行。未选择时，任务不访问本地文件。")).toBe(false);
     expect(button("暂不加入")).toBeTruthy();
 
     collab.joinProject.mockResolvedValue({ status: "pending", projectId: "cloud-1", project: null });
     await act(async () => button("申请加入").click());
     await flush();
-    expect(collab.joinProject).toHaveBeenCalledWith(expect.stringContaining(invite.code), undefined);
+    expect(collab.joinProject).toHaveBeenCalledWith(expect.stringContaining(invite.code), undefined, undefined);
     expect(onClose).toHaveBeenCalled();
     expect(onJoined).not.toHaveBeenCalled();
     expect(onApplied).toHaveBeenCalledWith({ projectId: "cloud-1", projectName: "Memmy 开发" });
@@ -293,10 +310,13 @@ describe("join project dialog", () => {
     expect(button("已申请，等待审核").disabled).toBe(true);
   });
 
-  it("switches back to creating a project from the footer button instead of the old tabs", async () => {
-    // 顶部那块「新建项目 | 加入协作项目」标签已经去掉，两个弹窗靠页脚左侧的按钮互切。
+  it("has no tabs and no create-project entry, and an existing member still lands on join", async () => {
+    // 顶部的「新建项目 | 加入协作项目」标签早就不在了；页脚左侧的新建入口也去掉了（新建走侧栏「+」）。
     expect(document.querySelector("[role='tablist']")).toBeNull();
-    await act(async () => button("新建项目").click());
-    expect(onCreateProject).toHaveBeenCalledTimes(1);
+    expect(Array.from(document.querySelectorAll("button")).some((item) => item.textContent?.trim() === "新建项目")).toBe(false);
+    // 已经是成员时也显示「加入项目」，不再另写「打开项目」。
+    await paste({ ...invite, status: "member" });
+    expect(button("加入项目")).toBeTruthy();
+    expect(hasText("打开项目")).toBe(false);
   });
 });

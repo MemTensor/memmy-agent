@@ -9,9 +9,8 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { memberColor } from "./collab-member-color.js";
 import styles from "./collab-page.module.css";
 
-const ROLE_LABELS: Record<CollabRole, MessageKey> = {
+const ROLE_LABELS: Partial<Record<CollabRole, MessageKey>> = {
   owner: "collab.members.owner",
-  admin: "collab.members.admin",
   member: "collab.members.member"
 };
 
@@ -277,16 +276,16 @@ export function ProjectMembersDialog(props: {
                         className={styles.inlinePicker}
                         aria-haspopup="menu"
                         aria-expanded={menu === member.userId}
-                        aria-label={`${member.name} ${t(ROLE_LABELS[member.role])}`}
+                        aria-label={`${member.name} ${t(ROLE_LABELS[member.role] ?? "collab.members.member")}`}
                         disabled={busy !== null}
                         onClick={() => setMenu(menu === member.userId ? null : member.userId)}
                       >
-                        {t(ROLE_LABELS[member.role])}
+                        {t(ROLE_LABELS[member.role] ?? "collab.members.member")}
                         <ChevronDown size={14} aria-hidden="true" />
                       </button>
                       {menu === member.userId ? (
                         <div className={styles.inlineMenu} role="menu">
-                          {(["admin", "member"] as const).map((role) => (
+                          {(["member"] as const).map((role) => (
                             <button
                               key={role}
                               type="button"
@@ -298,7 +297,7 @@ export function ProjectMembersDialog(props: {
                                 return null;
                               })}
                             >
-                              {t(ROLE_LABELS[role])}
+                              {t(ROLE_LABELS[role] ?? "collab.members.member")}
                             </button>
                           ))}
                           <div className={styles.menuSeparator} role="separator" />
@@ -317,7 +316,7 @@ export function ProjectMembersDialog(props: {
                       ) : null}
                     </span>
                   ) : (
-                    <span className={styles.roleText}>{t(ROLE_LABELS[member.role])}</span>
+                    <span className={styles.roleText}>{t(ROLE_LABELS[member.role] ?? "collab.members.member")}</span>
                   )}
                 </div>
               ))}

@@ -1,6 +1,6 @@
 /**
- * 小饭团演示的状态机：看板导览的推进、体验段三步的进入与推进条件、跳过、退出、出错与重试、
- * 三步都跳过，以及心跳上报的步骤。
+ * 小饭团演示的状态机：看板导览的推进、体验段那一步的进入与推进条件、跳过、退出、出错与重试，
+ * 以及心跳上报的步骤。
  *
  * 这些规则都不依赖界面，所以按 reducer 直接断言；界面只负责发事件与画卡片。
  */
@@ -9,6 +9,7 @@ import {
   DEMO_GUIDE_BEFORE_PROJECT_PHASES,
   DEMO_GUIDE_TOUR_PHASES,
   clearDemoGuideDone,
+  demoGuideAcceptsFailure,
   demoGuideHeartbeatStep,
   demoGuideIsBeforeProjectPhase,
   demoGuideIsTourPhase,
@@ -38,8 +39,6 @@ const START = {
   memberName: "小饭团"
 };
 
-const ASK_SENTENCE = "请小饭团查一下上次分享会一共来了多少人";
-
 function raw(): DemoGuideState {
   return { ...({} as DemoGuideState), status: "ended", phase: "complete" };
 }
@@ -54,9 +53,9 @@ function touring(): DemoGuideState {
   return demoGuideReducer(joined(), { type: "joined-confirmed" });
 }
 
-/** 导览走完、点了〔开始协作〕：体验第一步的蒙版。 */
+/** 导览走完、点了〔开始协作〕：体验那一步的蒙版。 */
 function started(): DemoGuideState {
-  // 导览五步一路点「下一步」：最后一步的按钮是「开始协作」，点完就是体验第一步。
+  // 导览四步一路点「下一步」：最后一步的按钮是「开始协作」，点完就是体验那一步。
   // 「关联会话」那一站要等扫描出结果才放行：这里替弹窗报一个数。
   return throughTour(touring());
 }
@@ -83,26 +82,6 @@ const FIRST_STEP: DemoGuideEvent[] = [
   { type: "agent-settled" }
 ];
 
-/** 走到第二步（请成员协助）的输入框。 */
-function atAskCompose(): DemoGuideState {
-  return run(started(), [...FIRST_STEP, { type: "next", prefill: ASK_SENTENCE }]);
-}
-
-/** 走到第二步的结果回到对话。 */
-function atAskDone(): DemoGuideState {
-  return run(atAskCompose(), [{ type: "composer-sent" }, { type: "assist-delivered" }, { type: "agent-settled" }]);
-}
-
-/** 走到第三步的项目设置。 */
-function atSettings(): DemoGuideState {
-  return run(atAskDone(), [{ type: "next" }]);
-}
-
-/** 走到第三步的授权弹窗。 */
-function atHelpDialog(): DemoGuideState {
-  return run(atSettings(), [{ type: "settings-opened" }, { type: "receiving-on" }, { type: "help-request-seen" }]);
-}
-
 describe("demo guide state machine", () => {
   it("starts on the join notice and opens the board tour once it is dismissed", () => {
     const state = joined();
@@ -118,11 +97,10 @@ describe("demo guide state machine", () => {
   });
 
   it("walks the board tour one step at a time and hands over to the hands-on experience", () => {
-    // 导览五步：任务列表 → 协助 → 关联任务 → 关联会话 → 新建任务。
-    // 「项目名与成员」那一步已删掉：它说的东西看板上本来就看得到。
+    // 导览四步：任务列表 → 关联任务 → 关联会话 → 新建任务。
+    // 「项目名与成员」那一站已删掉：看板上本来就看得到。
     expect([...DEMO_GUIDE_TOUR_PHASES]).toEqual([
       "tour-board",
-      "tour-tabs",
       "tour-associate",
       "tour-associate-pick",
       "tour-new-task"
@@ -153,8 +131,8 @@ describe("demo guide state machine", () => {
     expect(demoGuideStepNumberOf(experience.phase)).toBe(1);
     // 导览段不预填任何东西，也不写坏任何一项。
     expect(experience.prefill).toBeNull();
-    expect(experience.done).toEqual({ task: false, ask: false, help: false });
-    expect(experience.skipped).toEqual({ task: false, ask: false, help: false });
+    expect(experience.done).toEqual({ task: false });
+    expect(experience.skipped).toEqual({ task: false });
   });
 
   it("waits for the session scan before leaving the link-session step", () => {
@@ -252,157 +230,69 @@ describe("demo guide state machine", () => {
     expect(demoGuideReducer(sent, { type: "agent-settled" }).phase).toBe("reply-done");
   });
 
-  it("goes straight from the first step to asking a member for help", () => {
+  it("ends the walkthrough once the member's task is continued", () => {
     const done = run(started(), FIRST_STEP);
     expect(done.phase).toBe("reply-done");
     expect(done.done.task).toBe(true);
-    // 关联任务只是导览里的一句话：体验段没有这一步，直接去请成员协助，并把那句话填进输入框。
-    const asking = demoGuideReducer(done, { type: "next", prefill: ASK_SENTENCE });
-    expect(asking.phase).toBe("ask-compose");
-    expect(asking.prefill?.text).toBe(ASK_SENTENCE);
-  });
-
-  it("only advances the asking step once the assist result is back and the agent settled again", () => {
-    const waiting = demoGuideReducer(atAskCompose(), { type: "composer-sent" });
-    expect(waiting.phase).toBe("ask-waiting");
-    // Agent 先回的那一句不算：结果还没回来就不能给「下一步」。
-    const settled = demoGuideReducer(waiting, { type: "agent-settled" });
-    expect(settled.phase).toBe("ask-waiting");
-    // 但它是「这一轮跑完了」的分界点：过了这里才允许判「没发出去」。
-    expect(waiting.askTurnEnded).toBe(false);
-    expect(settled.askTurnEnded).toBe(true);
-    const delivered = demoGuideReducer(settled, { type: "assist-delivered" });
-    expect(delivered.askDelivered).toBe(true);
-    const done = demoGuideReducer(delivered, { type: "agent-settled" });
-    expect(done.phase).toBe("ask-done");
-    expect(done.done.ask).toBe(true);
-    // 这一步完成就把那句话从状态里清掉：任务页之后再挂载也不会把它填回输入框。
-    expect(done.prefill).toBeNull();
-  });
-
-  it("marks the round as ended only when the agent really finished it", () => {
-    // 刚发出去：这一轮还没开始跑完，不能以此为由判失败。
-    const waiting = demoGuideReducer(atAskCompose(), { type: "composer-sent" });
-    expect(waiting.askTurnEnded).toBe(false);
-    // 再发一次就重新算：上一轮的「已结束」不会带进新的一轮。
-    const resent = demoGuideReducer({ ...atAskCompose(), askTurnEnded: true }, { type: "composer-sent" });
-    expect(resent.askTurnEnded).toBe(false);
-    // 这一轮跑完但结果还没回来：这时才置上。
-    expect(demoGuideReducer(waiting, { type: "agent-settled" }).askTurnEnded).toBe(true);
-  });
-
-  it("only says the request was sent once the cloud has it", () => {
-    const waiting = demoGuideReducer(atAskCompose(), { type: "composer-sent" });
-    // 刚发出去：Agent 还在准备那次调用，请求还没建出来，这时不能说「已发出」。
-    expect(waiting.askSeen).toBe(false);
-    const seen = demoGuideReducer(waiting, { type: "assist-seen" });
-    expect(seen.askSeen).toBe(true);
-    // 再发一次重新算：上一轮遗留的「已发出」不会带进新的一轮。
-    expect(demoGuideReducer({ ...atAskCompose(), askSeen: true }, { type: "composer-sent" }).askSeen).toBe(false);
-  });
-
-  it("drops the failure once the request turns up after all", () => {
-    const failed = demoGuideReducer(
-      demoGuideReducer(atAskCompose(), { type: "composer-sent" }),
-      { type: "fail", reason: "协助请求没有发出去。" }
-    );
-    expect(failed.error).toBe("协助请求没有发出去。");
-    // 请求后来才写进去：错误自己收起来，不需要人点「再试一次」。
-    const seen = demoGuideReducer(failed, { type: "assist-seen" });
-    expect(seen.error).toBeNull();
-    expect(seen.phase).toBe("ask-waiting");
-    // 没报过错时什么也不变：不白白换一个状态对象。
-    expect(demoGuideReducer(seen, { type: "assist-seen" })).toBe(seen);
-  });
-
-  it("walks the last step from settings to the finished assist", () => {
-    const settings = atSettings();
-    expect(settings.phase).toBe("settings-open");
-    expect(demoGuideReducer(settings, { type: "settings-opened" }).phase).toBe("settings-assist");
-    const waiting = demoGuideReducer(settings, { type: "receiving-on" });
-    expect(waiting.phase).toBe("help-waiting");
-    const dialog = demoGuideReducer(waiting, { type: "help-request-seen" });
-    expect(dialog.phase).toBe("help-dialog");
-    const running = demoGuideReducer(dialog, { type: "help-decided", allow: true });
-    expect(running.phase).toBe("help-running");
-    const finished = demoGuideReducer(running, { type: "help-finished" });
-    expect(finished.phase).toBe("help-done");
-    const complete = demoGuideReducer(finished, { type: "next" });
+    // 接续成员的任务就是引导的最后一屏：点「完成」就收场，不再有第二段体验。
+    const complete = demoGuideReducer(done, { type: "next" });
     expect(complete.status).toBe("complete");
+    expect(complete.phase).toBe("complete");
     expect(complete.endReason).toBe("finished");
-    expect(complete.done).toEqual({ task: true, ask: true, help: true });
+    expect(complete.done).toEqual({ task: true });
   });
 
-  it("treats a refusal in the authorization dialog as finishing the step", () => {
-    const refused = demoGuideReducer(atHelpDialog(), { type: "help-decided", allow: false });
-    expect(refused.phase).toBe("help-rejected");
-    const complete = demoGuideReducer(refused, { type: "next" });
-    expect(complete.status).toBe("complete");
-    expect(complete.done.help).toBe(false);
-    expect(complete.done.task).toBe(true);
+  it("offers no way back once the reply is in", () => {
+    const replied = run(started(), FIRST_STEP);
+    // 事情已经办成：卡片上不给上一步，reducer 也不动。
+    expect(replied.phase).toBe("reply-done");
+    expect(demoGuideReducer(replied, { type: "back" })).toBe(replied);
   });
 
-  it("skips a single step without touching the others", () => {
-    // 跳过第一步：直接去请成员协助，那句话跟着填上。
-    const skippedTask = demoGuideReducer(started(), { type: "skip", prefill: ASK_SENTENCE });
-    expect(skippedTask.phase).toBe("ask-compose");
-    expect(skippedTask.skipped.task).toBe(true);
-    expect(skippedTask.done.task).toBe(false);
-    expect(skippedTask.prefill?.text).toBe(ASK_SENTENCE);
-
-    // 跳过请成员协助：去项目设置，那句话一并收走。
-    const settings = demoGuideReducer(skippedTask, { type: "skip" });
-    expect(settings.phase).toBe("settings-open");
-    expect(settings.skipped.ask).toBe(true);
-    expect(settings.prefill).toBeNull();
+  it("ends without the completion dialog when the only step is skipped", () => {
+    // 体验段只有一步：跳过它就是整轮没做，直接收场，不摆完成弹窗。
+    const ended = demoGuideReducer(started(), { type: "skip" });
+    expect(ended.status).toBe("ended");
+    expect(ended.endReason).toBe("skipped");
+    expect(ended.skipped).toEqual({ task: true });
   });
 
-  it("ends without the completion dialog when every step was skipped", () => {
-    const state = run(started(), [
-      { type: "skip" },
-      { type: "skip" },
-      { type: "settings-opened" },
-      { type: "skip" }
+  it("gives the step that can fail a way out", () => {
+    // 只剩一步：失败也只可能在「等小饭团回复」那一屏上成立，这里就停在那一屏。
+    const waiting = run(started(), [
+      { type: "task-opened" },
+      { type: "task-continued", prefill: "接着写" },
+      { type: "composer-sent" }
     ]);
-    expect(state.status).toBe("ended");
-    expect(state.endReason).toBe("skipped");
-    expect(state.skipped).toEqual({ task: true, ask: true, help: true });
-  });
-
-  it("still offers the completion dialog when only the asking step was skipped", () => {
-    const state = run(started(), [
-      ...FIRST_STEP,
-      { type: "next" },
-      { type: "skip" },
-      { type: "settings-opened" },
-      { type: "receiving-on" },
-      { type: "help-request-seen" },
-      { type: "help-decided", allow: true },
-      { type: "help-finished" },
-      { type: "next" }
-    ]);
-    expect(state.status).toBe("complete");
-    expect(state.done.ask).toBe(false);
-    expect(state.skipped.ask).toBe(true);
-  });
-
-  it("gives every step a way out of a failure", () => {
-    // 失败只在「等结果」的那几屏上成立：这里停在第一步正在写的那一屏。
-    const failed = demoGuideReducer(
-      run(started(), [{ type: "task-opened" }, { type: "task-continued", prefill: "接着写" }, { type: "composer-sent" }]),
-      { type: "fail", reason: "Agent 没有给出回复。" }
-    );
+    expect(waiting.phase).toBe("reply-waiting");
+    expect(demoGuideAcceptsFailure(waiting.phase)).toBe(true);
+    const failed = demoGuideReducer(waiting, { type: "fail", reason: "Agent 没有给出回复。" });
     expect(failed.error).toBe("Agent 没有给出回复。");
-    expect(demoGuideReducer(failed, { type: "retry" }).error).toBeNull();
-    expect(demoGuideReducer(failed, { type: "skip" }).phase).toBe("ask-compose");
+    // 再试一次：清掉原因，人还停在原处等。
+    const retried = demoGuideReducer(failed, { type: "retry" });
+    expect(retried.error).toBeNull();
+    expect(retried.phase).toBe("reply-waiting");
+    // 不想等就跳过：整轮收场，项目与成员都保留。
+    const skipped = demoGuideReducer(failed, { type: "skip" });
+    expect(skipped.status).toBe("ended");
+    expect(skipped.endReason).toBe("skipped");
+    // 其余屏都不接失败：没在等结果的地方报错就是误报。
+    expect(demoGuideAcceptsFailure("compose")).toBe(false);
+    expect(demoGuideAcceptsFailure("reply-done")).toBe(false);
+    expect(demoGuideAcceptsFailure("complete")).toBe(false);
   });
 
   it("ignores a failure that arrives after the person went back", () => {
-    // 人点了「上一步」，被停下的那一轮随后报错：这一句不该落在新的一屏上。
-    const waiting = run(started(), [{ type: "task-opened" }, { type: "task-continued", prefill: "接着写" }, { type: "composer-sent" }]);
+    // 人从「等回复」退回输入框，被叫停的那一轮随后报错：这一句不该落在新的一屏上。
+    const waiting = run(started(), [
+      { type: "task-opened" },
+      { type: "task-continued", prefill: "接着写" },
+      { type: "composer-sent" }
+    ]);
     expect(waiting.phase).toBe("reply-waiting");
-    const back = demoGuideReducer(waiting, { type: "back", prefill: "接着写" });
+    const back = demoGuideReducer(waiting, { type: "back" });
     expect(back.phase).toBe("compose");
+    expect(demoGuideReducer(back, { type: "fail", reason: "Agent 这一轮没有给出结果。" })).toBe(back);
     expect(demoGuideReducer(back, { type: "fail", reason: "Agent 这一轮没有给出结果。" }).error).toBeNull();
   });
 
@@ -419,21 +309,19 @@ describe("demo guide state machine", () => {
   });
 
   it("maps every phase to a step number and a heartbeat step the cloud accepts", () => {
-    // 建项目之前的六屏、加入那一屏与看板导览都没有进度可讲：卡片上不出现「1 / 3」。
+    // 建项目之前的六屏、加入那一屏与看板导览都没有进度可讲：卡片上不出现「1 / 1」。
     for (const phase of DEMO_GUIDE_BEFORE_PROJECT_PHASES) expect(demoGuideStepNumberOf(phase)).toBeNull();
     expect(demoGuideStepNumberOf("joined")).toBeNull();
     for (const phase of DEMO_GUIDE_TOUR_PHASES) expect(demoGuideStepNumberOf(phase)).toBeNull();
     expect(demoGuideStepNumberOf("task-row")).toBe(1);
     expect(demoGuideStepNumberOf("reply-done")).toBe(1);
-    expect(demoGuideStepNumberOf("ask-compose")).toBe(2);
-    expect(demoGuideStepNumberOf("help-dialog")).toBe(3);
-    // 云端只接受 1 / 2 / 3 / finish：三步与这三个值一一对应。
+    // 收尾那两屏也不是一步。
+    expect(demoGuideStepNumberOf("complete")).toBeNull();
+    // 云端只接受 1 / 2 / 3 / finish：只剩一步，其余阶段都报 1，收场报 finish。
     expect(demoGuideHeartbeatStep("joined")).toBe("1");
     expect(demoGuideHeartbeatStep("tour-board")).toBe("1");
     expect(demoGuideHeartbeatStep("reader")).toBe("1");
-    expect(demoGuideHeartbeatStep("ask-done")).toBe("2");
-    expect(demoGuideHeartbeatStep("settings-open")).toBe("3");
-    expect(demoGuideHeartbeatStep("help-running")).toBe("3");
+    expect(demoGuideHeartbeatStep("reply-done")).toBe("1");
     expect(demoGuideHeartbeatStep("complete")).toBe("finish");
   });
 
@@ -526,19 +414,34 @@ describe("demo guide state machine", () => {
   it("says a failure once instead of on every poll", () => {
     const failed = demoGuideReducer(
       run(started(), [{ type: "task-opened" }, { type: "task-continued", prefill: "接着写" }, { type: "composer-sent" }]),
-      { type: "fail", reason: "协助请求没有发出去。" }
+      { type: "fail", reason: "Agent 这一轮没有给出结果。" }
     );
     // 轮询每拍都会读到同一个失败结果：同一个原因不换新对象，界面不会跟着重画。
-    expect(demoGuideReducer(failed, { type: "fail", reason: "协助请求没有发出去。" })).toBe(failed);
+    expect(demoGuideReducer(failed, { type: "fail", reason: "Agent 这一轮没有给出结果。" })).toBe(failed);
     expect(demoGuideReducer(failed, { type: "fail", reason: "另一个原因" }).error).toBe("另一个原因");
   });
 
-  it("gives each prefill a new nonce so the composer is filled once per step", () => {
+  it("prefills the composer once and refills it when the person goes back", () => {
+    // 引导里只剩这一处预填：接着成员的任务写那句话。
     const first = run(started(), [{ type: "task-opened" }, { type: "task-continued", prefill: "第一句" }]);
-    expect(first.prefill?.nonce).toBe(1);
-    // 做完第一步才换下一句：请成员协助时那句是新的一句。
-    const asked = demoGuideReducer({ ...first, phase: "reply-done" }, { type: "next", prefill: "第二句" });
-    expect(asked.prefill).toMatchObject({ text: "第二句", nonce: 2 });
+    expect(first.phase).toBe("compose");
+    expect(first.prefill).toMatchObject({ text: "第一句", nonce: 1 });
+    // 退回只读面板这种不写句子的屏：预填清掉，不把旧句子留在状态里。
+    const back = demoGuideReducer(first, { type: "back" });
+    expect(back.phase).toBe("reader");
+    expect(back.prefill).toBeNull();
+    // 再进输入框：句子重新填一次（换一个 prefill 对象，输入框据此再填一遍）。
+    const again = demoGuideReducer(back, { type: "task-continued", prefill: "第一句" });
+    expect(again.phase).toBe("compose");
+    expect(again.prefill?.text).toBe("第一句");
+    expect(again.prefill?.nonce).toBeGreaterThan(0);
+    // 从「等回复」退回输入框：句子同样重新填上，且 nonce 比上一次大。
+    const waiting = demoGuideReducer(again, { type: "composer-sent" });
+    expect(waiting.phase).toBe("reply-waiting");
+    const fromWaiting = demoGuideReducer(waiting, { type: "back", prefill: "第一句" });
+    expect(fromWaiting.phase).toBe("compose");
+    expect(fromWaiting.prefill?.text).toBe("第一句");
+    expect(fromWaiting.prefill!.nonce).toBeGreaterThan(again.prefill!.nonce);
   });
 
   it("goes back one screen at a time, not one step at a time", () => {
@@ -551,57 +454,6 @@ describe("demo guide state machine", () => {
     expect(intro.phase).toBe("intro");
     // 已经是第一屏：再点也不动。
     expect(demoGuideReducer(intro, { type: "back" })).toBe(intro);
-  });
-
-  it("refuses to go back once a step has actually happened", () => {
-    // 第一步拿到回复、第二步拿到结果、第三步已经开始在本机跑：这些屏都没有上一步。
-    const replied = run(started(), FIRST_STEP);
-    expect(replied.phase).toBe("reply-done");
-    expect(demoGuideReducer(replied, { type: "back" })).toBe(replied);
-    const askDone = atAskDone();
-    expect(askDone.phase).toBe("ask-done");
-    expect(demoGuideReducer(askDone, { type: "back" })).toBe(askDone);
-    const running = run(atHelpDialog(), [{ type: "help-decided", allow: true }]);
-    expect(running.phase).toBe("help-running");
-    expect(demoGuideReducer(running, { type: "back" })).toBe(running);
-  });
-
-  it("backs the third step all the way to the settings screen and not into the waiting one", () => {
-    // 授权弹窗已经在收件箱里了：退回「等请求」会立刻又被轮询发现、再弹一次，来回跳。
-    expect(demoGuideReducer(atHelpDialog(), { type: "back" }).phase).toBe("settings-open");
-    const waiting = run(atSettings(), [{ type: "settings-opened" }, { type: "receiving-on" }]);
-    expect(waiting.phase).toBe("help-waiting");
-    expect(demoGuideReducer(waiting, { type: "back" }).phase).toBe("settings-open");
-    // 设置里开开关那一屏退回看板（齿轮那一屏），弹窗随之关掉。
-    const settings = run(atSettings(), [{ type: "settings-opened" }]);
-    expect(settings.phase).toBe("settings-assist");
-    expect(demoGuideReducer(settings, { type: "back" }).phase).toBe("settings-open");
-  });
-
-  it("refills the sentence when going back to a screen that asks for one", () => {
-    // 退回第一步的输入框：那句话重新填上，nonce 接着往上走。
-    const waiting = run(started(), [{ type: "task-opened" }, { type: "task-continued", prefill: "第一句" }, { type: "composer-sent" }]);
-    const back = demoGuideReducer(waiting, { type: "back", prefill: "第一句" });
-    expect(back.phase).toBe("compose");
-    expect(back.prefill?.text).toBe("第一句");
-    expect(back.prefill?.nonce).toBe(2);
-    // 退回只读面板这种不需要输入的屏：预填清掉，不把旧句子留在状态里。
-    const reader = demoGuideReducer(back, { type: "back" });
-    expect(reader.phase).toBe("reader");
-    expect(reader.prefill).toBeNull();
-  });
-
-  it("lands on the real entry of a step that was skipped instead of its done screen", () => {
-    // 跳过第二步 → 停在「去项目设置」。那一屏的上一屏本来是「第二步完成」，但他没做过，该退回输入框。
-    const skipped = run(atAskCompose(), [{ type: "skip", prefill: ASK_SENTENCE }]);
-    expect(skipped.phase).toBe("settings-open");
-    expect(skipped.skipped.ask).toBe(true);
-    expect(demoGuideReducer(skipped, { type: "back" }).phase).toBe("ask-compose");
-    // 连第一步也跳过时，从第二步输入框再退就要退到任务行，而不是一张「第一步完成」的卡片。
-    const bothSkipped = run(started(), [{ type: "skip", prefill: ASK_SENTENCE }]);
-    expect(bothSkipped.phase).toBe("ask-compose");
-    expect(bothSkipped.skipped.task).toBe(true);
-    expect(demoGuideReducer(bothSkipped, { type: "back" }).phase).toBe("task-row");
   });
 
   it("scans again when the person goes back to the link-session step", () => {
@@ -624,19 +476,6 @@ describe("demo guide state machine", () => {
     expect(relocked.scan).toEqual({ status: "locked", count: 0 });
   });
 
-  it("stops treating a step as skipped once it is really done again", () => {
-    // 跳过第二步、又退回去重做并做成了：完成弹窗该算他做过。
-    const skipped = run(atAskCompose(), [{ type: "skip", prefill: ASK_SENTENCE }]);
-    const redone = run(skipped, [
-      { type: "back" },
-      { type: "composer-sent" },
-      { type: "assist-delivered" },
-      { type: "agent-settled" }
-    ]);
-    expect(redone.phase).toBe("ask-done");
-    expect(redone.done.ask).toBe(true);
-    expect(redone.skipped.ask).toBe(false);
-  });
 });
 
 /** 一个最小的内存存储：退出标记跨重启保留这件事只跟存储有关，不必真用 localStorage。 */

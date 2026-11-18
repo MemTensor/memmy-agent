@@ -27,14 +27,18 @@ import { useTranslation } from "../../i18n/use-translation.js";
 import {
   blockerRects,
   cardPlacement,
+  clickHintBounds,
+  clickHintPlacement,
   DEMO_GUIDE_CARD_WIDTH,
   DEMO_GUIDE_CARD_WIDTH_WIDE,
   DEMO_GUIDE_HOLE_PADDING,
+  demoGuideClickTarget,
   demoGuideTarget,
   maskRects,
   padRect,
   rectsIntersect,
   rectVisible,
+  unionRect,
   type CardPlacement,
   type Rect,
   type Viewport
@@ -44,9 +48,9 @@ import styles from "./collab-demo-guide.module.css";
 type Translate = (key: MessageKey, values?: Record<string, string | number>) => string;
 
 export interface DemoGuideCard {
-  /** 体验段是第几步：进度写「1 / 3」。导览段与建项目之前没有进度，为 null。 */
-  step: 1 | 2 | 3 | null;
-  /** 头部那一行左边的徽章：「1 / 3」或「介绍」。没有徽章时这一行只剩步骤名，两者都没有时整行不出现。 */
+  /** 体验段是第几步：只有不止一步时头部才写进度（如「1 / 2」）。导览段与建项目之前没有进度，为 null。 */
+  step: 1 | null;
+  /** 头部那一行左边的徽章：进度或「介绍」。没有徽章时这一行只剩步骤名，两者都没有时整行不出现。 */
   badge: string | null;
   /** 头部那一行右边的步骤名。 */
   stepName: string | null;
@@ -72,7 +76,7 @@ export interface DemoGuideCard {
 }
 
 /** 体验段一共几步：进度徽章与心跳都按它算。 */
-export const DEMO_GUIDE_STEPS = [1, 2, 3] as const;
+export const DEMO_GUIDE_STEPS = [1] as const;
 
 /**
  * 每一步探出的姿势：动作与卡上说的是同一件事。
@@ -90,21 +94,11 @@ const POSES: Partial<Record<DemoGuidePhase, MemmyPose>> = {
   reader: "read",
   compose: "chat",
   "reply-waiting": "think",
-  "reply-done": "celebrate",
-  "ask-compose": "chat",
-  "ask-waiting": "think",
-  "ask-done": "celebrate",
-  "settings-open": "wrench",
-  "settings-assist": "shield",
-  "help-waiting": "peek",
-  "help-dialog": "shield",
-  "help-running": "work",
-  "help-done": "celebrate",
-  "help-rejected": "sad"
+  "reply-done": "celebrate"
 };
 
 /** 导览段的各步各用哪个姿势：按 {@link demoGuideTourIndex} 的顺序。 */
-const TOUR_POSES: MemmyPose[] = ["point", "peek", "connect", "read", "chat"];
+const TOUR_POSES: MemmyPose[] = ["point", "connect", "read", "chat"];
 
 /**
  * 每个子状态卡片上写什么：文案就是产品定稿的那几句，`{name}` 换成本次演示成员的昵称。
@@ -118,9 +112,10 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
   // 卡片只说「这件事」是项目协作里的哪一步，不自己另讲一套内容。
   // 取不到时退回缺省剧本：卡片宁可说旧内容，也不该整片崩掉。
   const copy = state.copy ?? DEMO_GUIDE_COPY_FALLBACK;
-  const base = (step: 1 | 2 | 3 | null, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
+  const base = (step: 1 | null, body: string, extra: Partial<DemoGuideCard> = {}): DemoGuideCard => ({
     step,
-    badge: step === null
+    // 只有一步时进度（「1 / 1」）没有任何信息量：这一段就这一件事，头部只留步骤名。
+    badge: step === null || DEMO_GUIDE_STEPS.length <= 1
       ? null
       : t("collab.demo.progress", { step: String(step), total: String(DEMO_GUIDE_STEPS.length) }),
     stepName: step === null ? null : t(("collab.demo.stepName." + String(step)) as MessageKey),
@@ -193,40 +188,11 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
     case "reply-waiting":
       return base(1, "", { status: t("collab.demo.reply.waiting", { name }) });
     case "reply-done":
-      return base(1, t("collab.demo.reply.body", { name, next: copy.taskNext }), { title: t("collab.demo.reply.title"), action: "next" });
-    case "ask-compose":
-      return base(2, t("collab.demo.ask.compose", { name, ask: copy.askSentence }));
-    case "ask-waiting":
-      // 请求在云端出现之前不说「已发出」：Agent 还在准备那次调用时，人看到「已发出」会以为对方在跑。
-      return base(2, "", {
-        status: state.askDelivered
-          ? t("collab.demo.ask.returned", { name })
-          : state.askSeen
-            ? t("collab.demo.ask.sent", { name })
-            : t("collab.demo.ask.sending", { name })
-      });
-    case "ask-done":
-      return base(2, t("collab.demo.ask.body", { name }), { title: t("collab.demo.ask.title"), action: "next" });
-    case "settings-open":
-      // 这句按定稿写死了演示成员的名字，不带占位符：传了值也不会被替换，测试里也钉住了原句。
-      return base(3, t("collab.demo.settings.body"));
-    case "settings-assist":
-      return base(3, t("collab.demo.assist.body"));
-    case "help-waiting":
-      return base(3, "", { status: t("collab.demo.help.incoming", { name }) });
-    case "help-dialog":
-      // 授权弹窗这一步：标题写「谁发来的请求」，正文说他要这台电脑做什么。
-      return base(3, t("collab.demo.dialog.body", { help: copy.helpSentence }), { title: t("collab.demo.dialog.title") });
-    case "help-running":
-      return base(3, "", { status: t("collab.demo.running", { name }) });
-    case "help-done":
-      return base(3, t("collab.demo.help.body", { name, help: copy.helpSentence }), { title: t("collab.demo.help.title"), action: "done" });
-    case "help-rejected":
-      // 拒绝之后没有标题：定稿这一屏只有一句「你拒绝了这次请求。」和「完成」。
-      return base(3, t("collab.demo.rejected.body"), { action: "done" });
+      return base(1, t("collab.demo.reply.body", { name, next: copy.taskNext }), { title: t("collab.demo.reply.title"), action: "done" });
+
     case "complete":
     default:
-      return base(3, "");
+      return base(null, "");
   }
 }
 
@@ -235,7 +201,7 @@ export function demoGuideCard(state: DemoGuideState, t: Translate): DemoGuideCar
  * 形状由结构那边决定，这里只决定第几步说什么。
  */
 export function demoGuideTourCard(index: number, t: Translate): DemoGuideCard {
-  const key = String(index + 1) as "1" | "2" | "3" | "4" | "5";
+  const key = String(index + 1) as "1" | "2" | "3" | "4";
   return {
     step: null,
     badge: t("collab.demo.tour.label"),
@@ -261,7 +227,7 @@ export function demoGuideSkippable(phase: DemoGuidePhase): boolean {
   if (phase === "tour-associate-pick") return true;
   // 看板导览其余各站是纯介绍，只留「下一步」与「跳过引导」：没有「跳过这一步」。
   if (demoGuideIsTourPhase(phase)) return false;
-  return phase !== "reply-done" && phase !== "ask-done" && phase !== "help-done" && phase !== "help-rejected" && phase !== "complete";
+  return phase !== "reply-done" && phase !== "complete";
 }
 
 /**
@@ -279,14 +245,12 @@ const DEMO_GUIDE_HOLE_RADIUS = 12;
 /**
  * 亮区里再点一个控件时，第二圈描边的圆角。
  *
- * `layout` 的 `stroke` 只描述锚点名、不描述圆角，而这两个控件的形状又和它所在的区块不一样：
- * 圆角跟着控件自己的形状走：输入框里的发送按钮是胶囊（`.composer-action-submit` 的 `border-radius: 999px`），
- * 协助开关也是胶囊。所以在这里按阶段直写；其余控件用 {@link INNER_RING_RADIUS_DEFAULT}。
+ * `layout` 的 `stroke` 只描述锚点名、不描述圆角，而控件的形状又和它所在的区块不一样：
+ * 圆角跟着控件自己的形状走：输入框里的发送按钮是胶囊（`.composer-action-submit` 的 `border-radius: 999px`）。
+ * 所以在这里按阶段直写；其余控件用 {@link INNER_RING_RADIUS_DEFAULT}。
  */
 const INNER_RING_RADIUS: Partial<Record<DemoGuidePhase, number>> = {
-  compose: 999,
-  "ask-compose": 999,
-  "settings-assist": 999
+  compose: 999
 };
 const INNER_RING_RADIUS_DEFAULT = 999;
 
@@ -386,16 +350,20 @@ export function CollabDemoGuideOverlay(props: {
   /** 窗口缩放、滚动、动画结束都会让它加一：测量随之一并重跑。 */
   const [measureTick, setMeasureTick] = useState(0);
   const cardRef = useRef<HTMLDivElement | null>(null);
+  /** 上一次把锚点滚进视野的时间：锚点没露出就隔一会儿再滚一次，不跟每帧的测量抢。 */
+  const scrolledPhaseRef = useRef(0);
   /** 蒙版自己铺满整个窗口：视口尺寸量它，而不是问 window——两处在截图与内嵌环境里可能不一致。 */
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // 阶段表里没有这一屏（例如某个阶段的锚点被移除后忘了同步更新）时，不画蒙版也不崩：
+  // 宁可这一屏退回「只压说明卡」，也不要整块引导白屏。
   const target = demoGuideTarget(state.phase);
-  const visible = state.status === "active" && state.phase !== "complete";
+  const visible = state.status === "active" && state.phase !== "complete" && target !== undefined;
   /** 要画亮区与说明卡的阶段：加入项目那一屏也走蒙版，收尾弹窗自己带底。 */
   const masking = visible && state.phase !== "complete";
 
   /** 量一次亮区与描边，`key` 用来判断位置有没有变。 */
   const measure = useCallback((): { layout: { hole: Rect; stroke: Rect | null; viewport: Viewport } | null; key: string } => {
-    if (typeof window === "undefined" || typeof document === "undefined") {
+    if (typeof window === "undefined" || typeof document === "undefined" || !target) {
       return { layout: null, key: "none" };
     }
     const rootRect = rootRef.current?.getBoundingClientRect() ?? null;
@@ -403,11 +371,21 @@ export function CollabDemoGuideOverlay(props: {
       ? { width: rootRect.width, height: rootRect.height }
       : { width: window.innerWidth, height: window.innerHeight };
     const region = document.querySelector<HTMLElement>(`[data-demo-guide="${target.region}"]`)
-      // 主锚点不在这一页（比如人在看板上，而执行中的协助条在任务页）时改用在的那一个。
+      // 主锚点不在这一页（比如人停在看板上，而任务里的锚点只在对话页）时改用在的那一个。
       ?? (target.fallback ? document.querySelector<HTMLElement>(`[data-demo-guide="${target.fallback}"]`) : null);
     if (!region) return { layout: null, key: "none" };
     const regionRect = region.getBoundingClientRect();
-    if (!rectVisible(regionRect, viewport)) return { layout: null, key: "none" };
+    if (!rectVisible(regionRect, viewport)) {
+      // 锚点在窗口外时不能就这样空着：侧栏项目一多，当前项目那一行会折到窗口下方，
+      // 亮区量不出来，整块引导（蒙版、说明卡、跳过）就一起消失，人既看不到在讲什么也走不下去。
+      // 所以先把它滚进视野，下一帧的测量自然接上；量到的位置不对（还在动、还没排版）时隔一会儿再试一次。
+      const now = Date.now();
+      if (now - scrolledPhaseRef.current > 800) {
+        scrolledPhaseRef.current = now;
+        region.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+      return { layout: null, key: "none" };
+    }
     // 亮区默认外扩 6px；某些阶段（弹窗整体、创建按钮）按规格另外给了 pad。
     const hole = padRect(regionRect, target.padding ?? DEMO_GUIDE_HOLE_PADDING, viewport);
     const strokeElement = target.stroke ? document.querySelector<HTMLElement>(`[data-demo-guide="${target.stroke}"]`) : null;
@@ -418,7 +396,7 @@ export function CollabDemoGuideOverlay(props: {
       : "-");
     const key = `${rectKey(hole)}|${rectKey(strokeRect)}|${viewport.width}x${viewport.height}`;
     return { layout: { hole, stroke: strokeRect, viewport }, key };
-  }, [target.region, target.stroke, target.fallback, target.padding]);
+  }, [target?.region, target?.stroke, target?.fallback, target?.padding, state.phase]);
 
   /**
    * 跟着目标走：侧滑、缩放、居中补高这些入场过程里每帧位置都不一样，只量一次必然画偏。
@@ -471,7 +449,7 @@ export function CollabDemoGuideOverlay(props: {
     if (!element) return;
     const height = element.getBoundingClientRect().height;
     if (height > 0 && Math.abs(height - cardHeight) > 1) setCardHeight(height);
-  }, [cardHeight, state.phase, state.error, state.askDelivered, confirming]);
+  }, [cardHeight, state.phase, state.error, confirming]);
 
   // 换步骤时把确认块收起来，别让「退出引导？」跟着进入下一步。
   useEffect(() => {
@@ -523,24 +501,10 @@ export function CollabDemoGuideOverlay(props: {
         <div className={styles.complete}>
           <h2 className={styles.completeTitle}>{t("collab.demo.complete.title")}</h2>
           <ul className={styles.doneList}>
-            {state.done.task ? (
-              <li className={styles.doneItem}>
-                <Check size={15} className={styles.doneMark} aria-hidden="true" />
-                <span>{t("collab.demo.complete.task", { name: state.memberName, next: copy.taskNext })}</span>
-              </li>
-            ) : null}
-            {state.done.ask ? (
-              <li className={styles.doneItem}>
-                <Check size={15} className={styles.doneMark} aria-hidden="true" />
-                <span>{t("collab.demo.complete.ask", { name: state.memberName })}</span>
-              </li>
-            ) : null}
-            {state.done.help ? (
-              <li className={styles.doneItem}>
-                <Check size={15} className={styles.doneMark} aria-hidden="true" />
-                <span>{t("collab.demo.complete.help", { name: state.memberName })}</span>
-              </li>
-            ) : null}
+            <li className={styles.doneItem}>
+              <Check size={15} className={styles.doneMark} aria-hidden="true" />
+              <span>{t("collab.demo.complete.task", { name: state.memberName, next: copy.taskNext })}</span>
+            </li>
           </ul>
           <p className={styles.left}>{t("collab.demo.complete.left")}</p>
           <div className={styles.completeFoot}>
@@ -556,7 +520,7 @@ export function CollabDemoGuideOverlay(props: {
     );
   }
 
-  if (!visible) return null;
+  if (!visible || !target) return null;
 
   if (!layout) {
     // 锚点还没到位或还没量出位置：先只摆一个空的容器，量尺寸用的就是它。
@@ -578,14 +542,19 @@ export function CollabDemoGuideOverlay(props: {
   // 第二圈描边只在「控件比亮区小、它在亮区里」时才画：亮区与控件是同一个锚点的阶段（体验第一步、建项目前的六屏）
   // 外面已经有一圈，再套一圈就成了两条并排的圆角线。
   const innerRing = stroke && target.stroke !== target.region ? stroke : null;
+  // 这一屏要人点的那个控件旁边再摆一枚呼吸箭头：只画一圈线时，人常常不知道那圈线是「点这里」的意思。
+  // 箭尖钉在控件某条边的中点上、整个箭头在控件外朝里指（见 `clickHintPlacement`），本身不接点击。
+  const clickHint = demoGuideClickTarget(target) && stroke ? clickHintPlacement(stroke, viewport) : null;
+  // 说明卡同时避让「唯一可点的控件」与「指着它的箭头」，否则箭头指着卡片就不像话了。
+  const avoidRect = stroke && clickHint ? unionRect(stroke, clickHintBounds(clickHint)) : stroke;
   // 规格里每个阶段的 `prefer` 只调整「先试哪一边」：那一边放得下、又不压住唯一可点的控件才用。
   const preferred = target.prefer
     ? preferredPlacement(hole, viewport, cardWidth, cardHeight, target.prefer)
     : null;
   const preferredFits = preferred !== null
-    && (!stroke || !rectsIntersect(
+    && (!avoidRect || !rectsIntersect(
       { left: preferred.left, top: preferred.top, width: cardWidth, height: cardHeight },
-      padRect(stroke, PREFER_AVOID_MARGIN)
+      padRect(avoidRect, PREFER_AVOID_MARGIN)
     ));
   const placement = preferredFits && preferred
     ? preferred
@@ -594,7 +563,7 @@ export function CollabDemoGuideOverlay(props: {
       reserveBottom: target.cardBottomReserve ?? 0,
       cardWidth,
       // 唯一可点的那个控件绝不能被说明卡盖住（授权弹窗里就是「允许」）。
-      avoid: stroke
+      avoid: avoidRect
     });
   // 亮区的圆角按阶段配，没配时用默认那一档。
   const holeRadius = target.radius ?? DEMO_GUIDE_HOLE_RADIUS;
@@ -602,6 +571,16 @@ export function CollabDemoGuideOverlay(props: {
   // 描边那一圈的意思是「这里可以点」：出场那屏（`clean`）、没有可点控件的阶段（看板导览、加入、等结果），
   // 以及建项目之前那几屏「只介绍、不让人动手」（`blockStroke`）都只压暗。
   const quietRing = target.clean === true || target.stroke === null || target.blockStroke === true;
+  // 箭头朝控件指：尖在正上方（SVG 中心），靠整体旋转朝四个方向。
+  const hintTurn = !clickHint
+    ? "0deg"
+    : clickHint.side === "bottom"
+      ? "180deg"
+      : clickHint.side === "right"
+        ? "90deg"
+        : clickHint.side === "left"
+          ? "270deg"
+          : "0deg";
   // 亮区几乎占满窗口时（对话区就是这种情况）卡片只能压在它上面：这里再夹一次，保证不出窗口。
   const cardTop = Math.max(8, Math.min(placement.top, viewport.height - cardHeight - 8));
   const cardLeft = Math.max(8, Math.min(placement.left, viewport.width - cardWidth - 8));
@@ -673,6 +652,21 @@ export function CollabDemoGuideOverlay(props: {
         style={{ left: hole.left, top: hole.top, width: hole.width, height: hole.height, borderRadius: `${holeRadius}px` }}
         aria-hidden="true"
       />
+      {clickHint ? (
+        <span
+          key={`click-${state.phase}`}
+          className={styles.clickHint}
+          data-demo-click-hint={clickHint.side}
+          style={{ left: clickHint.left, top: clickHint.top, ["--hint-turn" as string]: hintTurn }}
+          aria-hidden="true"
+        >
+          <span className={styles.clickRipple} />
+          <span className={`${styles.clickRipple} ${styles.clickRippleLate}`} />
+          <svg className={styles.clickArrow} viewBox="0 0 48 48" focusable="false" aria-hidden="true">
+            <path d="M24 24 L13 15 H19 V6 H29 V15 H35 Z" />
+          </svg>
+        </span>
+      ) : null}
       <div
         ref={cardRef}
         key={`card-${state.phase}`}

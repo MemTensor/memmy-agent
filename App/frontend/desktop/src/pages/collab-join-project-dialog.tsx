@@ -1,5 +1,5 @@
-import { Cloud, Folder, MessageSquare, Sparkles, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Cloud, Folder, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createHttpCollabClient, type CollabClient, type CollabInvitePreview, type CollabProject } from "../api/collab-client.js";
 import { useOptionalApiClients } from "../app/providers.js";
 import { Button } from "../components/button.js";
@@ -21,8 +21,10 @@ export function CollabJoinProjectDialog(props: {
   onJoined: (project: CollabProject) => void;
   /** 申请已提交。调用方把它放进侧边栏，显示项目名称和「申请中」。 */
   onApplied?: (application: { projectId: string; projectName: string }) => void;
-  /** Switches the same dialog to creating a project; both entries live in one place now. */
-  onCreateProject?: () => void;
+  /** 加入时改了昵称：调用方把账号状态一并更新，界面上的名字立刻跟着变。 */
+  onNicknameChanged?: (nickname: string) => void;
+  /** 深链接带进来的邀请码：打开即预填并预览。 */
+  initialReference?: string;
 }) {
   // Rendered by AppFrame, which also runs in tests and error states without providers.
   const { clients } = useOptionalApiClients();
@@ -41,7 +43,13 @@ export function JoinProjectModal(props: {
   onClose: () => void;
   onJoined: (project: CollabProject) => void;
   onApplied?: (application: { projectId: string; projectName: string }) => void;
-  onCreateProject?: () => void;
+  /** 加入时改了昵称：调用方把账号状态一并更新，界面上的名字立刻跟着变。 */
+  onNicknameChanged?: (nickname: string) => void;
+  /**
+   * 带着邀请码打开：浏览器里的邀请链接经 memmy://invite/<code> 拉起桌面端时用。
+   * 直接预填并预览，用户点开链接就是想加入，不必再粘贴一次。
+   */
+  initialReference?: string;
 }) {
   const { t } = useTranslation();
   const [reference, setReference] = useState("");
@@ -49,17 +57,40 @@ export function JoinProjectModal(props: {
   const [directory, setDirectory] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 加入时顺手改的昵称：留空就沿用账号原来的名字，所以不给默认值。 */
+  const [nickname, setNickname] = useState("");
+  /** 加入被拒的原因（重名、成员已满）就写在字段下：它们都是这次提交里能改的东西。 */
+  const [joinError, setJoinError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+  /** 预览一条邀请：手动粘贴与深链接带进来走同一条路。 */
+  const loadInvite = useCallback(async (value: string) => {
+    const text = value.trim();
+    if (!text) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setPreview(await props.collab.previewInvite(text));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  }, [props.collab]);
+
+  const initialReference = props.initialReference?.trim() ?? "";
   useEffect(() => {
     if (!props.open) return;
-    setReference("");
+    setReference(initialReference);
     setPreview(null);
     setDirectory(null);
     setError(null);
-  }, [props.open]);
+    setNickname("");
+    setJoinError(null);
+    if (initialReference) void loadInvite(initialReference);
+  }, [props.open, initialReference, loadInvite]);
 
   useEffect(() => () => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -73,15 +104,7 @@ export function JoinProjectModal(props: {
 
   async function readInvite() {
     if (!reference.trim() || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      setPreview(await props.collab.previewInvite(reference.trim()));
-    } catch (cause) {
-      setError(messageOf(cause));
-    } finally {
-      setBusy(false);
-    }
+    await loadInvite(reference);
   }
 
   async function chooseDirectory() {
@@ -93,8 +116,12 @@ export function JoinProjectModal(props: {
     if (!preview || busy) return;
     setBusy(true);
     setError(null);
+    setJoinError(null);
     try {
-      const result = await props.collab.joinProject(reference.trim(), directory ?? undefined);
+      const wanted = nickname.trim();
+      const result = await props.collab.joinProject(reference.trim(), directory ?? undefined, wanted || undefined);
+      // 昵称已在云端写进去了：先把本地的账号状态改掉，界面上的名字不用等刷新。
+      if (wanted) props.onNicknameChanged?.(wanted);
       if (result.status === "pending") {
         props.onApplied?.({ projectId: result.projectId, projectName: preview.projectName });
         props.onClose();
@@ -107,22 +134,24 @@ export function JoinProjectModal(props: {
         props.onJoined(result.project);
       }
     } catch (cause) {
-      setError(messageOf(cause));
+      // 加入阶段能改的错（比如成员满了）写在字段下面，别的错误留在弹窗底部。
+      const message = messageOf(cause);
+      if (nickname.trim()) setJoinError(message);
+      else setError(message);
     } finally {
       setBusy(false);
     }
   }
 
   const pending = preview?.status === "pending";
+  // 已成员也显示「加入」：从邀请链接进来的人看到的就是加入这个动作，点下去直接打开项目。
   const primaryLabel = !preview
     ? t("collab.join.next")
-    : preview.status === "member"
-      ? t("collab.join.open")
-      : pending
-        ? t("collab.join.pending")
-        : preview.joinMode === "direct"
-          ? t("collab.join.join")
-          : t("collab.join.apply");
+    : pending
+      ? t("collab.join.pending")
+      : preview.status === "member" || preview.joinMode === "direct"
+        ? t("collab.join.join")
+        : t("collab.join.apply");
 
   return (
     <>
@@ -133,20 +162,20 @@ export function JoinProjectModal(props: {
         closeLabel={t("common.close")}
         closeContent={<X size={16} aria-hidden="true" />}
         initialFocusRef={inputRef}
-        className={`${styles.createModal} ${styles.simpleCreateModal}`}
+        className={`${styles.createModal} ${styles.simpleCreateModal} ${styles.joinModal}`}
         backdropClassName={styles.backdrop}
+        bodyClassName={styles.joinBody}
         footerClassName={styles.simpleCreateFooter}
         footer={(
           <>
-            {props.onCreateProject ? (
-              <Button variant="secondary" size="sm" onClick={props.onCreateProject}>
-                {t("collab.join.createEntry")}
-              </Button>
-            ) : <span />}
+            <span />
             <span className={styles.footerButtons}>
-              <Button variant="ghost" onClick={props.onClose}>{preview ? t("collab.join.later") : t("collab.cancel")}</Button>
+              <Button variant="ghost" className={styles.simpleCreateFooterButton} onClick={props.onClose}>
+                {preview ? t("collab.join.later") : t("collab.cancel")}
+              </Button>
               <Button
                 variant="primary"
+                className={styles.simpleCreateFooterButton}
                 disabled={busy || pending || (!preview && !reference.trim())}
                 onClick={() => void (preview ? join() : readInvite())}
               >
@@ -169,16 +198,29 @@ export function JoinProjectModal(props: {
                 ))}
               </span>
             </div>
-            <ul className={styles.joinNotes}>
-              <li className={styles.joinNote}>
-                <MessageSquare size={16} aria-hidden="true" className={styles.joinNoteIcon} />
-                <span>{t("collab.join.noteSessions")}</span>
-              </li>
-              <li className={styles.joinNote}>
-                <Sparkles size={16} aria-hidden="true" className={styles.joinNoteIcon} />
-                <span>{t("collab.join.noteAgent")}</span>
-              </li>
-            </ul>
+            <p className={styles.joinNote}>{t("collab.join.noteSessions")}</p>
+            {preview.status === "member" ? null : (
+              <div className={styles.field}>
+                {/* 与本机目录同一种写法：可选写在标签里，不做成单独的徽标 */}
+                <span>{t("collab.join.nicknameLabel")}</span>
+                <input
+                  className={`${styles.joinNicknameInput} ${joinError ? styles.joinNicknameInvalid : ""}`}
+                  value={nickname}
+                  maxLength={32}
+                  placeholder={t("collab.join.nicknamePlaceholder")}
+                  aria-label={t("collab.join.nicknameLabel")}
+                  aria-invalid={joinError ? true : undefined}
+                  disabled={pending}
+                  onChange={(event) => {
+                    setNickname(event.target.value);
+                    // 改了字就把上一次的错误收起来：重名与否要看新输入的名字。
+                    if (joinError) setJoinError(null);
+                  }}
+                />
+                {joinError ? <p className={styles.joinNicknameError} role="alert">{joinError}</p> : null}
+                <small className={styles.fieldHint}>{t("collab.join.nicknameHint")}</small>
+              </div>
+            )}
             {preview.status === "member" ? null : (
               <div className={styles.field}>
                 <span>{t("collab.create.dirOptional")}</span>
@@ -191,7 +233,6 @@ export function JoinProjectModal(props: {
                     {directory ? t("collab.create.dirChange") : t("collab.create.dirPick")}
                   </Button>
                 </div>
-                <small className={styles.fieldHint}>{t("collab.join.dirHint")}</small>
               </div>
             )}
           </>

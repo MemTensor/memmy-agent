@@ -19,7 +19,7 @@ const STAGE_WIDTH = 928;
 const STAGE_HEIGHT = 420;
 
 /** How many captions the stage has, one per scene. */
-export const COLLAB_LAUNCH_SCENES = 6;
+export const COLLAB_LAUNCH_SCENES = 5;
 
 /** The caption of each scene; the third one is a single line. */
 export const COLLAB_LAUNCH_CAPTIONS: ReadonlyArray<{ main: MessageKey; sub: MessageKey | null }> = [
@@ -27,20 +27,19 @@ export const COLLAB_LAUNCH_CAPTIONS: ReadonlyArray<{ main: MessageKey; sub: Mess
   { main: "collabLaunch.scene2Main", sub: "collabLaunch.scene2Sub" },
   { main: "collabLaunch.scene3Main", sub: null },
   { main: "collabLaunch.scene4Main", sub: "collabLaunch.scene4Sub" },
-  { main: "collabLaunch.scene5Main", sub: "collabLaunch.scene5Sub" },
   { main: "collabLaunch.scene6Main", sub: "collabLaunch.scene6Sub" }
 ];
 
 /** Scene boundaries; `done` is the closing frame the animation stops on. */
-const TIMELINE = { s1: 0, s2: 4.8, s2b: 9.0, s3: 12.2, s4: 18.8, s5: 25.4, done: 27.6 } as const;
-const SCENE_STARTS = [TIMELINE.s1, TIMELINE.s2, TIMELINE.s3, TIMELINE.s4, TIMELINE.s5, TIMELINE.done];
-const CAPTION_STARTS = [TIMELINE.s1, TIMELINE.s2, TIMELINE.s2b, TIMELINE.s3, TIMELINE.s4, TIMELINE.s5];
+const TIMELINE = { s1: 0, s2: 4.8, s2b: 9.0, s3: 12.2, s4: 18.8, done: 21.0 } as const;
+const SCENE_STARTS = [TIMELINE.s1, TIMELINE.s2, TIMELINE.s3, TIMELINE.s4, TIMELINE.done];
+const CAPTION_STARTS = [TIMELINE.s1, TIMELINE.s2, TIMELINE.s2b, TIMELINE.s3, TIMELINE.s4];
 
 /**
- * The five pieces of the progress indicator sit on the five acts of the timeline, not on the six captions: the shared
+ * The four pieces of the progress indicator sit on the four acts of the timeline, not on the five captions: the shared
  * agent follows the hand-relay act without a piece of its own, so act three starts at caption four.
  */
-const ACT_CAPTIONS = [0, 1, 3, 4, 5];
+const ACT_CAPTIONS = [0, 1, 3, 4];
 
 /** [time, centre x, centre y, zoom]; the camera eases between frames, a repeated frame is a hold. */
 const CAMERA: ReadonlyArray<readonly [number, number, number, number]> = [
@@ -54,13 +53,8 @@ const CAMERA: ReadonlyArray<readonly [number, number, number, number]> = [
   [15.2, 464, 210, 1.0],
   [16.2, 640, 205, 1.38],
   [18.3, 640, 205, 1.38],
-  [19.0, 464, 210, 1.03],
   [19.1, 464, 210, 1.03],
-  [20.5, 652, 204, 1.42],
-  [22.95, 652, 204, 1.42],
-  [24.4, 464, 210, 1.03],
-  [24.9, 464, 210, 1.03],
-  [26.8, 464, 210, 0.86]
+  [20.2, 464, 210, 0.86]
 ];
 
 /** World positions of the people, their agents and the project. */
@@ -213,14 +207,6 @@ function LoaderDots() {
   );
 }
 
-function CheckMark() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M2.5 6.3l2.4 2.4 4.6-5" />
-    </svg>
-  );
-}
-
 /** One page of a session: three lines, the first one tinted with its owner's colour. */
 function SessionPage(props: { tint?: string }) {
   return (
@@ -316,11 +302,6 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
     const bubble = pick(".collab-launch-bubble");
     const readLabel = pick(".collab-launch-read-label");
     const readPages = pickAll<HTMLElement>(".collab-launch-read-page");
-    const assistRequest = pick(".collab-launch-assist-request");
-    const assistResult = pick(".collab-launch-assist-result");
-    const auth = pick(".collab-launch-auth");
-    const exec = pick(".collab-launch-exec");
-    const check = pick(".collab-launch-check");
     const project = pick(".collab-launch-project");
     const nameLabels = pickAll<HTMLElement>(".collab-launch-name");
     const segments = pickAll<HTMLElement>(".collab-launch-progress__segment");
@@ -342,20 +323,14 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
     const linkD = pick<SVGPathElement>(".collab-launch-link--d");
     const trunkLeft = pick<SVGPathElement>(".collab-launch-trunk--left");
     const trunkRight = pick<SVGPathElement>(".collab-launch-trunk--right");
-    const trunkAll = pick<SVGPathElement>(".collab-launch-trunk-all");
     const spokeC = pick<SVGPathElement>(".collab-launch-spoke--c");
     const spokeD = pick<SVGPathElement>(".collab-launch-spoke--d");
-    const chipLane = pick<SVGPathElement>(".collab-launch-chip-lane");
-    const comet = pickAll<SVGPathElement>(".collab-launch-comet");
     const projectRipples = pickAll<SVGRectElement>(".collab-launch-project-ripple");
-    const authRing = pick<SVGCircleElement>(".collab-launch-auth-ring");
-    const authRipple = pick<SVGCircleElement>(".collab-launch-auth-ripple");
     const miniCurves = pickAll<SVGPathElement>(".collab-launch-mini-curve");
     const miniRings = pickAll<SVGRectElement>(".collab-launch-mini-ring");
     const miniPeople = pickAll<SVGCircleElement>(".collab-launch-mini-who");
     const miniTiles = pickAll<SVGRectElement>(".collab-launch-mini-tile");
     const miniFlows = pickAll<SVGPathElement>(".collab-launch-mini-flow");
-    const execRing = pick<SVGRectElement>(".collab-launch-progress-rect");
     const workA = pickAll<SVGPathElement>(".collab-launch-work--a");
     const workB = pickAll<SVGPathElement>(".collab-launch-work--b");
     const workC = pickAll<SVGPathElement>(".collab-launch-work--c");
@@ -493,23 +468,6 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
       });
     };
 
-    const ripple = (
-      node: SVGCircleElement | SVGRectElement,
-      time: number,
-      start: number,
-      from: number,
-      to: number,
-      duration = 0.9
-    ) => {
-      const ratio = progressOf(time, start, duration);
-      if (ratio <= 0 || ratio >= 1) {
-        node.style.opacity = "0";
-        return;
-      }
-      if (node.tagName.toLowerCase() === "circle") node.setAttribute("r", lerp(from, to, easeOut(ratio)).toFixed(1));
-      node.style.opacity = (0.75 * (1 - ratio)).toFixed(3);
-    };
-
     const lanes = [arc, laneOne, laneTwo] as const;
 
     const render = (time: number): number => {
@@ -555,7 +513,7 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
         item.ring.style.strokeDashoffset = String(1 - drawn);
         item.ring.style.opacity = drawn > 0 ? String(ringVisibility) : "0";
         item.fill.style.opacity = String(easeOut(progressOf(time, item.start + 0.4, 0.5)) * ringVisibility);
-        const opacity = clamp(fadeInOut(time, item.tagStart, 4.75) + easeOut(progressOf(time, 25.7, 0.4)));
+        const opacity = clamp(fadeInOut(time, item.tagStart, 4.75) + easeOut(progressOf(time, 19.1, 0.4)));
         place(item.tag, item.x, 144, 0.9 + 0.1 * opacity, opacity);
       });
 
@@ -685,12 +643,10 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
         );
       });
       {
-        // One exchange inside scene 3: the person asks, then authorizes, then confirms.
+        // One exchange inside scene 3: the person asks, the agent works.
         const exchange = (
           [
-            [15.9, 16.3, 1, 0],
-            [20.4, 20.75, 0, 1],
-            [21.4, 21.75, 1, 0]
+            [15.9, 16.3, 1, 0]
           ] as const
         ).find((window) => time > window[0] && time < window[1]);
         const length = lengthOf(linkB);
@@ -708,80 +664,36 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
         }
       }
 
-      /* Scene 4: a member's computer, lent through the project. */
-      travel(assistRequest, chipLane, time, 19.1, 20.5, 0, 1);
-      {
-        // The light trail over the project: the tail follows on the way out, leads on the way back.
-        const window = time < 22 ? ([19.1, 20.5, 1] as const) : ([23.0, 24.4, -1] as const);
-        const ratio = progressOf(time, window[0], window[1] - window[0]);
-        const length = lengthOf(trunkAll);
-        const running = ratio > 0 && ratio < 1 && length > 0;
-        const eased = easeInOut(ratio);
-        const head = window[2] > 0 ? eased * (length + 20) : length - eased * (length + 20);
-        comet.forEach((node) => {
-          const segment = Number(node.getAttribute("data-segment") ?? 0);
-          const strength = Number(node.getAttribute("data-strength") ?? 0);
-          if (!running) {
-            node.style.opacity = "0";
-            return;
-          }
-          dashAt(node, length, window[2] > 0 ? head : head + segment, segment);
-          node.style.opacity = (strength * Math.min(1, ratio / 0.08, (1 - ratio) / 0.08)).toFixed(3);
-        });
-      }
-      popInOut(auth, [836, 121], time, 20.6, 24.3);
-      auth.classList.toggle("collab-launch-auth--ok", time >= 21.4);
-      {
-        // The ring around the other member's avatar turns while approval is pending, then closes and spreads once.
-        const approved = time >= 21.4;
-        authRing.style.opacity = Math.max(
-          fadeInOut(time, 20.65, 21.4, 0.2, 0.1),
-          fadeInOut(time, 21.4, 24.3, 0.12, 0.35)
-        ).toFixed(3);
-        authRing.style.stroke = approved ? "var(--color-action-sky-hover)" : "var(--color-icon-ember)";
-        authRing.style.strokeDasharray = approved ? "1 0" : ".16 .09";
-        authRing.style.strokeDashoffset = approved ? "0" : (-time * 0.5).toFixed(3);
-        ripple(authRipple, time, 21.4, 33, 58, 0.8);
-      }
-      popInOut(exec, [696, 121], time, 21.75, 23.1);
-      execRing.style.strokeDashoffset = String(1 - progressOf(time, 21.75, 1.3));
-      execRing.style.opacity = fadeInOut(time, 21.75, 23.1, 0.15, 0.3).toFixed(3);
-      travel(assistResult, chipLane, time, 23.0, 24.4, 1, 0);
-      popInOut(check, [258, 184], time, 24.4, 25.5);
-      pulse(haloes.agentA, SPOT.agentA, time, [19.0, 24.4]);
-      pulse(haloes.agentB, SPOT.agentB, time, [17.15, 17.53, 17.91, 20.5, 23.0]);
-
-      /* Scene 5: more super individuals join; the picture closes on the outlines around the project. */
-      popAt(personC, SPOT.personC, time, 25.6);
-      popAt(agentC, SPOT.agentC, time, 25.8);
-      popAt(personD, SPOT.personD, time, 25.8);
-      popAt(agentD, SPOT.agentD, time, 26.0);
-      draw(linkC, easeOut(progressOf(time, 26.0, 0.3)));
-      draw(linkD, easeOut(progressOf(time, 26.2, 0.3)));
-      const ringCProgress = easeOut(progressOf(time, 26.0, 0.7));
-      const ringDProgress = easeOut(progressOf(time, 26.2, 0.7));
+      /* Scene 4: more super individuals join; the picture closes on the outlines around the project. */
+      popAt(personC, SPOT.personC, time, 19.0);
+      popAt(agentC, SPOT.agentC, time, 19.2);
+      popAt(personD, SPOT.personD, time, 19.2);
+      popAt(agentD, SPOT.agentD, time, 19.4);
+      draw(linkC, easeOut(progressOf(time, 19.4, 0.3)));
+      draw(linkD, easeOut(progressOf(time, 19.6, 0.3)));
+      const ringCProgress = easeOut(progressOf(time, 19.4, 0.7));
+      const ringDProgress = easeOut(progressOf(time, 19.6, 0.7));
       ringC.style.strokeDashoffset = String(1 - ringCProgress);
       ringC.style.opacity = ringCProgress > 0 ? "1" : "0";
-      ringFillC.style.opacity = String(easeOut(progressOf(time, 26.3, 0.5)));
+      ringFillC.style.opacity = String(easeOut(progressOf(time, 19.7, 0.5)));
       ringD.style.strokeDashoffset = String(1 - ringDProgress);
       ringD.style.opacity = ringDProgress > 0 ? "1" : "0";
-      ringFillD.style.opacity = String(easeOut(progressOf(time, 26.5, 0.5)));
-      draw(spokeC, easeOut(progressOf(time, 26.3, 0.4)));
-      draw(spokeD, easeOut(progressOf(time, 26.5, 0.4)));
-      flow(workC, linkC, time, 0.1, 0.7, 0.8 * progressOf(time, 26.4, 0.3));
-      flow(workD, linkD, time, 0.5, 0.7, 0.8 * progressOf(time, 26.6, 0.3));
+      ringFillD.style.opacity = String(easeOut(progressOf(time, 19.9, 0.5)));
+      draw(spokeC, easeOut(progressOf(time, 19.7, 0.4)));
+      draw(spokeD, easeOut(progressOf(time, 19.9, 0.4)));
+      flow(workC, linkC, time, 0.1, 0.7, 0.8 * progressOf(time, 19.8, 0.3));
+      flow(workD, linkD, time, 0.5, 0.7, 0.8 * progressOf(time, 20.0, 0.3));
 
       // Once the sessions are in, work keeps moving along the lines.
-      const busy = Math.max(fadeInOut(time, 19.0, 20.6, 0.2, 0.3), fadeInOut(time, 22.9, 24.5, 0.2, 0.3));
-      const ambient = easeOut(progressOf(time, 15.3, 0.6)) * (1 - busy);
-      const ambientEnd = easeOut(progressOf(time, 26.8, 0.6));
+      const ambient = easeOut(progressOf(time, 15.3, 0.6));
+      const ambientEnd = easeOut(progressOf(time, 20.2, 0.6));
       flow(ambientLeft, trunkLeft, time, 0, 0.42, ambient);
       flow(ambientRight, trunkRight, time, 0.35, 0.42, ambient * (1 - fadeInOut(time, 16.2, 18.4, 0.2, 0.3)));
       flow(ambientC, spokeC, time, 0.2, 0.6, ambientEnd);
       flow(ambientD, spokeD, time, 0.6, 0.6, ambientEnd);
       MINIS.forEach((_, index) => {
-        const appearing = easeOut(progressOf(time, 26.1 + index * 0.14, 0.7));
-        const connecting = easeOut(progressOf(time, 26.4 + index * 0.14, 0.8));
+        const appearing = easeOut(progressOf(time, 19.5 + index * 0.14, 0.7));
+        const connecting = easeOut(progressOf(time, 19.8 + index * 0.14, 0.8));
         const ring = miniRings[index];
         const curve = miniCurves[index];
         const flowLine = miniFlows[index];
@@ -802,7 +714,7 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
             time,
             index * 0.23,
             0.3,
-            easeOut(progressOf(time, 27.3 + index * 0.14, 0.6)),
+            easeOut(progressOf(time, 20.7 + index * 0.14, 0.6)),
             true
           );
         }
@@ -938,36 +850,7 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
             <path className="collab-launch-trunk collab-launch-spoke collab-launch-spoke--c" d="M464 123V152" />
             <path className="collab-launch-trunk collab-launch-spoke collab-launch-spoke--d" d="M464 268V297" />
 
-            {/* Empty paths that only carry the moving pieces. */}
-            <path className="collab-launch-trunk-all" d="M262 210H666" />
-            <path className="collab-launch-chip-lane" d="M262 190H666" />
-            <path
-              className="collab-launch-comet collab-launch-flow collab-launch-flow--mint"
-              d="M262 210H666"
-              data-segment={110}
-              data-strength={0.22}
-              style={{ strokeWidth: 2 }}
-            />
-            <path
-              className="collab-launch-comet collab-launch-flow collab-launch-flow--mint"
-              d="M262 210H666"
-              data-segment={60}
-              data-strength={0.5}
-              style={{ strokeWidth: 3 }}
-            />
-            <path
-              className="collab-launch-comet collab-launch-flow collab-launch-flow--mint"
-              d="M262 210H666"
-              data-segment={22}
-              data-strength={1}
-              style={{ strokeWidth: 4 }}
-            />
-
             <rect className="collab-launch-project-ripple" x={386} y={152} width={156} height={116} rx={18} pathLength={1} />
-            <rect className="collab-launch-project-ripple" x={386} y={152} width={156} height={116} rx={18} pathLength={1} />
-
-            <circle className="collab-launch-auth-ring" cx={836} cy={210} r={33} pathLength={1} />
-            <circle className="collab-launch-auth-ripple" cx={836} cy={210} r={33} pathLength={1} />
 
             {MINIS.map((mini, index) => (
               <g key={index}>
@@ -1000,8 +883,6 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
                 <path className="collab-launch-mini-flow collab-launch-flow collab-launch-flow--mint" d={mini.curve} />
               </g>
             ))}
-
-            <rect className="collab-launch-progress-rect" x={665} y={179} width={62} height={62} rx={19} pathLength={1} />
 
             <path className="collab-launch-flow collab-launch-work--a" d="M118 210H204" />
             <path className="collab-launch-flow collab-launch-work--a" d="M118 210H204" />
@@ -1152,35 +1033,11 @@ export function CollabLaunchStage(props: CollabLaunchStageProps): JSX.Element {
               <SessionPage tint={TINT.A[2]} />
             </div>
           ))}
-
-          <div className="collab-launch-node collab-launch-chip collab-launch-chip--mint collab-launch-chip--under collab-launch-assist-request" data-lab="1">
-            {t("collabLaunch.assistRequest")}
-          </div>
-          <div className="collab-launch-node collab-launch-chip collab-launch-chip--mint collab-launch-chip--under collab-launch-assist-result" data-lab="1">
-            {t("collabLaunch.assistResult")}
-          </div>
-          <div className="collab-launch-node collab-launch-chip collab-launch-chip--ember collab-launch-auth" data-lab="1">
-            <span className="collab-launch-auth__wait">
-              <i className="collab-launch-pulse" />
-              {t("collabLaunch.awaitingApproval")}
-            </span>
-            <span className="collab-launch-auth__ok">
-              <CheckMark />
-              {t("collabLaunch.approved")}
-            </span>
-          </div>
-          <div className="collab-launch-node collab-launch-chip collab-launch-chip--mint collab-launch-exec" data-lab="1">
-            {t("collabLaunch.runningLocally")}
-            <LoaderDots />
-          </div>
-          <div className="collab-launch-node collab-launch-check">
-            <CheckMark />
-          </div>
         </div>
 
         {/* 进度条可点：按一下就从那一幕的第一帧重新播，所以它不能藏在舞台的 aria-hidden 里。 */}
         <div className="collab-launch-progress" role="group" aria-label={t("collabLaunch.progress")}>
-          {[0, 1, 2, 3, 4].map((index) => {
+          {[0, 1, 2, 3].map((index) => {
             const caption = COLLAB_LAUNCH_CAPTIONS[ACT_CAPTIONS[index] ?? index];
             const main = caption ? t(caption.main) : "";
             return (

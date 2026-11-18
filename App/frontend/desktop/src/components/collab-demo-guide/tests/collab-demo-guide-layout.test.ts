@@ -6,7 +6,12 @@ import type { DemoGuidePhase } from "../../../app/collab-demo-guide-store.js";
 import {
   blockerRects,
   cardPlacement,
+  clickHintBounds,
+  clickHintPlacement,
   DEMO_GUIDE_CARD_WIDTH,
+  DEMO_GUIDE_HINT_LENGTH,
+  unionRect,
+  demoGuideClickTarget,
   demoGuideTarget,
   maskRects,
   padRect,
@@ -129,8 +134,6 @@ describe("demo guide layout", () => {
     expect(demoGuideTarget("task-row")).toEqual({ region: "board-task-row", stroke: "board-task-row", blockRest: false });
     expect(demoGuideTarget("reader").stroke).toBe("reader-continue");
     expect(demoGuideTarget("compose").stroke).toBe("composer-send");
-    expect(demoGuideTarget("help-dialog").stroke).toBe("assist-allow");
-    expect(demoGuideTarget("settings-assist").stroke).toBe("settings-assist-switch");
   });
 
   it("does not let the settings intro screens be clicked", () => {
@@ -164,7 +167,6 @@ describe("demo guide layout", () => {
       ["create-project", { region: "create-project-submit", stroke: "create-project-submit", blockRest: false, radius: 10, padding: 7, prefer: "right" }],
       ["joined", { region: "board-members", stroke: null, blockRest: false, radius: 10, padding: 7, prefer: "right" }],
       ["tour-board", { region: "board-list", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" }],
-      ["tour-tabs", { region: "board-tabs", stroke: null, blockRest: true, radius: 14, padding: 6, prefer: "right" }],
       ["tour-associate", { region: "board-associate", stroke: null, blockRest: true, radius: 10, padding: 6, prefer: "bottom" }],
       ["tour-associate-pick", { region: "associate-pick", stroke: null, blockRest: true, radius: 16, padding: 6, prefer: "left" }],
       ["tour-new-task", { region: "sidebar-new-task", stroke: null, blockRest: true, radius: 9, padding: 5, prefer: "bottom" }]
@@ -172,8 +174,8 @@ describe("demo guide layout", () => {
     for (const [phase, expected] of table) {
       expect(demoGuideTarget(phase), phase).toEqual(expected);
     }
-    // 体验三步与改造前一样：不写圆角与内边距，走默认的 12 / 6，也不指定卡片贴哪边。
-    for (const phase of ["task-row", "reader", "compose", "reply-done", "ask-compose", "settings-open", "help-dialog", "complete"] as const) {
+    // 体验一步与改造前一样：不写圆角与内边距，走默认的 12 / 6，也不指定卡片贴哪边。
+    for (const phase of ["task-row", "reader", "compose", "reply-waiting", "reply-done", "complete"] as const) {
       const target = demoGuideTarget(phase);
       expect(target.radius).toBeUndefined();
       expect(target.padding).toBeUndefined();
@@ -186,6 +188,82 @@ describe("demo guide layout", () => {
     // 只保证不抛错：界面在阶段表有缺口时也只是不画蒙版。
     expect(() => demoGuideTarget("not-a-phase" as DemoGuidePhase)).not.toThrow();
     expect(demoGuideTarget("not-a-phase" as DemoGuidePhase)).toBeUndefined();
+  });
+
+  it("points a breathing arrow at the control each screen asks people to click", () => {
+    // 一条构造：箭尖钉在控件某条边的中点上，箭头在那一侧朝里指，所以不会盖住字与图标。
+    // 默认从下往上指（下方最不容易撞上弹窗自己的按钮与说明卡）。
+    const button = { left: 900, top: 600, width: 96, height: 32 };
+    expect(clickHintPlacement(button, viewport)).toEqual({
+      side: "bottom",
+      left: button.left + button.width / 2,
+      top: button.top + button.height
+    });
+    // 按钮贴着窗口下沿（下方放不下箭头）时改从上往下指，尖照样在边中点上。
+    const low = { left: 900, top: 760, width: 96, height: 32 };
+    expect(clickHintPlacement(low, viewport)).toEqual({
+      side: "top",
+      left: low.left + low.width / 2,
+      top: low.top
+    });
+    // 一整条任务行也走同一条规则：从下往上指着它的下沿中点，而不是跑到行外右端。
+    const row = { left: 100, top: 300, width: 900, height: 76 };
+    expect(clickHintPlacement(row, viewport)).toEqual({
+      side: "bottom",
+      left: row.left + row.width / 2,
+      top: row.top + row.height
+    });
+    // 上下都顶到窗口边的高控件改从右侧指过去，尖在右沿中点。
+    const tall = { left: 100, top: 4, width: 300, height: 792 };
+    expect(clickHintPlacement(tall, viewport)).toEqual({
+      side: "right",
+      left: tall.left + tall.width,
+      top: tall.top + tall.height / 2
+    });
+    // 上下右三面都贴着窗口的满屏控件（弹窗那种）只能从左侧指。
+    const flush = { left: 60, top: 4, width: 1130, height: 792 };
+    expect(clickHintPlacement(flush, viewport)).toEqual({ side: "left", left: flush.left, top: flush.top + flush.height / 2 });
+
+    // 箭头的避让框跟着方向走：从下往上指时占「尖下方 22px、横宽 24px」，说明卡不能压上去。
+    const down = clickHintBounds({ side: "bottom", left: 500, top: 400 });
+    expect(down).toEqual({ left: 488, top: 400, width: 24, height: DEMO_GUIDE_HINT_LENGTH + 4 });
+    const up = clickHintBounds({ side: "top", left: 500, top: 400 });
+    expect(up.top).toBe(400 - (DEMO_GUIDE_HINT_LENGTH + 4));
+    const fromRight = clickHintBounds({ side: "right", left: 500, top: 400 });
+    expect(fromRight).toEqual({ left: 500, top: 388, width: DEMO_GUIDE_HINT_LENGTH + 4, height: 24 });
+    // 并集：说明卡要同时避让控件与箭头，两者合起来就是一块。
+    expect(unionRect({ left: 10, top: 10, width: 10, height: 10 }, { left: 30, top: 5, width: 10, height: 30 }))
+      .toEqual({ left: 10, top: 5, width: 30, height: 30 });
+
+    // 真的要人点的那几屏都摆箭头：建的按钮、任务行、接续任务、发送。
+    for (const phase of [
+      "create-project",
+      "task-row",
+      "reader",
+      "compose"
+    ] as const) {
+      expect(demoGuideClickTarget(demoGuideTarget(phase)), phase).toBe(demoGuideTarget(phase).stroke);
+    }
+    // 只介绍、只等结果的屏一个都不摆：没有可点的控件时箭头只会指错地方。
+    for (const phase of [
+      "intro",
+      "name",
+      "folder",
+      "collab",
+      "join-entry",
+      "joined",
+      "tour-board",
+      "tour-associate",
+      "tour-associate-pick",
+      "tour-new-task",
+      "reply-waiting",
+      "reply-done",
+      "complete"
+    ] as const) {
+      expect(demoGuideClickTarget(demoGuideTarget(phase)), phase).toBeNull();
+    }
+    // 没注册的阶段也不该让它崩：不画箭头就好。
+    expect(demoGuideClickTarget(undefined)).toBeNull();
   });
 
   it("pads the hole without running past the window edge", () => {

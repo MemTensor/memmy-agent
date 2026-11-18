@@ -108,8 +108,9 @@ describe("the session picker inside the demo guide", () => {
     expect(buttons()).not.toContain("保存");
     // 关闭按钮也收起：不能把人从引导里带出去。
     expect(document.querySelector("[aria-label='关闭']")).toBeNull();
-    // 底部只写「这里只做展示」，没有可点的按钮。
-    expect(document.body.textContent).toContain("这里只做展示，不会改动任何任务。");
+    // 展示模式没有底部：不留任何说明文字，也没有可点的按钮。
+    expect(document.body.textContent).not.toContain("这里只做展示");
+    expect(document.querySelector(".modal-footer")).toBeNull();
   });
 
   it("shows the authorization note first and scans only after the person authorizes", async () => {
@@ -121,7 +122,9 @@ describe("the session picker inside the demo guide", () => {
 
     // 没授权：弹窗只给授权说明，一条本机记录都不读，也不替引导报「0 个会话」。
     await render({ demoGuide: true, accessGranted: false, listLocalSessions, onDemoScanSettled: settled });
-    expect(document.body.textContent).toContain("授权后才能读取这台电脑上的会话。");
+    expect(document.body.textContent).toContain("关联前需要你的授权");
+    // 未授权的这一屏同样没有底部。
+    expect(document.querySelector(".modal-footer")).toBeNull();
     expect(listLocalSessions).not.toHaveBeenCalled();
     expect(settled).not.toHaveBeenCalled();
 
@@ -130,7 +133,7 @@ describe("the session picker inside the demo guide", () => {
     expect(listLocalSessions).toHaveBeenCalledWith(expect.objectContaining({ fresh: true }));
     expect(settled).toHaveBeenCalledWith(1);
     expect(document.body.textContent).toContain("把分享会的议程拆成待办");
-    expect(document.body.textContent).not.toContain("授权后才能读取这台电脑上的会话。");
+    expect(document.body.textContent).not.toContain("关联前需要你的授权");
   });
 
   it("keeps the normal picker untouched when the guide is not showing it", async () => {

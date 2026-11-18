@@ -12,6 +12,7 @@ import type { AppRoutePath } from "../app/routes.js";
 import { clearFocusedAgentTarget, clearProductTourStep, readGuidanceCompleted, routeTable, writeDeferredGuidanceStep } from "../app/routes.js";
 import { useGuidanceProgress } from "../app/use-guidance-progress.js";
 import { isWorkspacePromptSessionReady, isWorkspacePromptSurfaceReady } from "../app/workspace-prompt-readiness.js";
+import { isDesktopPromptPreview } from "../app/desktop-prompt-preview.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { buildOnboardingStepCompletedEvent } from "../analytics/onboarding-analytics.js";
 import {
@@ -77,7 +78,7 @@ import { isComposingKeyboardEvent } from "../utils/keyboard.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { CollabCreateProjectDialog } from "./collab-create-project-dialog.js";
 import { CollabJoinProjectDialog } from "./collab-join-project-dialog.js";
-import { CollabAssistHost } from "./collab-assist-host.js";
+import { CollabJoinRequestHost } from "./collab-join-request-host.js";
 import { CollabDemoGuideHost } from "../components/collab-demo-guide/collab-demo-guide-host.js";
 import { ImprovementProgramModal } from "./improvement-program-modal.js";
 import { writeMemorySubPage } from "./memory-sub-page-storage.js";
@@ -563,6 +564,37 @@ export function AppFrame(props: AppFrameProps) {
   /** 这次新建是从新功能大卡点进来的体验入口：引导先只亮「创建项目」。 */
   const [createProjectDemo, setCreateProjectDemo] = useState(false);
   const [joinProjectOpen, setJoinProjectOpen] = useState(false);
+  /** 浏览器里的邀请链接经 memmy://invite/<code> 带进来的邀请码：弹窗打开时直接预填并预览。 */
+  const [inviteLinkCode, setInviteLinkCode] = useState<string | null>(null);
+
+  // 浏览器里的邀请链接用 memmy://invite/<code> 拉起桌面端（见 main 的 invite-link）：界面只负责把邀请码交给
+  // 「加入项目」弹窗。先订阅再取走启动前排队的那几条，冷启动与热启动走同一条路。
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.memmy?.onInviteLink) return undefined;
+    const unsubscribe = window.memmy.onInviteLink((code) => setInviteLinkCode(code));
+    void window.memmy.takeInviteLinks?.()
+      .then((codes) => {
+        const [first] = codes;
+        if (first) setInviteLinkCode(first);
+      })
+      .catch(() => undefined);
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (!inviteLinkCode) return;
+    if (!collabEnabled) {
+      // 协作项目只在账号模式存在：API Key 模式下不给一个注定失败的弹窗。
+      showCollabNotice(t("collab.join.needAccount"));
+      setInviteLinkCode(null);
+      return;
+    }
+    // 弹窗挂在应用根部，但界面停在欢迎页时先回到工作区，否则关掉弹窗后是一片空白。
+    if (state.navigation.currentPath !== "/main" && state.navigation.currentPath !== "/collab") {
+      dispatch(appActions.navigate("/main"));
+    }
+    setJoinProjectOpen(true);
+  }, [inviteLinkCode, collabEnabled]);
   /** The online project the person is about to leave, while the confirmation is open. */
   const [leaveOnlineProjectId, setLeaveOnlineProjectId] = useState<string | null>(null);
   const [leavingOnlineProject, setLeavingOnlineProject] = useState(false);
@@ -574,7 +606,7 @@ export function AppFrame(props: AppFrameProps) {
     setCreateProjectDemo(collabSnapshot.createDemo);
     setCreateProjectOpen(true);
     // 体验入口：弹窗还没建出项目，引导先停在这里，蒙版只亮「创建项目」。
-    if (collabSnapshot.createDemo) startDemoGuideBeforeProject();
+    if (collabSnapshot.createDemo) startDemoGuideBeforeProject({ force: isDesktopPromptPreview("collabLaunch") });
     consumeCreateProjectRequest();
   }, [createPending, collabSnapshot.createShareDefault, collabSnapshot.createDemo]);
   // 引导在新建弹窗上被退出（本机从此不再自动演示）：弹窗回到普通新建，
@@ -1073,7 +1105,9 @@ export function AppFrame(props: AppFrameProps) {
   function newProject() {
     handleFirstSidebarInteraction();
     // 第一次新建就走引导时，弹窗要默认开共享（与路径 A 一致）；普通新建仍然默认关。
-    if (shouldDemoOnNewProject({ collabEnabled, demoGuideActive: isDemoGuideActive() })) {
+    // 既有新手引导还有步骤排着（数据改进计划、产品导览、昵称）时不带演示：
+    // 小饭团不能和那些弹窗同屏，等它们走完再从大卡进体验。
+    if (deferredGuidanceStep == null && shouldDemoOnNewProject({ collabEnabled, demoGuideActive: isDemoGuideActive() })) {
       requestCreateProject({ share: true, demo: true });
       return;
     }
@@ -2124,16 +2158,14 @@ export function AppFrame(props: AppFrameProps) {
         onCancel={() => setDeleteConfirmTask(null)}
         onConfirm={() => void confirmDeleteArchivedTask()}
       />
-      {/* 成员协助：轮询收件箱、发通知、弹出授权；只在账号模式下工作。由 Memmy 执行的协助是项目里的一条任务，直接打开它；其余在项目看板上展开。 */}
-      <CollabAssistHost
+      {/* 有人申请加入我的项目：邀请方这边直接弹窗，不必等在项目成员里看到。 */}
+      <CollabJoinRequestHost
         collab={collabClient}
         enabled={collabEnabled && Boolean(state.account.userId)}
-        // 正开着看板时，那个项目的待处理请求已经显示在看板上，不再计入右下角角标。
-        boardProjectId={boardProjectId}
-        onOpenTask={(conversationId) => {
-          void openAgentTaskInChat({ memmyAgent: clients?.memmyAgent, dispatch, task: { sessionKey: `websocket:${conversationId}` } });
+        onApproved={() => {
+          if (collabClient) void loadCollabProjects(collabClient);
         }}
-        onOpenBoard={openProjectBoard}
+        onNotice={showCollabNotice}
       />
       {/* 项目协作的新手引导：蒙版、说明卡与结束演示都挂在应用根部，跨看板与对话页工作。 */}
       <CollabDemoGuideHost
@@ -2147,18 +2179,22 @@ export function AppFrame(props: AppFrameProps) {
       />
       <CollabJoinProjectDialog
         open={joinProjectOpen}
-        onCreateProject={() => {
+        // 深链接带进来的邀请码：弹窗打开即预填并预览。
+        initialReference={inviteLinkCode ?? undefined}
+        onClose={() => {
           setJoinProjectOpen(false);
-          // 从「加入项目」切过来的是普通新建：不预先打开共享。
-          setCreateProjectShare(false);
-          setCreateProjectOpen(true);
+          setInviteLinkCode(null);
         }}
-        onClose={() => setJoinProjectOpen(false)}
         onApplied={(application) => {
           addPendingApplication(application);
           if (collabClient) void loadCollabProjects(collabClient);
         }}
+        onNicknameChanged={(nickname) => {
+          // 昵称已在云端更新，同步到本地 Redux state，侧边栏和标题栏立即显示新名字。
+          dispatch(appActions.accountUpdated({ nickname }));
+        }}
         onJoined={(project) => {
+          setInviteLinkCode(null);
           if (project.localProjectId) {
             // Already a member with a project on this computer: just open it.
             openProjectBoard(project.localProjectId);

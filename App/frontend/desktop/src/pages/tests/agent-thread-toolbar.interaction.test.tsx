@@ -21,14 +21,12 @@ function Harness(props: {
   onOpenPanel: () => void;
   onJump: (id: string) => void;
   onNavigate: () => void;
-  projectCrumb?: Parameters<typeof AgentThreadToolbar>[0]["projectCrumb"];
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   return (
     <>
       <AgentThreadToolbar
         title="Deploy task"
-        projectCrumb={props.projectCrumb}
         messages={messages}
         panelOpen={props.panelOpen}
         onOpenPanel={props.onOpenPanel}
@@ -110,23 +108,13 @@ describe("AgentThreadToolbar", () => {
     expect(document.querySelector('[aria-label="对话内搜索（⌘F / Ctrl+F）"]')).not.toBeNull();
   });
 
-  it("puts a project task's breadcrumb and the title on the toolbar's single row", () => {
+  it("shows only the session title, with no project breadcrumb", () => {
     render();
     expect(document.querySelector(".agent-conversation-crumbs")).toBeNull();
+    expect(document.querySelector("[data-window-drag-exclusion=\"thread-conversation-crumbs\"]")).toBeNull();
     expect(document.querySelector(".agent-conversation-title")?.textContent).toBe("Deploy task");
-
-    const onOpen = vi.fn();
-    render({ projectCrumb: { name: "MemOS", onOpen } });
-    const crumbs = document.querySelector(".agent-conversation-crumbs")!;
-    expect(crumbs.textContent).toContain("项目");
-    expect(crumbs.textContent).toContain("MemOS");
-    expect(crumbs.querySelector(".agent-conversation-title")?.textContent).toBe("Deploy task");
-    // 面包屑与操作在同一行；可点的那一段登记成拖拽排除区，否则点击会被顶栏的窗口拖拽吃掉。
-    expect(crumbs.getAttribute("data-window-drag-exclusion")).toBe("thread-conversation-crumbs");
-    expect(crumbs.nextElementSibling?.classList.contains("thread-toolbar__actions")).toBe(true);
-
-    act(() => crumbs.querySelector<HTMLButtonElement>(".agent-conversation-crumbs__project")!.click());
-    expect(onOpen).toHaveBeenCalled();
+    // 标题和操作仍在同一行。
+    expect(document.querySelector(".agent-conversation-title")?.nextElementSibling?.classList.contains("thread-toolbar__actions")).toBe(true);
   });
 
   it("jumps to a prompt from the history popover", () => {
