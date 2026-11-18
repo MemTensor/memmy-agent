@@ -61,6 +61,10 @@ jobs:
       - name: Prepare and smoke-test portable renderer
         run: node plugins/office/scripts/prepare-runtime.mjs "$RUNNER_TEMP/office-runtime-tree"
       - name: Install build dependencies
+        env:
+          # The CUDA execution-provider artifact onnxruntime-node downloads is no longer published;
+          # Memory's embedder pins device: "cpu", so the bundled CPU binaries suffice.
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
         run: |
           npm ci
           npm install --prefix App/memmy-agent --ignore-scripts --no-audit --no-fund
