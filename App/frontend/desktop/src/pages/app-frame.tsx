@@ -615,7 +615,8 @@ export function AppFrame(props: AppFrameProps) {
       if (decision.status === "approved") {
         notifications.notify({
           variant: "success",
-          title: t("collab.application.approved", { name: decision.projectName })
+          title: t("collab.application.approved", { name: decision.projectName }),
+          autoDismissMs: 4000
         });
       } else {
         notifications.notify({

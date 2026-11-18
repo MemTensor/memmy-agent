@@ -9112,7 +9112,7 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
   margin: 0;
   min-width: 0;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 400;
   line-height: 18px;
   color: var(--color-text-ink);
 }

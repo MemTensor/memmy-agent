@@ -582,7 +582,7 @@
 
 .stream .rowTitle {
   font-size: 14.5px;
-  font-weight: 650;
+  font-weight: 400;
 }
 
 .stream .rowSummary {
@@ -722,7 +722,7 @@
 .guideText b {
   color: var(--collab-ink-2);
   font-size: 13.5px;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .guideText span {
@@ -789,7 +789,7 @@
   color: var(--collab-muted);
   font: inherit;
   font-size: 12.5px;
-  font-weight: 600;
+  font-weight: 400;
   cursor: pointer;
 }
 
@@ -1904,7 +1904,7 @@
   padding: 0 16px;
   border-radius: var(--radius-btn, 8px);
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 400;
 }
 
 /* 名称：整行输入框，图标与竖线在框内左侧，聚焦时整框描主题色 */
@@ -1972,7 +1972,7 @@
   margin: 20px 0 8px;
   color: var(--collab-muted);
   font-size: 12.5px;
-  font-weight: 700;
+  font-weight: 400;
 }
 
 /* 文件夹：没选时是一个居中的大框，选了以后变成一行 */
@@ -2020,7 +2020,7 @@
   color: var(--collab-ink-2);
   font: inherit;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 400;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2064,7 +2064,7 @@
   gap: 10px;
   height: 40px;
   margin-top: 8px;
-  padding: 0 12px;
+  padding: 0 12px 0 0;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -2822,7 +2822,7 @@
 .configTitle {
   color: var(--collab-ink);
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 500;
 }
 
 .configCards {
@@ -2851,7 +2851,7 @@
 .configCardTitle {
   color: var(--collab-ink-2);
   font-size: 12.5px;
-  font-weight: 700;
+  font-weight: 400;
 }
 
 .configIcon {
@@ -3131,4 +3131,16 @@
   right: 3px;
   color: var(--collab-ter);
   pointer-events: none;
+}
+
+/* 取消与「加入项目」同款：描边按钮，不用主按钮的实底 */
+:global(.modal).simpleCreateModal :global(.modal-footer) :global(.button-ghost) {
+  border: 1px solid var(--collab-line);
+  background: transparent;
+  color: var(--collab-ink);
+  box-shadow: none;
+}
+
+:global(.modal).simpleCreateModal :global(.modal-footer) :global(.button-ghost):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--collab-line) 40%, #fff);
 }
