@@ -66,20 +66,20 @@
 
 /*
  * 头部操作（邀请 / 收起配置 / 项目设置）：按钮自己要够大才点得中。
- * 逐个按钮给 40px 高的热区，图标按钮做成 40×40 的正方形；彼此只隔 8px，鼠标在两个按钮之间移动时始终落在其中一个上。
+ * 逐个按钮给 40px 高的热区，图标按钮做成 40×40 的正方形；彼此只隔 4px，鼠标在两个按钮之间移动时始终落在其中一个上。
  * ghost 的默认悬停底色几乎看不出来，这里换成薄荷浅底 + 强调色文字，扫过就能看出是可点的。
  */
 .boardActions {
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 :global(.button).boardAction {
   min-height: 40px;
   gap: 7px;
-  padding: 0 16px;
+  padding: 0 12px;
   color: var(--collab-ink-2);
   font-size: 13px;
   font-weight: 650;
@@ -580,14 +580,16 @@
   font-size: 12.5px;
 }
 
+/* 任务行：标题比摘要重、也更深一级，扫列表时先看到任务名 */
 .stream .rowTitle {
   font-size: 14.5px;
-  font-weight: 400;
+  font-weight: 600;
 }
 
+/* 摘要只是提示内容，比标题浅一档；不要和标题一个颜色，否则两行分不出主次 */
 .stream .rowSummary {
   font-size: 13px;
-  color: var(--collab-muted);
+  color: color-mix(in srgb, var(--collab-muted) 78%, var(--color-background-paper, #fff));
 }
 
 .stream .meta {
@@ -679,21 +681,45 @@
   padding: 20px 0 4px;
 }
 
-/* 没有标题与引导句的空状态：直接从第一条说明开始，不要空出来的段落间距 */
+/* 没有标题与引导句的空状态：只有一句说明，落在看板中间 */
 .guideBare {
   display: flex;
+  min-height: min(46vh, 380px);
   flex-direction: column;
   align-items: center;
-  padding-top: 60px;
+  justify-content: center;
+  padding: 0;
   text-align: center;
 }
 
-.guideBare .guideList {
-  margin-top: 12px;
+/* 空看板那一句：正文色偏浅，两个操作在句子里做成链接 */
+.guideEmptyLine {
+  max-width: 520px;
+  margin: 0;
+  color: var(--collab-muted);
+  font-size: 13px;
+  line-height: 1.9;
 }
 
-.guideBare .guideItem:hover .guideIcon {
-  background: color-mix(in srgb, var(--collab-active) 80%, var(--collab-accent) 20%);
+.guideEmptyAction {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--collab-accent-deep);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.guideEmptyAction:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.guideEmptyAction:focus-visible {
+  outline: 2px solid var(--collab-accent-deep);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .guideList {
@@ -841,8 +867,7 @@
   font-weight: 400;
 }
 
-.configKnowledgeAction,
-.configKnowledgeMore {
+.configKnowledgeAction {
   border: 0;
   padding: 0;
   background: transparent;
@@ -852,15 +877,7 @@
   cursor: pointer;
 }
 
-.configKnowledgeMore {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  margin-top: 10px;
-}
-
-.configKnowledgeAction:hover,
-.configKnowledgeMore:hover { text-decoration: underline; }
+.configKnowledgeAction:hover { text-decoration: underline; }
 
 .searchBox {
   display: flex;
@@ -2867,11 +2884,11 @@
 .configIcon {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: 7px;
   background: transparent;
   color: var(--collab-ter);
   cursor: pointer;

@@ -344,7 +344,11 @@ describe("project board configuration", () => {
   it("offers direct addition when no knowledge is linked", async () => {
     await renderBoard(CLOUD_PROJECT);
     expect(document.querySelector("aside")?.textContent).toContain("尚未关联知识库");
-    await act(async () => byText("添加知识库").click());
+    // 入口是卡片右上角的加号：卡片里不再有「添加知识库」这行文字。
+    await act(async () => iconButton("添加知识库").click());
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("关联知识库");
+    // 卡片的正文本身也可点：整块都是加号的等价入口。
+    await act(async () => byText("尚未关联知识库").click());
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain("关联知识库");
   });
 

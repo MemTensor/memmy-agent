@@ -98,7 +98,10 @@ describe("CollabShareToggle", () => {
     expect(collab.taskSharing).not.toHaveBeenCalled();
     expect(button.getAttribute("aria-checked")).toBe("true");
     expect(button.getAttribute("aria-label")).toBe("共享给成员");
-    expect(button.getAttribute("title")).toBe("共享给项目成员");
+    // 图标说明走应用自己的 tooltip，不再用原生 title。
+    expect(button.getAttribute("title")).toBeNull();
+    act(() => button.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+    expect(document.querySelector("#app-tooltip-singleton")?.textContent).toBe("共享给项目成员");
     expect(takeDraftShareIntent("draft-7", true)).toBe(true);
   });
 

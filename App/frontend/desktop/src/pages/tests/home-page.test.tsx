@@ -122,7 +122,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
     const chipStyles = styles.slice(
-      styles.indexOf(".composer-command-chip-slot {"),
+      styles.indexOf(".composer-command-chip {"),
       styles.indexOf(".home-project-picker {")
     );
 
@@ -141,7 +141,9 @@ describe("HomePage", () => {
     expect(html).toContain("lucide-x");
     expect(chipStyles).toContain("height: 32px;");
     expect(chipStyles).toContain("border-radius: 9px;");
-    expect(chipStyles).toContain("bottom: 12px;");
+    // 引用任务与 Goal 的 chip 跟着工具行走：不再用绝对定位浮在输入框左下角，那里是 + 按钮的位置。
+    expect(styles).toMatch(/\.composer-mention-chips\s*{[^}]*flex:\s*0 1 auto;/s);
+    expect(styles).not.toContain(".composer-command-chip-slot");
     expect(chipStyles).toContain(".composer-command-chip:hover");
     expect(chipStyles).toContain("border: 0;");
     expect(chipStyles).toContain("opacity: 0;");

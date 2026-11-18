@@ -14,6 +14,7 @@ import {
   isSharePending,
   setDraftShareIntent
 } from "../app/collab-share-intent.js";
+import { Tooltip } from "../components/tooltip.js";
 import { useTranslation } from "../i18n/use-translation.js";
 
 export type CollabShareToggleProps = {
@@ -92,18 +93,20 @@ export function CollabShareToggle(props: CollabShareToggleProps) {
   // 草稿还没有共享任何内容，所以不写「已共享」，开关的开合由图标颜色表示。
   const label = shared && conversationId ? t("collab.share.shared") : t("collab.share.label");
 
+  // 图标本身说不清这个云是什么意思：悬停给一句解释，告诉人改动会同步给项目成员。
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={shared}
-      aria-label={label}
-      title={t("collab.share.hintProject")}
-      disabled={saving || (Boolean(conversationId) && !loaded)}
-      onClick={() => void toggle()}
-      className={`composer-share-chip${shared ? " composer-share-chip--on" : ""}`}
-    >
-      {shared ? <Cloud size={14} strokeWidth={1.9} aria-hidden="true" /> : <CloudOff size={14} strokeWidth={1.9} aria-hidden="true" />}
-    </button>
+    <Tooltip content={t("collab.share.hintProject")}>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={shared}
+        aria-label={label}
+        disabled={saving || (Boolean(conversationId) && !loaded)}
+        onClick={() => void toggle()}
+        className={`composer-share-chip${shared ? " composer-share-chip--on" : ""}`}
+      >
+        {shared ? <Cloud size={14} strokeWidth={1.9} aria-hidden="true" /> : <CloudOff size={14} strokeWidth={1.9} aria-hidden="true" />}
+      </button>
+    </Tooltip>
   );
 }

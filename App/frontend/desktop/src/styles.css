@@ -760,27 +760,10 @@ body.memmy-window-fullscreen {
   }
 }
 
-.composer-command-chip-slot {
-  position: absolute;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-}
-
-/* The home empty composer still floats its chips over the input. */
-.composer-command-chip-slot--home {
-  bottom: 12px;
-  left: 16px;
-}
-
-/* The conversation composer no longer uses this slot: referenced-session chips moved into
-   `.agent-composer-mention-chips` inside the toolbar row so they cannot overlap the text. */
-.composer-command-chip-slot--conversation {
-  left: 10px;
-}
-
-/* Referenced-session chips sit in the toolbar flow, ahead of the leading action group. */
-.agent-composer-mention-chips {
+/* Referenced-session and Goal chips sit in the composer toolbar row, ahead of the leading
+   action group. They used to float over the input, which covered the + button in the home
+   composer and the first line of text. */
+.composer-mention-chips {
   display: flex;
   min-width: 0;
   flex: 0 1 auto;
@@ -791,17 +774,21 @@ body.memmy-window-fullscreen {
 
 /* With chips in the row the toolbar flows from the left; `.composer-actions` keeps
    its `margin-left: auto`, so the right-hand controls stay anchored. */
-.agent-composer-toolbar:has(> .agent-composer-mention-chips) {
+.agent-composer-toolbar:has(> .composer-mention-chips),
+.home-composer-toolbar:has(> .composer-mention-chips) {
   flex-wrap: nowrap;
   justify-content: flex-start;
 }
 
-.agent-composer-mention-chips .composer-command-chip {
+.composer-mention-chips .composer-command-chip {
   min-width: 0;
   flex: 0 1 auto;
 }
 
-.agent-composer-mention-chips .composer-command-chip__label {
+/* The label has to be allowed to shrink as well: without `min-width: 0` a long task title
+   keeps the chip at its content width and it runs into the next control. */
+.composer-mention-chips .composer-command-chip__label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -958,7 +945,7 @@ body.memmy-window-fullscreen {
 
 /*
  * 任务级共享开关（输入框左侧）：默认关闭，打开后这条任务才进项目。
- * 只画图标不写字，状态靠颜色区分，说明放进 hover 提示，避免工具行再挂一个胶囊。
+ * 只画图标不写字，状态靠颜色区分，悬停时底色变实、图标加深，并用 tooltip 说明含义。
  */
 .composer-share-chip {
   display: inline-flex;
@@ -978,8 +965,8 @@ body.memmy-window-fullscreen {
 }
 
 .composer-share-chip:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-canvas-oat) 60%, transparent);
-  color: color-mix(in srgb, var(--color-text-ink) 60%, transparent);
+  background: color-mix(in srgb, var(--color-canvas-oat) 96%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
 }
 
 .composer-share-chip--on {
