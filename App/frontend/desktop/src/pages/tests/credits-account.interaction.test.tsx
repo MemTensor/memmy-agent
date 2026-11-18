@@ -250,6 +250,20 @@ it("loads billing details into the existing request hover and cancels them when 
   expect(signal.aborted).toBe(true);
   expect(document.querySelector('[role="region"]')).toBeNull();
 });
+it("keeps cached balance, usage and rewards visible after a refresh fails", async () => {
+  const client = fixture();
+  client.usage.mockResolvedValueOnce({ items: [usageRow], hasMore: false, nextCursor: null } as never);
+  await mount(client);
+  client.summary.mockRejectedValueOnce(new Error("offline"));
+  client.usage.mockRejectedValueOnce(new Error("offline"));
+  await act(async () => window.dispatchEvent(new Event("memmy:credits-refresh")));
+  expect(host.textContent).toContain("1,214.56");
+  expect(host.textContent).toContain("actual-test-model");
+  expect(host.textContent).not.toContain("数据可能不是最新");
+  await click("平台奖励积分");
+  expect(host.textContent).toContain(reward.sourceName);
+  expect(host.textContent).not.toContain("数据可能不是最新");
+});
 it("renders real usage in the original table without new detail or balance panels", async () => {
   const client = fixture();
   client.usage.mockResolvedValueOnce({ items: [usageRow], hasMore: true, nextCursor: "signed-next", total: 11 } as never);
@@ -347,7 +361,7 @@ it("keeps the original account menu and shows the account balance, not spendable
   client.summary.mockRejectedValueOnce(new Error("offline"));
   await click("刷新积分余额");
   expect(menu?.textContent).toContain("83.27");
-  expect(menu?.textContent).toContain("数据可能不是最新");
+  expect(menu?.textContent).not.toContain("数据可能不是最新");
 });
 it("retries a live redemption with the same request ID and displays its actual result", async () => {
   const client = fixture();
