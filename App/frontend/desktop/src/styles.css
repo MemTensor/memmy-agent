@@ -767,13 +767,43 @@ body.memmy-window-fullscreen {
   align-items: center;
 }
 
+/* The home empty composer still floats its chips over the input. */
 .composer-command-chip-slot--home {
   bottom: 12px;
   left: 16px;
 }
 
+/* The conversation composer no longer uses this slot: referenced-session chips moved into
+   `.agent-composer-mention-chips` inside the toolbar row so they cannot overlap the text. */
 .composer-command-chip-slot--conversation {
   left: 10px;
+}
+
+/* Referenced-session chips sit in the toolbar flow, ahead of the leading action group. */
+.agent-composer-mention-chips {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+/* With chips in the row the toolbar flows from the left; `.composer-actions` keeps
+   its `margin-left: auto`, so the right-hand controls stay anchored. */
+.agent-composer-toolbar:has(> .agent-composer-mention-chips) {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+}
+
+.agent-composer-mention-chips .composer-command-chip {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.agent-composer-mention-chips .composer-command-chip__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .composer-command-chip {
@@ -928,41 +958,39 @@ body.memmy-window-fullscreen {
 
 /*
  * 任务级共享开关（输入框左侧）：默认关闭，打开后这条任务才进项目。
- * 沿用薄荷绿的强调色，只用一个淡底与描边把状态说清楚。
+ * 只画图标不写字，状态靠颜色区分，说明放进 hover 提示，避免工具行再挂一个胶囊。
  */
 .composer-share-chip {
   display: inline-flex;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   flex: 0 0 auto;
   align-items: center;
-  gap: 5px;
-  padding: 0 9px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 78%, transparent);
-  border-radius: 999px;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
   background: transparent;
-  color: color-mix(in srgb, var(--color-text-ink) 56%, transparent);
-  font-size: 11px;
-  font-weight: 500;
+  color: color-mix(in srgb, var(--color-text-ink) 32%, transparent);
   line-height: 1;
-  white-space: nowrap;
   cursor: pointer;
-  transition: background var(--duration-fast), border-color var(--duration-fast), color var(--duration-fast);
+  transition: background var(--duration-fast), color var(--duration-fast);
 }
 
 .composer-share-chip:hover:not(:disabled) {
   background: color-mix(in srgb, var(--color-canvas-oat) 60%, transparent);
-  color: color-mix(in srgb, var(--color-text-ink) 76%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 60%, transparent);
 }
 
 .composer-share-chip--on {
-  border-color: color-mix(in srgb, var(--color-action-sky) 42%, transparent);
-  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
-  color: var(--color-action-sky-hover);
+  border: 0;
+  background: transparent;
+  color: var(--color-action-sky);
 }
 
 .composer-share-chip--on:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-action-sky) 16%, transparent);
-  color: var(--color-action-sky-hover);
+  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
+  color: var(--color-action-sky);
 }
 
 .composer-share-chip:disabled {

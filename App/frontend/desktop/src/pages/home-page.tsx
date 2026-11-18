@@ -3802,18 +3802,6 @@ export function HomePage() {
                       selectedLabel={t("home.media.addPhotoFile")}
                       t={t}
                     />
-                    {pendingMentions.length ? (
-                      <div className="composer-command-chip-slot">
-                        {pendingMentions.map((item) => (
-                          <ComposerMentionChip
-                            key={item.id}
-                            label={item.title}
-                            removeLabel={t("common.remove")}
-                            onRemove={() => removeMention(chatScopeKey, item.id)}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
                     <ComposerHighlightedTextarea
                       textareaRef={inputRef}
                       highlightedCommands={slashCommandsWithLocal.map((command) => command.command)}
@@ -3830,6 +3818,18 @@ export function HomePage() {
                       onPaste={handleComposerPaste}
                     />
                     <div className="agent-composer-toolbar">
+                      {pendingMentions.length ? (
+                        <div className="agent-composer-mention-chips">
+                          {pendingMentions.map((item) => (
+                            <ComposerMentionChip
+                              key={item.id}
+                              label={item.title}
+                              removeLabel={t("common.remove")}
+                              onRemove={() => removeMention(chatScopeKey, item.id)}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
                       <div className="agent-composer-toolbar__leading">
                         <button
                           type="button"

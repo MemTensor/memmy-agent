@@ -89,13 +89,8 @@ export function CollabShareToggle(props: CollabShareToggleProps) {
     }
   }, [collab, conversationId, draftScopeKey, onError, projectId, saving, shared]);
 
-  // 草稿还没有共享任何内容，所以不写「已共享」，开关的开合由样式表示。
+  // 草稿还没有共享任何内容，所以不写「已共享」，开关的开合由图标颜色表示。
   const label = shared && conversationId ? t("collab.share.shared") : t("collab.share.label");
-  const hint = !shared
-    ? t("collab.share.hintOff")
-    : conversationId
-      ? t("collab.share.hintOn")
-      : t("collab.share.hintDraft");
 
   return (
     <button
@@ -103,13 +98,12 @@ export function CollabShareToggle(props: CollabShareToggleProps) {
       role="switch"
       aria-checked={shared}
       aria-label={label}
-      title={hint}
+      title={t("collab.share.hintProject")}
       disabled={saving || (Boolean(conversationId) && !loaded)}
       onClick={() => void toggle()}
       className={`composer-share-chip${shared ? " composer-share-chip--on" : ""}`}
     >
-      {shared ? <Cloud size={13} strokeWidth={1.9} aria-hidden="true" /> : <CloudOff size={13} strokeWidth={1.9} aria-hidden="true" />}
-      <span>{label}</span>
+      {shared ? <Cloud size={14} strokeWidth={1.9} aria-hidden="true" /> : <CloudOff size={14} strokeWidth={1.9} aria-hidden="true" />}
     </button>
   );
 }
