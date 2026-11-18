@@ -6,6 +6,53 @@ import { KnowledgePage } from "../src/ui/page.js";
 import type { KnowledgeSettings } from "../src/types.js";
 
 let root: Root | undefined;
+it.each(["zh-CN", "en-US"])("shows storage quota errors separately from other upload failures (%s)", async (language) => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const state: KnowledgeSettings = {
+    authenticated: true, enabled: true, serviceAvailable: true,
+    bases: [{ id: "base-1", name: "KB-2", selected: true }],
+  };
+  vi.stubGlobal("fetch", vi.fn(async (url: URL, init: RequestInit) => {
+    const path = String(url);
+    if (path.endsWith("/files") && init.method === "POST") {
+      const file = (init.body as FormData).get("file") as File;
+      return new Response(JSON.stringify(file.name === "quota.txt"
+        ? { error: "Storage request rejected", code: "KNOWLEDGE_STORAGE_LIMIT_EXCEEDED" }
+        : { error: "Service unavailable" }), { status: file.name === "quota.txt" ? 409 : 503 });
+    }
+    if (path.includes("/files")) return new Response(JSON.stringify({ files: [], total: 0, page: 1 }));
+    if (path.includes("/folders")) return new Response(JSON.stringify({ folders: [] }));
+    return new Response(JSON.stringify(state));
+  }));
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(<KnowledgePage connection={{ baseUrl: "http://localhost:1234", localToken: "test" }} language={language} />);
+  });
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  Object.defineProperty(input, "files", { configurable: true, value: [new File(["quota"], "quota.txt"), new File(["other"], "other.txt")] });
+  await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+  const notice = container.querySelector(".mk-upload-toast")!.textContent;
+  expect(notice).toContain(language === "zh-CN"
+    ? "上传完成：成功 0 个，失败 2 个"
+    : "Upload complete: 0 succeeded, 2 failed");
+  const alert = container.querySelector<HTMLElement>(".mk-storage-alert")!;
+  expect(alert.getAttribute("role")).toBe("alert");
+  expect(alert.querySelector(".mk-toast-text")!.textContent).toBe(language === "zh-CN"
+    ? "1 个文件未能上传：知识库总容量超限，请整理文件或升级套餐。"
+    : "1 file(s) could not be uploaded: knowledge base storage limit exceeded. Remove files or upgrade your plan.");
+  expect(alert.previousElementSibling?.classList.contains("mk-toolbar")).toBe(true);
+  expect(alert.nextElementSibling?.classList.contains("mk-body")).toBe(true);
+  expect(notice).toContain(language === "zh-CN" ? "1 个文件未能上传" : "1 file(s) failed to upload");
+  expect(notice).not.toContain(language === "zh-CN" ? "2 个文件未能上传" : "2 file(s) failed to upload");
+  Object.defineProperty(input, "files", { configurable: true, value: [new File(["quota"], "quota.txt")] });
+  await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect(container.querySelector(".mk-upload-toast")).toBeNull();
+  expect(container.querySelector(".mk-storage-alert")).not.toBeNull();
+  await act(async () => { container.querySelector<HTMLButtonElement>(".mk-storage-alert button")!.click(); });
+  expect(container.querySelector(".mk-storage-alert")).toBeNull();
+});
 afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   root = undefined;

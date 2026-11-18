@@ -223,6 +223,8 @@ export function TokenDetailPage() {
               {channel === "email" ? (
                 <SocialLoginButtons
                   pendingProvider={socialLogin.pendingProvider}
+                  waitingForAuthorization={socialLogin.waitingForAuthorization}
+                  onCancel={socialLogin.reset}
                   disabled={verificationCodeAuth.loginPending || modePersistencePending}
                   feedback={socialLogin.feedback}
                   onLogin={(provider) => void startSocialLogin(provider)}

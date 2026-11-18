@@ -33,11 +33,20 @@ export const API_ERROR_CODES = [
   "PLAN_APPLICATION_NOT_ELIGIBLE",
   "REWARD_NOT_CONFIGURED",
   "CHECKIN_ALREADY_CLAIMED",
+  "VERIFY_CODE_INVALID",
+  "INVITATION_CODE_INVALID",
+  "EXPORT_FAILED",
+  "OAUTH_PROVIDER_UNSUPPORTED",
+  "REDIRECT_URI_NOT_ALLOWED",
   "VOUCHER_INVALID",
   "VOUCHER_ALREADY_REDEEMED",
   "VOUCHER_EXPIRED",
   "VOUCHER_EXHAUSTED",
   "VOUCHER_INELIGIBLE",
+  "USAGE_FORBIDDEN",
+  "USAGE_NOT_FOUND",
+  "ASR_FORMAT_UNSUPPORTED",
+  "RATE_LIMITED",
   "REWARD_RATE_LIMITED"
 ] as const;
 
@@ -73,11 +82,20 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Objec
   PLAN_APPLICATION_NOT_ELIGIBLE: 409,
   REWARD_NOT_CONFIGURED: 503,
   CHECKIN_ALREADY_CLAIMED: 409,
+  VERIFY_CODE_INVALID: 400,
+  INVITATION_CODE_INVALID: 400,
+  EXPORT_FAILED: 500,
+  OAUTH_PROVIDER_UNSUPPORTED: 400,
+  REDIRECT_URI_NOT_ALLOWED: 400,
   VOUCHER_INVALID: 422,
   VOUCHER_ALREADY_REDEEMED: 409,
   VOUCHER_EXPIRED: 422,
   VOUCHER_EXHAUSTED: 409,
   VOUCHER_INELIGIBLE: 422,
+  USAGE_FORBIDDEN: 403,
+  USAGE_NOT_FOUND: 404,
+  ASR_FORMAT_UNSUPPORTED: 400,
+  RATE_LIMITED: 429,
   REWARD_RATE_LIMITED: 429
 });
 
@@ -101,6 +119,9 @@ export function withErrorEnvelope<Reply>(
       return await handler(request, reply);
     } catch (error) {
       const envelope = toErrorEnvelope(error);
+      if (envelope.status === 429 && error instanceof Error && "retryAfterSeconds" in error
+          && typeof error.retryAfterSeconds === "number" && Number.isFinite(error.retryAfterSeconds) && error.retryAfterSeconds > 0)
+        reply.header("Retry-After", Math.ceil(error.retryAfterSeconds));
       return reply.code(envelope.status).send({
         error: {
           code: envelope.code,

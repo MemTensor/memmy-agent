@@ -2,7 +2,7 @@ import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "../types.js";
 
 export const DOCUMENT_EXTENSIONS =
   ".pdf,.docx,.doc,.txt,.json,.md,.xml";
-export type UploadFailureReason = "format" | "size" | "other";
+export type UploadFailureReason = "format" | "size" | "storage" | "other";
 export interface UploadResult {
   name: string;
   ok: boolean;
@@ -19,6 +19,7 @@ export interface UploadSummary {
   failed: number;
   format: number;
   size: number;
+  storage: number;
   other: number;
   stopped: boolean;
 }
@@ -56,6 +57,7 @@ export function summarizeUploads(
     failed: results.filter((result) => !result.ok).length,
     format: results.filter((result) => result.reason === "format").length,
     size: results.filter((result) => result.reason === "size").length,
+    storage: results.filter((result) => result.reason === "storage").length,
     other: results.filter((result) => result.reason === "other").length,
     stopped,
   };
@@ -190,12 +192,15 @@ export async function uploadDocuments(
 }
 
 function uploadReason(error: unknown): UploadFailureReason {
+  if (error && typeof error === "object" && "code" in error &&
+      error.code === "KNOWLEDGE_STORAGE_LIMIT_EXCEEDED") return "storage";
   if (
     error &&
     typeof error === "object" &&
     "reason" in error &&
     (error.reason === "format" ||
       error.reason === "size" ||
+      error.reason === "storage" ||
       error.reason === "other")
   )
     return error.reason;

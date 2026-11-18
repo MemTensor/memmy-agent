@@ -194,6 +194,7 @@ describe("cloud client", () => {
       locale: "en",
       loginSource: "Memmy"
     });
+    if (!("flowId" in start)) throw new Error("Expected legacy polling credentials");
     const status = await client.getSocialLoginStatus({
       flowId: start.flowId,
       pollToken: start.pollToken
@@ -211,7 +212,7 @@ describe("cloud client", () => {
     expect(requests).toEqual([
       {
         path: "/api/agentUser/oauth/start",
-        body: { provider: "google", locale: "en", loginSource: "memmy" }
+        body: { provider: "google", redirectUri: "memmy://oauth/callback", locale: "en", loginSource: "memmy" }
       },
       {
         path: "/api/agentUser/oauth/status",
@@ -254,6 +255,40 @@ describe("cloud client", () => {
     });
 
     expect(start.authorizationUrl).toContain("https://accounts.google.com/");
+  });
+
+  it("uses documented state polling and maps completion without persisting the token in the profile", async () => {
+    const state = "opaque-desktop-poll-state";
+    const calls: unknown[] = [];
+    let polls = 0;
+    const client = createHttpCloudClient({ fetchImpl: async (url, init) => {
+      calls.push(JSON.parse(String(init?.body)));
+      if (String(url).endsWith("/start")) return Response.json({ code: 0, data: {
+        state, expiresAt: new Date(Date.now() + 600000).toISOString(),
+        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=callback-only"
+      } });
+      if (++polls === 1) return Response.json({ code: "OAUTH_NOT_COMPLETED" }, { status: 409 });
+      return Response.json({ code: 0, data: { status: "COMPLETED", token: "oauth-jwt", isNewUser: true,
+        creditAccountInitialized: true, user: { id: "42", nickname: "Test", email: "test@example.invalid" },
+        invitationSettlement: { status: "REWARDED", inviteeGrant: "200.00" }
+      } });
+    } });
+    const start = await client.startSocialLogin({ provider: "google", locale: "en", loginSource: "Memmy" });
+    expect(start).toMatchObject({ state, pollIntervalSec: 2 });
+    expect(await client.getSocialLoginStatus({ state })).toEqual({ status: "pending" });
+    const completed = await client.getSocialLoginStatus({ state });
+    expect(completed).toMatchObject({ status: "completed", result: { uuid: "oauth-jwt", isNewUser: true,
+      profile: { userId: "42", nickname: "Test" }, invitationResult: { status: "success", inviteeRewardCredits: "200.00" } } });
+    if (completed.status !== "completed") throw new Error("Expected completion");
+    expect(completed.result.profile.rawProfile).not.toHaveProperty("token");
+    expect(calls.slice(1)).toEqual([{ state }, { state }]);
+  });
+
+  it("ends polling on OAUTH_STATE_EXPIRED and preserves unrelated failures", async () => {
+    const client = createHttpCloudClient({ fetchImpl: async () => Response.json({ code: "OAUTH_STATE_EXPIRED" }, { status: 410 }) });
+    expect(await client.getSocialLoginStatus({ state: "expired-state" })).toEqual({ status: "expired" });
+    const denied = createHttpCloudClient({ fetchImpl: async () => Response.json({ code: "ACCESS_DENIED", message: "Denied" }, { status: 403 }) });
+    await expect(denied.getSocialLoginStatus({ state: "invalid-state" })).rejects.toMatchObject({ code: "ACCESS_DENIED" });
   });
 
   it("rejects a social-login authorization URL outside the provider allowlist", async () => {
@@ -357,6 +392,34 @@ describe("cloud client", () => {
       code: "invalid_argument",
       message: "验证码错误"
     });
+  });
+
+  it.each([["email", "VERIFY_CODE_INVALID"], ["phoneNumber", "VERIFY_CODE_INVALID"], ["email", "INVITATION_CODE_INVALID"], ["phoneNumber", "INVITATION_CODE_INVALID"]] as const)("preserves %s login error %s", async (channel, code) => {
+    const client = createHttpCloudClient({
+      baseUrl: "http://127.0.0.1:18101",
+      fetchImpl: async () => Response.json({ code, message: "验证码已失效", retryable: false }, { status: 400 })
+    });
+    await expect(client.login({
+      [channel]: channel === "email" ? "test@example.invalid" : "13800138000",
+      verificationCode: "123456", loginSource: "Memmy"
+    })).rejects.toMatchObject({ code, message: "验证码已失效" });
+  });
+
+  it.each(["usage/export", "usage/download"] as const)("preserves EXPORT_FAILED for %s", async (resource) => {
+    const client = createHttpCloudClient({ fetchImpl: async () => Response.json({ code: "EXPORT_FAILED", message: "导出失败" }, { status: 500 }) });
+    await expect(client.getCredits({ uuid: "test-token", resource })).rejects.toMatchObject({ code: "EXPORT_FAILED", message: "导出失败" });
+  });
+
+  it("rejects interrupted CSV downloads instead of returning partial data", async () => {
+    const client = createHttpCloudClient({ fetchImpl: async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("header\n")); controller.error(new Error("connection closed")); }
+    }), { headers: { "content-type": "text/csv" } }) });
+    await expect(client.getCredits({ uuid: "test-token", resource: "usage/download" })).rejects.toMatchObject({ code: "EXPORT_FAILED" });
+  });
+
+  it("keeps desktop content available when the cloud returns PROMOTION_NOT_FOUND", async () => {
+    const client = createHttpCloudClient({ fetchImpl: async () => Response.json({ code: "PROMOTION_NOT_FOUND", message: "无匹配活动" }, { status: 404 }) });
+    await expect(client.getDesktopContent({ locale: "zh-CN", clientVersion: "2.8.0", region: "CN" })).resolves.toMatchObject({ promotions: [] });
   });
 
   it("maps cloud agent_user phone field to local phoneNumber", async () => {

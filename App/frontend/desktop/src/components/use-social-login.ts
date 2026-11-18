@@ -8,6 +8,7 @@ import type { AuthCodeFeedback } from "./use-verification-code-auth.js";
 
 export interface UseSocialLoginResult {
   pendingProvider: SocialLoginProvider | null;
+  waitingForAuthorization: boolean;
   feedback: AuthCodeFeedback | null;
   start: (provider: SocialLoginProvider, invitationCode?: string) => Promise<AccountLoginResultView | null>;
   clearFeedback: () => void;
@@ -19,12 +20,14 @@ export function useSocialLogin(): UseSocialLoginResult {
   const { t, language } = useTranslation();
   const locale = useMemo<"zh" | "en">(() => (language === "zh-CN" ? "zh" : "en"), [language]);
   const [pendingProvider, setPendingProvider] = useState<SocialLoginProvider | null>(null);
+  const [waitingForAuthorization, setWaitingForAuthorization] = useState(false);
   const [feedback, setFeedback] = useState<AuthCodeFeedback | null>(null);
   const interactionVersionRef = useRef(0);
 
   const reset = useCallback(() => {
     interactionVersionRef.current += 1;
     setPendingProvider(null);
+    setWaitingForAuthorization(false);
     setFeedback(null);
   }, []);
 
@@ -41,6 +44,7 @@ export function useSocialLogin(): UseSocialLoginResult {
     const interactionVersion = interactionVersionRef.current + 1;
     interactionVersionRef.current = interactionVersion;
     setPendingProvider(provider);
+    setWaitingForAuthorization(false);
     setFeedback(null);
 
     try {
@@ -53,16 +57,16 @@ export function useSocialLogin(): UseSocialLoginResult {
       if (!isCurrent(interactionVersion)) return null;
       await openExternalUrl(flow.authorizationUrl);
       if (!isCurrent(interactionVersion)) return null;
+      setWaitingForAuthorization(true);
       setFeedback({ text: t("login.social.waiting"), tone: "success" });
       const expiresAt = Date.now() + flow.expiresInSec * 1000;
 
       while (isCurrent(interactionVersion) && Date.now() < expiresAt) {
         await delay(flow.pollIntervalSec * 1000);
         if (!isCurrent(interactionVersion)) return null;
-        const status = await clients.account.getSocialLoginStatus({
-          flowId: flow.flowId,
-          pollToken: flow.pollToken
-        });
+        const status = await clients.account.getSocialLoginStatus("state" in flow
+          ? { state: flow.state }
+          : { flowId: flow.flowId, pollToken: flow.pollToken });
         if (!isCurrent(interactionVersion)) return null;
         if (status.status === "pending") continue;
         if (status.status === "completed") {
@@ -87,7 +91,10 @@ export function useSocialLogin(): UseSocialLoginResult {
       }
       return null;
     } finally {
-      if (isCurrent(interactionVersion)) setPendingProvider(null);
+      if (isCurrent(interactionVersion)) {
+        setPendingProvider(null);
+        setWaitingForAuthorization(false);
+      }
     }
   }
 
@@ -95,7 +102,7 @@ export function useSocialLogin(): UseSocialLoginResult {
     return interactionVersionRef.current === version;
   }
 
-  return { pendingProvider, feedback, start, clearFeedback, reset };
+  return { pendingProvider, waitingForAuthorization, feedback, start, clearFeedback, reset };
 }
 
 function readableError(error: unknown, fallback: string): string {

@@ -191,6 +191,8 @@ export function LoginPage() {
           {channel === "email" ? (
             <SocialLoginButtons
               pendingProvider={socialLogin.pendingProvider}
+              waitingForAuthorization={socialLogin.waitingForAuthorization}
+              onCancel={socialLogin.reset}
               disabled={verificationCodeAuth.loginPending || modePersistencePending}
               showDivider
               feedback={socialLogin.feedback}

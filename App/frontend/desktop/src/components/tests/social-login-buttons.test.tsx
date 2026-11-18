@@ -8,7 +8,7 @@ describe("SocialLoginButtons", () => {
     const onLogin = vi.fn();
     const html = renderToString(
       <I18nProvider language="en-US">
-        <SocialLoginButtons pendingProvider={null} onLogin={onLogin} />
+        <SocialLoginButtons pendingProvider={null} onLogin={onLogin} onCancel={vi.fn()} />
       </I18nProvider>
     );
 

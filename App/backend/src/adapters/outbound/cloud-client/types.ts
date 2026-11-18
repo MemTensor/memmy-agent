@@ -82,18 +82,15 @@ export interface CloudStartSocialLoginInput {
   invitationCode?: string;
 }
 
-export interface CloudStartSocialLoginResult {
-  flowId: string;
-  pollToken: string;
+export type CloudSocialLoginCredentials =
+  | { state: string }
+  | { flowId: string; pollToken: string };
+
+export type CloudStartSocialLoginResult = CloudSocialLoginCredentials & {
   authorizationUrl: string;
   expiresInSec: number;
   pollIntervalSec: number;
-}
-
-export interface CloudSocialLoginCredentials {
-  flowId: string;
-  pollToken: string;
-}
+};
 
 export type CloudSocialLoginStatus =
   | { status: "pending" }

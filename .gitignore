@@ -23,6 +23,7 @@ sessions/
 .env
 .env.*
 !.env.example
+!.env.credits-test.example
 # Holds the Windows Computer History folder open until it has code: git does
 # not track empty directories, and `.*` above would otherwise drop the marker.
 !App/memmy-agent/src/tools/computer-history/win/.gitkeep

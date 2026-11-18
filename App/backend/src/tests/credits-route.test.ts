@@ -55,6 +55,8 @@ describe("credits local proxy", () => {
   });
   it("forwards usage filters through the authenticated service", async () => {
     const f = fixture();
+    expect((await f.read("/api/credits/usage")).statusCode).toBe(200);
+    expect(f.getCredits).toHaveBeenCalledWith({ uuid: "private-account-token", resource: "usage", query: {} });
     expect((await f.read("/api/credits/usage?domain=memory&limit=10&from=2026-11-01T00%3A00%3A00%2B08%3A00")).statusCode).toBe(200);
     expect(f.getCredits).toHaveBeenCalledWith({ uuid: "private-account-token", resource: "usage", query: { domain: "memory", limit: 10, from: "2026-11-01T00:00:00+08:00" } });
   });

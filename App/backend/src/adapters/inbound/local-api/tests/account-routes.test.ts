@@ -1,5 +1,7 @@
 /** Account routes tests. */
 import { afterEach, describe, expect, it } from "vitest";
+import { ApiErrorBodySchema } from "@memmy/local-api-contracts";
+import { createHttpCloudClient } from "../../../outbound/cloud-client/http-cloud-client.js";
 import { createProgressBus } from "../../../../services/progress-bus.js";
 import { createLocalApiServer } from "../server.js";
 import type { FastifyInstance } from "fastify";
@@ -14,6 +16,43 @@ afterEach(async () => {
 });
 
 describe("account local api routes", () => {
+  it.each(["OAUTH_PROVIDER_UNSUPPORTED", "REDIRECT_URI_NOT_ALLOWED"])("preserves %s through the OAuth start route", async (code) => {
+    const cloud = createHttpCloudClient({
+      fetchImpl: async (_url, init) => {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          provider: "google", redirectUri: "memmy://oauth/callback", invitationCode: "MEMMY-A1B2C3"
+        });
+        return Response.json({ code, message: "OAuth request rejected", details: {}, retryable: false, traceId: "cloud-trace" }, { status: 400 });
+      }
+    });
+    app = createServer({ account: { startSocialLogin: cloud.startSocialLogin } });
+    const response = await injectJson("POST", "/api/account/oauth/start", {
+      provider: "google", locale: "en", loginSource: "Memmy", invitationCode: "MEMMY-A1B2C3"
+    });
+    expect(response.statusCode).toBe(400);
+    expect(ApiErrorBodySchema.parse(response.json()).error).toMatchObject({ code, message: "OAuth request rejected" });
+  });
+
+  it.each([["email", "VERIFY_CODE_INVALID"], ["phone", "VERIFY_CODE_INVALID"], ["email", "INVITATION_CODE_INVALID"], ["phone", "INVITATION_CODE_INVALID"]] as const)("preserves %s login error %s", async (channel, code) => {
+    const cloud = createHttpCloudClient({
+      fetchImpl: async () => Response.json({ code, message: "验证码已失效", retryable: false }, { status: 400 })
+    });
+    app = createServer({ account: {
+      async verifyCode() {
+        return cloud.login({ verificationCode: "123456", loginSource: "Memmy",
+          ...(channel === "email" ? { email: "test@example.invalid" } : { phoneNumber: "13800138000" }) });
+      }
+    } });
+    const response = await injectJson("POST", "/api/account/verify-code", {
+      channel, verificationCode: "123456", loginSource: "Memmy",
+      ...(channel === "email" ? { email: "test@example.invalid" } : { phoneNumber: "13800138000" })
+    });
+    expect(response.statusCode).toBe(400);
+    expect(ApiErrorBodySchema.parse(response.json()).error).toMatchObject({
+      code, message: "验证码已失效"
+    });
+  });
+
   it("forwards account session routes through AccountService", async () => {
     const calls: string[] = [];
     app = createServer({

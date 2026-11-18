@@ -20,6 +20,7 @@ import {
 } from "../app/credits-preview-quota.js";
 import type { CreditsGrant } from "@memmy/local-api-contracts";
 import { useOptionalApiClients } from "../app/providers.js";
+import { ApiRequestError } from "../api/http.js";
 import { useCreditAccount } from "../app/use-credit-account.js";
 import { creditDisplayBuckets, creditMinor, creditUsagePercent, formatCreditAmount, formatCreditMinor } from "../app/credit-display.js";
 import { useCreditDemo } from "../app/use-credit-demo.js";
@@ -378,7 +379,13 @@ function AccountCheckinCard(props: { compact?: boolean; dismissible?: boolean })
         notifications?.notify({ variant: "success", title: t("credits.checkin.done"), emphasis: `+${CHECKIN_DAILY.toLocaleString(language)} ${t("credits.checkin.received")}`, autoDismissMs: 4000 });
         dismiss();
       }
-    } catch (error) { setError(error instanceof Error ? error.message : t("credits.live.error")); }
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.code === "CHECKIN_ALREADY_CLAIMED") {
+        requestId.current = null;
+        account.reload();
+      }
+      setError(error instanceof Error ? error.message : t("credits.live.error"));
+    }
     finally { setBusy(false); }
   }
   const disabled = busy || (account.live && !account.summary);

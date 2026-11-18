@@ -1342,22 +1342,20 @@ export const StartSocialLoginInputSchema = z.object({
 });
 export type StartSocialLoginInput = z.infer<typeof StartSocialLoginInputSchema>;
 
-/** Opaque credentials used by the desktop client to poll a social-login flow. */
-export const StartSocialLoginResponseSchema = z.object({
-    flowId: z.string().min(16),
-    pollToken: z.string().min(32),
+/** Identifies a flow; the credential pair is retained for older cloud servers. */
+export const SocialLoginStatusInputSchema = z.union([
+    z.object({ state: z.string().min(1).max(385) }),
+    z.object({ flowId: z.string().min(16), pollToken: z.string().min(32) })
+]);
+export type SocialLoginStatusInput = z.infer<typeof SocialLoginStatusInputSchema>;
+
+/** Opaque credentials and timing returned when starting social login. */
+export const StartSocialLoginResponseSchema = SocialLoginStatusInputSchema.and(z.object({
     authorizationUrl: z.string().url(),
     expiresInSec: z.number().int().positive().max(1800),
     pollIntervalSec: z.number().int().positive().max(30)
-});
+}));
 export type StartSocialLoginResponse = z.infer<typeof StartSocialLoginResponseSchema>;
-
-/** Identifies a previously started social-login flow. */
-export const SocialLoginStatusInputSchema = z.object({
-    flowId: z.string().min(16),
-    pollToken: z.string().min(32)
-});
-export type SocialLoginStatusInput = z.infer<typeof SocialLoginStatusInputSchema>;
 
 /** Current state of a browser-based social-login flow. */
 export const SocialLoginStatusResponseSchema = z.discriminatedUnion("status", [

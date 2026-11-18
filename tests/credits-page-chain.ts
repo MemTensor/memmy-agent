@@ -27,7 +27,7 @@ try {
   const detail = await client.usageDetail("test-call-1");
   assert.equal(detail.remainingCredits, "998.99");
   assert.equal(detail.settlementStatus, "SETTLED");
-  await assert.rejects(client.usageDetail("test-call-3"), { status: 404 });
+  await assert.rejects(client.usageDetail("test-call-3"), { status: 403, code: "USAGE_FORBIDDEN" });
   const memory = await client.usage({ ...range, domain: "memory" });
   assert.equal(memory.items.length, 1); assert.equal(memory.items[0]?.callCount, 2); assert.equal(memory.items[0]?.chargedCredits, "0.50");
   const exported = await client.usageExport({ ...range, domain: "memory" });

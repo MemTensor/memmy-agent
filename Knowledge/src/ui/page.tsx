@@ -421,6 +421,7 @@ export function KnowledgePage({
         failed: number;
         format: number;
         size: number;
+        storage: number;
         other: number;
         stopped: boolean;
       }
@@ -504,7 +505,11 @@ export function KnowledgePage({
             bodyBytes: encoded.bodyBytes,
             ms: Date.now() - started,
           });
-          throw new Error(message);
+          throw Object.assign(new Error(message), {
+            code: data && typeof data === "object" && typeof data.code === "string"
+              ? data.code
+              : undefined,
+          });
         }
         return data as T;
       },
@@ -979,7 +984,7 @@ export function KnowledgePage({
             action: "upload-batch",
             kind: batch.stopped ? "stopped" : "done",
             status: summary.failed,
-            message: `succeeded=${summary.succeeded} failed=${summary.failed} format=${summary.format} size=${summary.size} other=${summary.other}`,
+            message: `succeeded=${summary.succeeded} failed=${summary.failed} format=${summary.format} size=${summary.size} storage=${summary.storage} other=${summary.other}`,
           },
           summary.failed ? "error" : "info",
         );
@@ -1022,6 +1027,11 @@ export function KnowledgePage({
     );
   }
   const active = settings?.bases.find((base) => base.id === activeId);
+  const storageLimitExceeded = uploadNotice?.baseId === active?.id &&
+    uploadNotice?.kind === "done" && uploadNotice.storage > 0;
+  const showUploadToast = active && uploadNotice?.baseId === active.id &&
+    !(uploadNotice.kind === "done" && storageLimitExceeded &&
+      uploadNotice.failed === uploadNotice.storage && !uploadNotice.stopped);
   const activeMembers = members.filter((member) => member.status === "ACTIVE");
   const memberLimit = settings?.limits?.membersPerBase ?? limitPreview?.maxMembers;
   const sharingPreviewFull = settings?.limits
@@ -1865,6 +1875,24 @@ export function KnowledgePage({
                 </div>
               )}
               {/* ---------- 文件区 ---------- */}
+              {storageLimitExceeded && (
+                <div className="mk-toast mk-toast-error mk-storage-alert" role="alert">
+                  <span className="mk-toast-text">
+                    {t(
+                      `${uploadNotice.storage} 个文件未能上传：知识库总容量超限，请整理文件或升级套餐。`,
+                      `${uploadNotice.storage} file(s) could not be uploaded: knowledge base storage limit exceeded. Remove files or upgrade your plan.`,
+                    )}
+                  </span>
+                  <button
+                    type="button"
+                    className="mk-icon-btn"
+                    aria-label={t("关闭", "Close")}
+                    onClick={() => setUploadNotice(null)}
+                  >
+                    <I d={IC.close} size={14} />
+                  </button>
+                </div>
+              )}
               <div
                 className={`mk-body${dragOver ? " mk-body-drag" : ""}`}
                 onDragOver={(event) => {
@@ -2185,7 +2213,7 @@ export function KnowledgePage({
             </>
           )}
         </fieldset>
-        {(error || (active && uploadNotice?.baseId === active.id)) && (
+        {(error || showUploadToast) && (
           <div className="mk-toasts">
             {error && (
               <div className="mk-toast mk-toast-error mk-error" role="alert">
@@ -2213,7 +2241,7 @@ export function KnowledgePage({
                 </button>
               </div>
             )}
-            {active && uploadNotice?.baseId === active.id && (
+            {showUploadToast && uploadNotice && (
               <div className="mk-toast mk-upload-toast" role="status">
                 {uploadNotice.kind === "progress" ? (
                   <>
@@ -2507,6 +2535,10 @@ const styles = `
 .mk-toasts{position:sticky;bottom:24px;flex:0 0 0;height:0;min-height:0;margin-top:auto;z-index:50;pointer-events:none;display:flex;flex-direction:column-reverse;align-items:center;justify-content:flex-start;gap:8px;padding:0 32px}
 .mk-toast{display:flex;align-items:flex-start;gap:8px;box-sizing:border-box;width:max-content;max-width:min(720px,100%);padding:9px 8px 9px 14px;border:1px solid var(--mk-line);border-radius:10px;background:#fff;box-shadow:0 8px 24px rgba(27,42,39,.12);color:var(--mk-accent-deep);font-size:12.5px;line-height:1.65;pointer-events:auto;animation:mk-toast-in .18s ease both}
 .mk-toast-error{border-color:#ecc3c1;background:#fdf6f5;color:#b74b46}
+.mk-storage-alert{align-items:center;flex-shrink:0;width:auto;max-width:none;min-height:44px;margin:0 32px;padding:8px 12px 8px 14px;border-color:#e2ced0;background:#fdf7f7;color:#cd7c83;box-shadow:0 8px 20px rgba(27,42,39,.06)}
+.mk-storage-alert .mk-toast-text{padding-top:0;overflow-wrap:anywhere}
+.mk-storage-alert .mk-icon-btn{flex-shrink:0}
+@media(max-width:850px){.mk-storage-alert{margin-left:20px;margin-right:20px}}
 .mk-toast-text{flex:1;min-width:0;padding-top:2px}
 .mk-toast-text p{margin:0}
 .mk-toast-text p+p{margin-top:2px}

@@ -408,3 +408,19 @@ it("check-in retries reuse the request ID and refresh the authoritative status",
   // A successful claim collapses the dismissible home reminder instead of leaving a "done" row.
   expect(host.querySelector(".home-checkin")).toBeNull();
 });
+it("an already claimed check-in refreshes the status without showing a new reward toast", async () => {
+  const { NotificationCenterProvider } = await import("../../components/notification-center.js");
+  window.localStorage.removeItem("memmy.home.checkinDismissedOn:100001");
+  const client = fixture();
+  client.checkin.mockImplementationOnce(async () => {
+    client.summary.mockResolvedValue({ ...summary, checkin: { ...summary.checkin, claimedToday: true } });
+    throw new ApiRequestError("今日已签到", 409, "CHECKIN_ALREADY_CLAIMED");
+  });
+  await act(async () => root.render(<AppProviders><NotificationCenterProvider><Harness client={client} home /></NotificationCenterProvider></AppProviders>));
+  const reads = client.summary.mock.calls.length;
+  await act(async () => host.querySelector<HTMLButtonElement>(".home-checkin__action")!.click());
+  expect(client.summary.mock.calls.length).toBeGreaterThan(reads);
+  expect(host.querySelector(".home-checkin--claimed")).not.toBeNull();
+  expect(host.querySelector(".home-checkin__action")).toBeNull();
+  expect(document.body.textContent).not.toContain("+100 积分已到账");
+});
