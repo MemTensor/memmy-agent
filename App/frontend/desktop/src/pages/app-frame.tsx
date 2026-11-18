@@ -42,6 +42,7 @@ import {
   subscribeCollabProjects
 } from "../app/collab-projects-store.js";
 import { collabEnabledFor } from "../app/collab-mode.js";
+import { demoCleanupBaseline, removeDemoTasks } from "../app/collab-demo-cleanup.js";
 import {
   demoGuideBoundLocalProject,
   dismissDemoGuideBeforeProject,
@@ -513,8 +514,66 @@ export function AppFrame(props: AppFrameProps) {
   const notifications = useOptionalNotificationCenter();
   const collabDecisions = collabSnapshot.decisions;
   const collabProjectIds = collabSnapshot.projects;
+  /** 新手引导的状态：收场时要清理引导期间新建的任务，光知道「在不在演示中」不够。 */
+  const demoGuideState = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState);
   /** 新手引导进行中：演示自己就是主角，顶上「已加入「…」」这类一次性提示不抢镜。 */
-  const demoGuideActive = useSyncExternalStore(subscribeDemoGuide, getDemoGuideState, getDemoGuideState).status === "active";
+  const demoGuideActive = demoGuideState.status === "active";
+  /**
+   * 引导结束后清掉引导期间在这个项目里新建的任务。
+   *
+   * 引导的体验段点一次「继续」就会在这个项目里新建一条任务并默认共享出去；引导一收场，这条任务就该跟着消失。
+   * 开始时先记下这个项目已有的任务，结束时只删之后出现的那些。任务清单放在 ref 里读：清单每变一次都会重跑
+   * 这个副作用，用 ref 才不会把快照冲掉，也不会每次都重新算一遍。
+   * 只在真正收场（`ended`）时动手，完成弹窗还开着的那一屏不动：那时候人可能还在看结果。
+   */
+  const demoCleanupRef = useRef<{ cloudProjectId: string; localProjectId: string; baseline: Set<string> } | null>(null);
+  const agentTasksRef = useRef(state.agent.tasks);
+  agentTasksRef.current = state.agent.tasks;
+  const currentSessionKeyRef = useRef(state.agent.currentSessionKey);
+  currentSessionKeyRef.current = state.agent.currentSessionKey;
+  const currentChatIdRef = useRef(state.agent.currentChatId);
+  currentChatIdRef.current = state.agent.currentChatId;
+  const currentPathRef = useRef(state.navigation.currentPath);
+  currentPathRef.current = state.navigation.currentPath;
+  const demoCleanupProjectId = demoGuideState.localProjectId;
+  const demoCleanupCloudId = demoGuideState.projectId;
+  const demoCleanupStatus = demoGuideState.status;
+  useEffect(() => {
+    if (demoCleanupStatus === "active") {
+      if (!demoCleanupProjectId || !demoCleanupCloudId) return;
+      if (demoCleanupRef.current?.localProjectId === demoCleanupProjectId) return;
+      demoCleanupRef.current = {
+        cloudProjectId: demoCleanupCloudId,
+        localProjectId: demoCleanupProjectId,
+        baseline: demoCleanupBaseline(agentTasksRef.current, demoCleanupProjectId)
+      };
+      return;
+    }
+    // 完成弹窗还开着时先不动：人可能正在看这一步的结果。
+    if (demoCleanupStatus !== "ended") return;
+    const pending = demoCleanupRef.current;
+    demoCleanupRef.current = null;
+    if (!pending) return;
+    const memmyAgent = clients?.memmyAgent;
+    if (!memmyAgent || !collabClient) return;
+    void removeDemoTasks({
+      tasks: agentTasksRef.current,
+      localProjectId: pending.localProjectId,
+      cloudProjectId: pending.cloudProjectId,
+      baseline: pending.baseline,
+      unshare: (projectId, conversationId) => collabClient.setTaskSharing(projectId, conversationId, false),
+      deleteSession: (sessionKey) => memmyAgent.deleteSession(sessionKey)
+    }).then((removed) => {
+      if (!removed.length) return;
+      taskBus.removeTasksBySessionIds(removed.flatMap((task) => [task.chatId, task.sessionKey]));
+      // 删掉的正好是当前打开的那条：换一张新会话，别停在一条已经不存在的任务上。
+      // 只停在对话页时才换：［完成］会先把人带到看板，刚删完又跳回对话页很突兀。
+      const current = removed.some((task) => task.sessionKey === currentSessionKeyRef.current
+        || task.chatId === currentChatIdRef.current);
+      if (current && currentPathRef.current === "/main") openNewAgent();
+      refreshAgentTasks();
+    });
+  }, [demoCleanupStatus, demoCleanupProjectId, demoCleanupCloudId, clients, collabClient, taskBus]);
   useEffect(() => {
     // 演示一结束这一条会随依赖变化再跑一次：还没提示过的结果不会丢。
     if (demoGuideActive) return;

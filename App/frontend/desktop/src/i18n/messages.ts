@@ -863,7 +863,7 @@ export const zhCNMessages = {
   // 只追加在发给 Agent 的内容里，输入框与气泡里都不出现。
   "collab.demo.reply.waiting": "正在读取前序任务的上下文…",
   "collab.demo.reply.title": "任务已接续",
-  "collab.demo.reply.body": "结果已写回这条任务。这条任务也在项目里，其他成员可以查看或接着推进。",
+  "collab.demo.reply.body": "结果已写回这条任务。这次演示新建的任务会在引导结束后一起删掉；真实的项目里它会留在看板上，成员可以查看或接着推进。",
   "collab.demo.back": "上一步",
   "collab.demo.next": "下一步",
   "collab.demo.done": "完成",
@@ -871,7 +871,7 @@ export const zhCNMessages = {
   "collab.demo.exit": "退出引导",
   // 退出确认：建项目之前的正文与之后不同，说明项目会不会留下。
   "collab.demo.exit.title": "退出新手引导？",
-  "collab.demo.exit.body": "退出后引导结束，小饭团会离开项目；已经创建的项目会保留，之后新建项目不再自动带引导。",
+  "collab.demo.exit.body": "退出后引导结束：小饭团会离开项目，引导期间新建的任务一起删掉；已经创建的项目会保留，之后新建项目不再自动带引导。",
   "collab.demo.exit.bodyBeforeProject": "退出后引导结束，项目不会被创建；之后新建项目不再自动带引导。",
   "collab.demo.exit.confirm": "退出",
   "collab.demo.exit.continue": "继续引导",
@@ -3951,7 +3951,7 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "collab.demo.prefill.task": "Continuing {name}'s plan, {next}",
   "collab.demo.reply.waiting": "Reading the earlier task's context…",
   "collab.demo.reply.title": "Task continued",
-  "collab.demo.reply.body": "The result is written back into this task. It sits in the project too, so other members can read it or carry on.",
+  "collab.demo.reply.body": "The result is written back into this task. The task this walkthrough created is deleted once the guide ends; in a real project it stays on the board, where members can read it or carry on.",
   "collab.demo.back": "Back",
   "collab.demo.next": "Next",
   "collab.demo.done": "Done",
@@ -3959,7 +3959,7 @@ export const enUSMessages: Record<keyof typeof zhCNMessages, string> = {
   "collab.demo.exit": "Exit guide",
   // Exit confirmation: the body differs before and after the project exists.
   "collab.demo.exit.title": "Exit the walkthrough?",
-  "collab.demo.exit.body": "The guide ends and Xiaofantuan leaves the project. The project itself stays, and new projects no longer open the walkthrough.",
+  "collab.demo.exit.body": "The guide ends: Xiaofantuan leaves the project and any task the walkthrough created is deleted too. The project itself stays, and new projects no longer open the walkthrough.",
   "collab.demo.exit.bodyBeforeProject": "The walkthrough ends and nothing is created. New projects no longer open it either.",
   "collab.demo.exit.confirm": "Exit",
   "collab.demo.exit.continue": "Continue",
