@@ -192,7 +192,7 @@ export function ToolsPageView(props: ToolsPageViewProps) {
   const modalConnection = modalIntegration ? selectConnectionForIntegration(props.tools, modalIntegration) : undefined;
 
   return (
-    <AppFrame title={t("tools.hubTitle")} topBarInset={true} topBarInsetOffsetPx={-8}>
+    <AppFrame title={t("tools.hubTitle")} topBarInset={true} topBarInsetOffsetPx={-20}>
       <div
         className="app-frame-page-content h-full overflow-y-auto tools-page-content"
         style={{ paddingBottom: 24 }}

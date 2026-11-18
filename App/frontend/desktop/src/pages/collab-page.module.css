@@ -1350,6 +1350,16 @@
   width: min(600px, max(420px, calc(100vw - 620px)));
 }
 
+/*
+ * 新手引导里的展示模式：弹窗给左侧的说明卡让位。
+ *
+ * 卡片宽 340、间距加上边距约占 360：窗口放宽一点时弹窗保持 600，窗口收窄时二者一起收，
+ * 卡片就不会被挤到弹窗上、挡住刚扫出来的会话列表。
+ */
+:global(.modal).pickModalDemo {
+  width: min(600px, max(420px, calc(100vw - 620px)));
+}
+
 :global(.modal).membersModal {
   width: min(460px, calc(100vw - 32px));
 }

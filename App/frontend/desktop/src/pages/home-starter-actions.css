@@ -2,7 +2,7 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
   gap: 10px;
-  margin: 18px 2px 0;
+  margin: 0 2px 14px;
 }
 .home-scenario-card {
   display: flex;
@@ -11,7 +11,7 @@
   padding: 12px;
   border: 1px solid color-mix(in srgb, var(--color-border-stone) 45%, transparent);
   border-radius: 11px;
-  background: var(--color-background-paper);
+  background: color-mix(in srgb, var(--color-background-paper) 72%, transparent);
   text-align: left;
   cursor: pointer;
   transition: border-color 120ms ease, background-color 120ms ease;
@@ -20,21 +20,6 @@
   border-color: color-mix(in srgb, var(--color-border-stone) 80%, transparent);
   background: color-mix(in srgb, var(--color-canvas-oat) 45%, var(--color-background-paper));
 }
-.home-scenario-card__icon {
-  display: inline-flex;
-  flex: 0 0 26px;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--color-accent-neon-mint) 16%, var(--color-background-paper));
-  color: var(--color-action-sky);
-}
-.home-scenario-card__icon--scale {
-  background: color-mix(in srgb, #7268df 13%, var(--color-background-paper));
-  color: #625ee0;
-}
 .home-scenario-card__body {
   display: flex;
   min-width: 0;
@@ -42,7 +27,7 @@
   gap: 3px;
 }
 .home-scenario-card__title {
-  color: color-mix(in srgb, var(--color-text-ink) 88%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 70%, transparent);
   font-size: 13px;
   font-weight: 500;
 }
@@ -69,21 +54,22 @@
   background: color-mix(in srgb, var(--color-accent-neon-mint) 34%, var(--color-background-paper));
 }
 .home-prompt-suggestions {
-  display: grid;
-  gap: 7px;
-  margin: 18px 2px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 2px 16px;
 }
 .home-prompt-suggestions button {
   display: flex;
   align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-height: 42px;
-  padding: 8px 11px;
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
+  width: auto;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 48%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-background-paper) 72%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
   font-size: 13px;
   line-height: 20px;
   text-align: left;
@@ -93,19 +79,4 @@
 .home-prompt-suggestions button:hover {
   background: color-mix(in srgb, var(--color-canvas-oat) 68%, transparent);
   color: var(--color-text-ink);
-}
-.home-prompt-suggestions__icon {
-  display: inline-flex;
-  flex: 0 0 24px;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--color-accent-neon-mint) 16%, var(--color-background-paper));
-  color: var(--color-action-sky);
-}
-.home-prompt-suggestions button > span:nth-child(2) {
-  min-width: 0;
-  flex: 1;
 }

@@ -38,7 +38,7 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/app-frame.tsx")).not.toContain('icon: "M"');
     expect(source("pages/home-page.tsx")).toContain("app-frame-page-content home-empty-screen h-full");
     expect(source("styles.css")).toContain(".home-empty-screen");
-    expect(source("styles.css")).toContain("grid-template-rows: minmax(min-content, 1fr) auto minmax(min-content, 1fr)");
+    expect(source("styles.css")).toContain("grid-template-rows: minmax(0, 1fr) auto auto auto");
     expect(source("pages/home-page.tsx")).toContain("home-empty-brand text-center");
     expect(source("pages/home-page.tsx")).toContain("home-empty-brand-mascot flex justify-center");
     expect(source("pages/home-page.tsx")).toContain("text-2xl font-bold text-text-ink");

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, readdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import JSZip from "jszip";
@@ -29,6 +29,25 @@ function call(data, capabilityId, input, extraEnv = {}, observeStderr = () => {}
     child.stdin.end(JSON.stringify({ capabilityId, input, callId: "unit", pluginId: "office", conversationId: "unit" }) + "\n");
   });
 }
+
+test("imports enforce Host-approved roots before probing files, without hiding allowed missing files", async t => {
+  const { data, root } = await environment(t);
+  const uploads = join(root, "uploads"); await mkdir(uploads);
+  const sibling = join(root, "uploads-other"); await mkdir(sibling);
+  const outside = join(sibling, "private.csv"); await writeFile(outside, "secret\n");
+  const granted = { MEMMY_PLUGIN_INPUT_ROOTS: JSON.stringify([uploads]) };
+  for (const file of [outside, join(sibling, "missing.csv"), `${uploads}/../uploads-other/private.csv`]) {
+    const denied = await call(data, "office_import", { path: file }, granted);
+    assert.equal(denied.code, "EPERM", JSON.stringify(denied));
+  }
+  assert.equal(await readFile(outside, "utf8"), "secret\n");
+  const permitted = join(uploads, "input.csv"); await writeFile(permitted, "Name,Value\nA,1\n");
+  assert.equal((await call(data, "office_import", { path: permitted })).code, "EPERM");
+  assert.equal((await call(data, "office_import", { path: permitted }, granted)).type, "result");
+  assert.equal((await call(data, "office_import", { path: join(uploads, "missing.csv") }, granted)).code, "ENOENT");
+  await symlink(sibling, join(uploads, "escape"), process.platform === "win32" ? "junction" : "dir");
+  assert.equal((await call(data, "office_import", { path: join(uploads, "escape", "private.csv") }, granted)).code, "unsafe_file");
+});
 
 test("missing runtime is explicit and does not pass rendering", async t => {
   const { data } = await environment(t);
@@ -246,7 +265,7 @@ test("CSV policy rejects malformed data and preserves quoted/newline/text fields
   assert.throws(() => parseDelimited(Buffer.from("\ufeffa,b\n1,2"), policy), /BOM/);
   const { data, root } = await environment(t);
   const source = join(root, "input.csv"); await writeFile(source, "Code,Value\n001,=1+2\n");
-  const imported = (await call(data, "office_import", { path: source })).output;
+  const imported = (await call(data, "office_import", { path: source }, { MEMMY_PLUGIN_INPUT_ROOTS: JSON.stringify([root]) })).output;
   const converted = await call(data, "office_convert", { taskId: imported.taskId, file: imported.file, format: "xlsx", csv: policy });
   assert.equal(converted.type, "result", JSON.stringify(converted));
   const inspected = await call(data, "office_inspect", { taskId: imported.taskId, file: converted.output.file });

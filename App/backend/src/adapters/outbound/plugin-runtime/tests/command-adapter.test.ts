@@ -74,6 +74,22 @@ async function collect(iterable: AsyncIterable<CapabilityEvent>): Promise<Capabi
 }
 
 describe("CommandPluginAdapter", () => {
+  it.each(["linux", "darwin", "win32"] as const)("passes only approved canonical input roots on %s", async platform => {
+    const ctx = context();
+    const uploads = join(root!, "uploads"); mkdirSync(uploads);
+    const permission = { type: "host-service" as const, services: ["file-input"] };
+    ctx.plugin.manifest.permissions = [permission];
+    const adapter = createCommandPluginAdapter({ platform, fileInputRoots: [uploads],
+      buildLaunch: async () => ({ command: process.execPath, args: [], cwd: root! }) });
+    const denied = await adapter.activate(ctx);
+    try { expect(JSON.parse(denied.env.MEMMY_PLUGIN_INPUT_ROOTS)).toEqual([]); }
+    finally { await adapter.deactivate(denied); }
+    ctx.plugin.approvedPermissions = [permission];
+    const granted = await adapter.activate(ctx);
+    try { expect(JSON.parse(granted.env.MEMMY_PLUGIN_INPUT_ROOTS)).toEqual([realpathSync(uploads)]); }
+    finally { await adapter.deactivate(granted); }
+  });
+
   it("stops a silent plugin independently of its blocked event loop", async () => {
     const adapter = createCommandPluginAdapter({ buildLaunch: async () => ({ command: process.execPath, args: ["-e", "while(true) {}"], cwd: root! }) });
     const ctx = context("ndjson");
@@ -557,7 +573,7 @@ describe("CommandPluginAdapter", () => {
     expect(networkEnabled).toBe(true);
   });
 
-  it("does not fail activation when an optional Windows file-input root is missing", async () => {
+  it.each(["linux", "darwin", "win32"] as const)("does not fail activation when an optional file-input root is missing on %s", async platform => {
     const pluginContext = context();
     const existingRoot = realpathSync(root!);
     const missingRoot = join(root!, "media");
@@ -565,7 +581,7 @@ describe("CommandPluginAdapter", () => {
     pluginContext.plugin.manifest.permissions = [permission];
     pluginContext.plugin.approvedPermissions = [permission];
     const adapter = createCommandPluginAdapter({
-      platform: "win32",
+      platform,
       fileInputRoots: [missingRoot, existingRoot],
       buildLaunch: async () => ({ command: process.execPath, args: [], cwd: root! })
     });

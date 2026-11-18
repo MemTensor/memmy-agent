@@ -250,9 +250,7 @@ interface SidebarUpdateActionView {
 
 const navItems: NavItem[] = [
   { path: "/main", icon: <MessageSquarePlus size={16} /> },
-  { action: "search", icon: <Search size={16} />, labelKey: "appFrame.search" },
   { path: "/tools", icon: <Link2 size={16} /> },
-  { path: "/memory", icon: <BrainCircuit size={16} /> },
   { path: "/knowledge", icon: <BookOpen size={16} /> },
   { action: "record", icon: <Mic size={16} />, labelKey: "recording.page.title" }
 ];
@@ -1537,6 +1535,16 @@ export function AppFrame(props: AppFrameProps) {
                         <span className="shrink-0">{icon}</span>
                         <span className="flex-1 text-left">{t(item.labelKey)}</span>
                       </button>
+                      {item.id === "computer-use" ? (
+                        <button
+                          type="button"
+                          className="app-frame-nav-button relative flex items-center gap-2.5 px-3 py-2 transition-all cursor-pointer text-text-ink/75 hover:bg-canvas-oat/60 hover:text-text-ink/85"
+                          onClick={() => openSidebarRoute("/memory")}
+                        >
+                          <span className="shrink-0"><BrainCircuit size={16} /></span>
+                          <span className="flex-1 text-left">{t("nav.memory")}</span>
+                        </button>
+                      ) : null}
                     </div>
                   );
                 })}
@@ -1639,6 +1647,15 @@ export function AppFrame(props: AppFrameProps) {
             <div className="app-frame-task-list-header">
               <span className="app-frame-task-list-header__title">{t("appFrame.taskList.title")}</span>
               <div className="app-frame-task-list-header__actions">
+                <button
+                  type="button"
+                  aria-label={t("appFrame.search")}
+                  title={t("appFrame.search")}
+                  onClick={() => setSearchPaletteOpen(true)}
+                  className="app-frame-task-section-action"
+                >
+                  <Search size={14} />
+                </button>
                 <button
                   type="button"
                   aria-label={t("appFrame.taskList.actions")}

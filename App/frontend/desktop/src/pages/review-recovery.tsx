@@ -12,7 +12,13 @@ export function reviewRecovery(call: PluginUiCall) {
   if (terminal.type === "error" && terminal.recovery) {
     return { taskId: terminal.recovery.taskId, runId: terminal.recovery.runId, capabilityId: "review_resume", input: terminal.recovery };
   }
-  if (terminal.type !== "result") return null;
+  return null;
+}
+
+export function reviewContinuation(call: PluginUiCall) {
+  if (call.pluginId !== "literature-review") return null;
+  const terminal = call.events.find(event => event.type === "result");
+  if (!terminal || terminal.type !== "result") return null;
   const output = record(terminal.output);
   const data = record(output.data);
   const generation = record(data.generation ?? record(data.result).generation);
@@ -31,7 +37,7 @@ export function ReviewRecovery({ call }: { call: PluginUiCall }) {
   const [notice, setNotice] = useState("");
   const [saved, setSaved] = useState<{ sections: number; paragraphs: number }>();
   const [continuation, setContinuation] = useState<PluginUiCall>();
-  const recovery = reviewRecovery(continuation ?? call);
+  const recovery = continuation ? reviewContinuation(continuation) : reviewRecovery(call);
   if (!clients || !recovery) return null;
   const resume = async () => {
     if (busyRef.current || started) return;
@@ -57,7 +63,7 @@ export function ReviewRecovery({ call }: { call: PluginUiCall }) {
       const result = await clients.plugins.invoke(call.pluginId, recovery.capabilityId, { conversationId: call.conversationId, origin: "user", input: recovery.input });
       if (result.event.type === "error" || (result.event.type === "result" && record(result.event.output).ok === false)) throw new Error("Resume failed");
       const nextCall = { ...call, callId: result.callId, events: [result.event] };
-      if (reviewRecovery(nextCall)) setContinuation(nextCall);
+      if (reviewContinuation(nextCall)) setContinuation(nextCall);
       else setStarted(true);
       setNotice(result.event.type === "result" && typeof record(result.event.output).summary === "string"
         ? String(record(result.event.output).summary) : t("review.recovery.started"));

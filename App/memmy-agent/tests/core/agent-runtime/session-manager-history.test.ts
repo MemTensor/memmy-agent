@@ -395,6 +395,7 @@ describe("SessionManager history and previews", () => {
       content: "done",
       reasoning_content: "hidden chain of thought",
       thinking_blocks: [{ type: "thinking", thinking: "hidden chain of thought", signature: "sig" }],
+      memmy_protocol_state: { version: 1, protocol: "responses", scope: "scope", items: [{ type: "reasoning", id: "rs_1", encrypted_content: "opaque" }] },
       extra_content: { cache_control: { type: "ephemeral" } },
       senderId: "assistant",
       latency_ms: 12,
@@ -409,6 +410,7 @@ describe("SessionManager history and previews", () => {
         content: "done",
         reasoning_content: "hidden chain of thought",
         thinking_blocks: [{ type: "thinking", thinking: "hidden chain of thought", signature: "sig" }],
+      memmy_protocol_state: { version: 1, protocol: "responses", scope: "scope", items: [{ type: "reasoning", id: "rs_1", encrypted_content: "opaque" }] },
         extra_content: { cache_control: { type: "ephemeral" } },
       },
     ]);
@@ -423,6 +425,7 @@ describe("SessionManager history and previews", () => {
       model_provider: "anthropic",
       reasoning_content: "anthropic reasoning",
       thinking_blocks: [{ type: "thinking", thinking: "anthropic reasoning", signature: "sig" }],
+      memmy_protocol_state: { version: 1, protocol: "responses", scope: "scope", items: [{ type: "reasoning", id: "rs_1", encrypted_content: "opaque" }] },
       extra_content: { cache_control: { type: "ephemeral" } },
       tool_calls: [{
         id: "tc_1",

@@ -5,18 +5,124 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { MemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-admin-client/index.js";
-import { createLocalBackend, readMemoryLayerConfig, type LocalBackend } from "../index.js";
+import { createLocalBackend, readMemoryLayerConfig, type CreateLocalBackendOptions, type LocalBackend } from "../index.js";
 import { createAppStateStore } from "../infrastructure/app-state-store/index.js";
 import { createMockCloudClient } from "./support/mock-cloud-client.js";
 import { createMockMemoryClient } from "./support/mock-memory-client.js";
 
+const mcpBridgeWrites = vi.hoisted(() => ({
+  beforePatch: undefined as ((serverName: string) => void | Promise<void>) | undefined,
+  afterCommitGuard: undefined as ((serverName: string) => void | Promise<void>) | undefined,
+  calls: [] as string[],
+  settled: [] as string[],
+  events: [] as string[]
+}));
+
+vi.mock("../infrastructure/memmy-config/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../infrastructure/memmy-config/index.js")>();
+  return {
+    ...actual,
+    createMemmyConfigWriter: (options: Parameters<typeof actual.createMemmyConfigWriter>[0]) => {
+      const writer = actual.createMemmyConfigWriter(options);
+      return {
+        ...writer,
+        async patchMcpServerConfig(...args: Parameters<typeof writer.patchMcpServerConfig>) {
+          const [serverName] = args;
+          mcpBridgeWrites.calls.push(serverName);
+          try {
+            await mcpBridgeWrites.beforePatch?.(serverName);
+            const options = args[2];
+            await writer.patchMcpServerConfig(serverName, args[1], mcpBridgeWrites.afterCommitGuard ? {
+              ...options,
+              async beforeCommit(configPath) {
+                await options?.beforeCommit?.(configPath);
+                await mcpBridgeWrites.afterCommitGuard?.(serverName);
+              }
+            } : options);
+            mcpBridgeWrites.events.push(`written:${serverName}`);
+          } finally {
+            mcpBridgeWrites.settled.push(serverName);
+          }
+        }
+      };
+    }
+  };
+});
+
 let tempDir: string | undefined;
 let backend: LocalBackend | undefined;
 let integrationServer: ReturnType<typeof createServer> | undefined;
+let mcpRetryTimers: ReturnType<typeof captureMcpBridgeRetry> | undefined;
+
+beforeEach(() => {
+  mcpBridgeWrites.beforePatch = undefined;
+  mcpBridgeWrites.afterCommitGuard = undefined;
+  mcpBridgeWrites.calls.length = 0;
+  mcpBridgeWrites.settled.length = 0;
+  mcpBridgeWrites.events.length = 0;
+});
+
+function captureMcpBridgeRetry() {
+  const scheduled: Array<{ run: () => void; handle: ReturnType<typeof setTimeout> }> = [];
+  const schedule = globalThis.setTimeout;
+  const clear = vi.spyOn(globalThis, "clearTimeout");
+  const timer = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
+    if (delay !== 5_000) return schedule(callback, delay, ...args);
+    // Control only the bridge's five-second retry; HTTP and migration timers
+    // retain their real clocks, and teardown still clears a real timer handle.
+    const handle = schedule(() => undefined, delay);
+    scheduled.push({ run: () => callback(...args), handle });
+    return handle;
+  });
+  return {
+    scheduled,
+    clear,
+    restore() {
+      for (const entry of scheduled) clearTimeout(entry.handle);
+      timer.mockRestore();
+      clear.mockRestore();
+    }
+  };
+}
+
+function prepareMcpBridgeLock(serverName: "composio" | "plugins", failures = 1) {
+  tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-mcp-bridge-lock-"));
+  const memmyConfigPath = join(tempDir, "config.yaml");
+  const legacyCustom = { type: "stdio", command: "legacy-tool", args: ["--existing"] };
+  const staleBridge = { type: "streamableHttp", url: "http://127.0.0.1:1/old-bridge", headers: { "x-memmy-mcp-token": "old-token" } };
+  writeFileSync(memmyConfigPath, YAML.stringify({
+    memmyMemory: { domain: "keep" },
+    tools: { mcpServers: { legacyCustom, composio: staleBridge, plugins: staleBridge } }
+  }), "utf8");
+  let remaining = failures;
+  mcpBridgeWrites.beforePatch = (name) => {
+    if (name === serverName && remaining > 0) {
+      remaining -= 1;
+      throw new Error(`Timed out waiting for the runtime config lock: ${memmyConfigPath}`);
+    }
+  };
+  mcpRetryTimers = captureMcpBridgeRetry();
+  const reloadSnapshots: unknown[] = [];
+  const reload = vi.fn(async () => {
+    mcpBridgeWrites.events.push("reload");
+    reloadSnapshots.push(YAML.parse(readFileSync(memmyConfigPath, "utf8")));
+    return { ok: true, message: "reloaded", requires_restart: false };
+  });
+  const options: CreateLocalBackendOptions = {
+    databasePath: join(tempDir, "app.sqlite"),
+    runtimeConfigPath: join(tempDir, "runtime.json"),
+    localToken: "test-token",
+    memoryClient: createMockMemoryClient(),
+    cloudClient: createMockCloudClient(),
+    memmyConfigPath,
+    memmyAgentAdminClient: createMockMemmyAgentAdminClient(reload)
+  };
+  return { options, memmyConfigPath, legacyCustom, staleBridge, reload, reloadSnapshots, timers: mcpRetryTimers };
+}
 
 function createMockMemmyAgentAdminClient(reloadMcpConfig: MemmyAgentAdminClient["reloadMcpConfig"]): MemmyAgentAdminClient {
   return {
@@ -35,6 +141,11 @@ function createMockMemmyAgentAdminClient(reloadMcpConfig: MemmyAgentAdminClient[
 afterEach(async () => {
   await backend?.close();
   backend = undefined;
+  mcpRetryTimers?.restore();
+  mcpRetryTimers = undefined;
+  mcpBridgeWrites.beforePatch = undefined;
+  mcpBridgeWrites.afterCommitGuard = undefined;
+  vi.restoreAllMocks();
   if (integrationServer) {
     await new Promise<void>((resolve, reject) => {
       integrationServer?.close((error) => {
@@ -294,6 +405,154 @@ describe("local api", () => {
     } finally {
       process.off("unhandledRejection", onUnhandledRejection);
       warn.mockRestore();
+    }
+  });
+
+  it.each(["composio", "plugins"] as const)("keeps bootstrap available and existing config when the %s bridge write is locked", async (serverName) => {
+    const fixture = prepareMcpBridgeLock(serverName);
+    backend = await createLocalBackend(fixture.options);
+
+    expect(fixture.reload).not.toHaveBeenCalled();
+    expect(fixture.timers.scheduled).toHaveLength(1);
+    expect(mcpBridgeWrites.calls).toEqual(serverName === "composio" ? ["composio"] : ["composio", "plugins"]);
+    const config = YAML.parse(readFileSync(fixture.memmyConfigPath, "utf8"));
+    expect(config.tools.mcpServers.legacyCustom).toEqual(fixture.legacyCustom);
+    expect(config.tools.mcpServers.plugins).toEqual(fixture.staleBridge);
+    expect(config.memmyMemory).toMatchObject({ domain: "keep" });
+    const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/bootstrap`, {
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+    expect(response.status).toBe(200);
+    expect(AppBootstrapResponseSchema.safeParse(await response.json()).success).toBe(true);
+  });
+
+  it.each(["composio", "plugins"] as const)("retries both current bridge entries after a %s failure before reloading Agent", async (serverName) => {
+    const fixture = prepareMcpBridgeLock(serverName);
+    backend = await createLocalBackend(fixture.options);
+    expect(fixture.reload).not.toHaveBeenCalled();
+    expect(fixture.timers.scheduled).toHaveLength(1);
+    fixture.timers.scheduled[0].run();
+
+    await vi.waitFor(() => expect(fixture.reload).toHaveBeenCalledOnce());
+    const config = YAML.parse(readFileSync(fixture.memmyConfigPath, "utf8"));
+    const servers = config.tools.mcpServers;
+    expect(servers.legacyCustom).toEqual(fixture.legacyCustom);
+    expect(servers.composio.url).toBe(`${backend.runtimeConfig.baseUrl}/mcp/composio`);
+    expect(servers.plugins.url).toBe(`${backend.runtimeConfig.baseUrl}/mcp/plugins`);
+    expect(servers.composio.headers["x-memmy-mcp-token"]).toMatch(/^mmt_/);
+    expect(servers.composio.headers["x-memmy-mcp-token"]).not.toBe("old-token");
+    expect(servers.plugins.headers).toEqual(servers.composio.headers);
+    expect(fixture.reloadSnapshots).toEqual([config]);
+    expect(mcpBridgeWrites.events.slice(-3)).toEqual(["written:composio", "written:plugins", "reload"]);
+    expect(fixture.timers.scheduled).toHaveLength(1);
+  });
+
+  it("attempts one background retry when the bridge remains locked", async () => {
+    const fixture = prepareMcpBridgeLock("composio", 2);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    backend = await createLocalBackend(fixture.options);
+    expect(fixture.timers.scheduled).toHaveLength(1);
+    fixture.timers.scheduled[0].run();
+
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("MCP bridge config retry failed after backend startup")
+    ));
+    expect(mcpBridgeWrites.calls).toEqual(["composio", "composio"]);
+    expect(fixture.timers.scheduled).toHaveLength(1);
+    expect(fixture.reload).not.toHaveBeenCalled();
+    expect(YAML.parse(readFileSync(fixture.memmyConfigPath, "utf8")).tools.mcpServers.composio).toEqual(fixture.staleBridge);
+  });
+
+  it("retries current bridge configuration without reloading an Agent that the caller will start", async () => {
+    const fixture = prepareMcpBridgeLock("plugins");
+    backend = await createLocalBackend({ ...fixture.options, skipAgentMcpReload: true });
+    fixture.timers.scheduled[0].run();
+
+    await vi.waitFor(() => expect(mcpBridgeWrites.events.slice(-2)).toEqual(["written:composio", "written:plugins"]));
+    const config = YAML.parse(readFileSync(fixture.memmyConfigPath, "utf8"));
+    expect(config.tools.mcpServers.plugins.url).toBe(`${backend.runtimeConfig.baseUrl}/mcp/plugins`);
+    expect(fixture.reload).not.toHaveBeenCalled();
+  });
+
+  it("cancels the pending bridge retry when Backend closes, including an already queued callback", async () => {
+    const fixture = prepareMcpBridgeLock("plugins");
+    backend = await createLocalBackend(fixture.options);
+    const retry = fixture.timers.scheduled[0];
+    await backend.close();
+    backend = undefined;
+    expect(fixture.timers.clear).toHaveBeenCalledWith(retry.handle);
+    const calls = [...mcpBridgeWrites.calls];
+    retry.run();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(mcpBridgeWrites.calls).toEqual(calls);
+    expect(fixture.reload).not.toHaveBeenCalled();
+  });
+
+  it("cancels the bridge retry if publishing the runtime config later fails startup", async () => {
+    const fixture = prepareMcpBridgeLock("composio");
+    const notDirectory = join(tempDir!, "not-a-directory");
+    writeFileSync(notDirectory, "regular file");
+    await expect(createLocalBackend({
+      ...fixture.options,
+      runtimeConfigPath: join(notDirectory, "runtime.json")
+    })).rejects.toThrow(/EEXIST|ENOTDIR/);
+
+    const retry = fixture.timers.scheduled[0];
+    expect(fixture.timers.clear).toHaveBeenCalledWith(retry.handle);
+    const calls = [...mcpBridgeWrites.calls];
+    retry.run();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(mcpBridgeWrites.calls).toEqual(calls);
+    expect(fixture.reload).not.toHaveBeenCalled();
+  });
+
+  it("rejects an in-flight retry at the commit guard after Backend closes", async () => {
+    const fixture = prepareMcpBridgeLock("composio");
+    backend = await createLocalBackend(fixture.options);
+    let releaseWrite!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const heldWrite = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    mcpBridgeWrites.beforePatch = async () => { markStarted(); await heldWrite; };
+
+    try {
+      fixture.timers.scheduled[0].run();
+      await started;
+      await backend.close();
+      backend = undefined;
+      releaseWrite();
+      await vi.waitFor(() => expect(mcpBridgeWrites.settled).toEqual(["composio", "composio"]));
+      expect(mcpBridgeWrites.calls).toEqual(["composio", "composio"]);
+      expect(fixture.reload).not.toHaveBeenCalled();
+      expect(YAML.parse(readFileSync(fixture.memmyConfigPath, "utf8")).tools.mcpServers.composio).toEqual(fixture.staleBridge);
+    } finally {
+      releaseWrite();
+    }
+  });
+
+  it("drains a bridge write already inside its commit guard before close completes", async () => {
+    const fixture = prepareMcpBridgeLock("composio");
+    backend = await createLocalBackend(fixture.options);
+    let releaseCommit!: () => void;
+    let markCommitting!: () => void;
+    const committing = new Promise<void>((resolve) => { markCommitting = resolve; });
+    const heldCommit = new Promise<void>((resolve) => { releaseCommit = resolve; });
+    mcpBridgeWrites.afterCommitGuard = async () => { markCommitting(); await heldCommit; };
+
+    try {
+      fixture.timers.scheduled[0].run();
+      await committing;
+      let closed = false;
+      const closing = backend.close().then(() => { closed = true; });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(closed).toBe(false);
+      releaseCommit();
+      await closing;
+      backend = undefined;
+      expect(mcpBridgeWrites.calls).toEqual(["composio", "composio"]);
+      expect(fixture.reload).not.toHaveBeenCalled();
+    } finally {
+      releaseCommit();
     }
   });
 

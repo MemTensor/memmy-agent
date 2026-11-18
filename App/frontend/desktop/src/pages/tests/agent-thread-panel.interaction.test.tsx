@@ -297,12 +297,10 @@ describe("AgentThreadPanel", () => {
     expect(document.querySelector('webview')?.getAttribute('src')).toBe('about:blank');
   });
 
-  it('copies the live tab reference and removes the webview when the Agent closes it', async () => {
+  it('removes the webview when the Agent closes it', async () => {
     let closeTab: ((tabId: number) => void) | undefined;
-    const copyMention = vi.fn(async () => undefined);
     Object.assign(window, { memmy: {
       selectEmbeddedBrowserTab: vi.fn(),
-      copyEmbeddedBrowserTabMention: copyMention,
       onEmbeddedBrowserClose: (callback: (tabId: number) => void) => {
         closeTab = callback;
         return () => { closeTab = undefined; };
@@ -314,8 +312,6 @@ describe("AgentThreadPanel", () => {
     Object.assign(view, { getWebContentsId: () => 27, getURL: () => 'https://example.com/',
       getTitle: () => 'Example', canGoBack: () => false, canGoForward: () => false });
     await act(async () => view.dispatchEvent(new Event('dom-ready')));
-    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="复制标签页引用"]')!.click());
-    expect(copyMention).toHaveBeenCalledWith(27);
     act(() => closeTab?.(27));
     expect(document.querySelector('webview')).not.toBe(view);
   });

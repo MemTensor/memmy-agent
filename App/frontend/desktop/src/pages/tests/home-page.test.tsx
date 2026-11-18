@@ -111,8 +111,7 @@ describe("HomePage", () => {
     expect(html).not.toContain("停止");
     expect(html).not.toContain('data-icon="image-plus"');
     expect(html).not.toContain('data-icon="pause"');
-    expect(html).toContain("内容由 AI 生成，请仔细甄别");
-    expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-4");
+    expect(html).not.toContain("内容由 AI 生成，请仔细甄别");
     expect(html).not.toContain("未选择任何文件");
   });
 
@@ -515,8 +514,8 @@ describe("HomePage", () => {
     expect(source).toContain('className="home-project-picker__projects"');
     expect(source).toContain('className="home-project-picker__actions"');
     expect(optionStyles).toContain("min-height: 32px;");
-    expect(styles).toContain(".home-project-picker__option--action {\n  min-height: 30px;");
-    expect(source).toContain("<ChevronDown");
+    expect(styles).toContain(".home-project-picker__option--action {\n  min-height: 40px;");
+    expect(source).not.toContain("<ChevronDown");
     expect(source).not.toContain("<FolderPlus");
     expect(source).toContain("<LucidePlus");
   });
@@ -672,7 +671,7 @@ describe("HomePage", () => {
     expect(source).toContain('className="agent-conversation-content agent-conversation-column space-y-3"');
     expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer agent-conversation-column"');
     const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(composerRule).toContain("padding: 40px var(--codex-content-padding-x) 0;");
+    expect(composerRule).toContain("padding: 40px var(--codex-content-padding-x) 36px;");
     expect(styles).toContain("container-name: agent-workspace;");
     expect(source).toContain("const threadPanel = useAgentThreadPanel({");
     expect(source).toContain("className={`agent-workspace-layout ${threadPanelMotionClass}`}");
@@ -878,7 +877,7 @@ describe("HomePage", () => {
     );
     const conversationComposer = source.slice(
       source.indexOf("{state.agent.currentChatId && currentGoal ? ("),
-      source.indexOf('<p className="agent-conversation-disclaimer">')
+      source.indexOf('<input ref={fileInputRef}', source.indexOf("{state.agent.currentChatId && currentGoal ? ("))
     );
     expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: false })).toBe("stop");
     expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: true })).toBe("send");

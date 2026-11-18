@@ -25,7 +25,6 @@ import { CollabLaunchPromptHost } from "./components/collab-launch-prompt-host.j
 import { HistoryLaunchPromptHost } from "./components/history-launch-prompt-host.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
 import { NotificationCenterProvider } from "./components/notification-center.js";
-import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
 import { TaskTokenGiftPromptHost } from "./components/task-token-gift-prompt-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
@@ -348,7 +347,6 @@ function RuntimeApp() {
           <CollabLaunchPromptHost />
           <TaskTokenGiftPromptHost />
           <HistoryLaunchPromptHost />
-          <TokenCreditToastHost />
           <GithubStarPromptHost />
           {state.invitationToast ? (
           <InviteResultToast

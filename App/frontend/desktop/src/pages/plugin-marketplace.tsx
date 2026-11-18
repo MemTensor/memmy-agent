@@ -220,13 +220,19 @@ export function PluginMarketplace() {
     onUninstall={(plugin) => void mutate(plugin, () => clients!.plugins.uninstall(plugin.id),
       records => !records.some(record => record.id === plugin.id))}
     onAddToChat={(plugin) => {
-      const command = pluginComposerCommand(plugin);
-      if (command) {
-        const scopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+      const scopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+      if (plugin.id === "office") {
         dispatch(agentActions.composerDraftUpdated(
-          scopeKey,
-          addPluginCommandToDraft(command, state.agent.composerDraftsByScope[scopeKey] ?? "")
+          scopeKey, t("plugins.ui.officeTryItPrompt")
         ));
+      } else {
+        const command = pluginComposerCommand(plugin);
+        if (command) {
+          dispatch(agentActions.composerDraftUpdated(
+            scopeKey,
+            addPluginCommandToDraft(command, state.agent.composerDraftsByScope[scopeKey] ?? "")
+          ));
+        }
       }
       dispatch(appActions.navigate("/main"));
     }}
