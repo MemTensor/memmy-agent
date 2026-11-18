@@ -45,7 +45,6 @@ describe("model catalog refresh route", () => {
   it.each([
     { reason: "retries-exhausted" as const, local: catalog },
     { reason: "retries-exhausted" as const, local: null },
-    { reason: "unauthenticated" as const, local: null },
     { reason: "stopped" as const, local: null }
   ])("returns explicit synchronization state without exposing internal errors: %j", async ({ reason, local }) => {
     register({ status: "failed", reason, catalog: local, error: new Error("internal diagnostic") });

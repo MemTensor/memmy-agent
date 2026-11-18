@@ -385,7 +385,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   return {
     modelCapabilityCatalog: createModelCapabilityCatalogSyncService({
       cloudClient: options.cloudClient,
-      getCloudUuid: () => accountSessionRepository.getCloudUuid(),
       filePath: options.modelCapabilityCatalogPath,
       onUpdated: (catalog) => progressBus.emit("model_catalog.updated", { catalogVersion: catalog.catalogVersion })
     }),

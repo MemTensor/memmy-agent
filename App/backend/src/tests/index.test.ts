@@ -64,11 +64,13 @@ afterEach(async () => {
 
 describe("local api", () => {
   it.each([
-    { hasLocal: false, cloudFails: false },
-    { hasLocal: true, cloudFails: false },
-    { hasLocal: true, cloudFails: true },
-    { hasLocal: false, cloudFails: true }
-  ])("synchronizes the model catalog during startup and continues after failure: %j", async ({ hasLocal, cloudFails }) => {
+    { hasLocal: false, cloudFails: false, credential: null },
+    { hasLocal: false, cloudFails: false, credential: "catalog-test-credential" },
+    { hasLocal: false, cloudFails: false, credential: "expired-credential" },
+    { hasLocal: true, cloudFails: false, credential: null },
+    { hasLocal: true, cloudFails: true, credential: null },
+    { hasLocal: false, cloudFails: true, credential: null }
+  ])("synchronizes the model catalog independently of login and continues after failure: %j", async ({ hasLocal, cloudFails, credential }) => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-catalog-startup-"));
     const databasePath = join(tempDir, "app.sqlite");
     const filePath = join(tempDir, "models.json");
@@ -79,9 +81,9 @@ describe("local api", () => {
     if (hasLocal) await writeModelCapabilityCatalog(catalog, filePath);
     const store = createAppStateStore({ databasePath });
     try {
-      store.repositories.accountSession.upsert({
+      if (credential) store.repositories.accountSession.upsert({
         uuid: "catalog-test-account",
-        cloudUuid: "catalog-test-credential",
+        cloudUuid: credential,
         profile: {
           userId: "catalog-test-user", nickname: "Catalog test", email: "catalog@example.test",
           phoneNumber: null, avatarUrl: null, planType: "free", hasFinishedGuide: true,
@@ -105,7 +107,7 @@ describe("local api", () => {
       cloudClient: { ...createMockCloudClient(), getModelCapabilityCatalog }
     });
     await vi.waitFor(() => expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({
-      uuid: "catalog-test-credential", ...(hasLocal ? { catalogVersion: 21 } : {})
+      ...(hasLocal ? { catalogVersion: 21 } : {})
     }));
     await vi.waitFor(async () => expect(await readModelCapabilityCatalog(filePath)).toEqual(
       cloudFails ? hasLocal ? catalog : null : { ...catalog, catalogVersion: 22 }
@@ -131,6 +133,19 @@ describe("local api", () => {
       expect(refreshed.status).toBe(200);
       expect(await refreshed.json()).toEqual({ status: "synced", hasValidCatalog: true, catalogVersion: 22 });
       expect(getModelCapabilityCatalog).toHaveBeenCalledTimes(2);
+      if (credential) {
+        const logout = await fetch(`${backend.runtimeConfig.baseUrl}/api/account/logout`, {
+          method: "POST", headers: { "x-memmy-local-token": "test-token" }
+        });
+        expect(logout.status).toBe(200);
+        const afterLogout = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-catalog/refresh`, {
+          method: "POST", headers: { "x-memmy-local-token": "test-token" }
+        });
+        expect(afterLogout.status).toBe(200);
+        expect(await afterLogout.json()).toEqual({ status: "synced", hasValidCatalog: true, catalogVersion: 22 });
+        expect(getModelCapabilityCatalog).toHaveBeenLastCalledWith({ catalogVersion: 22 });
+        expect(getModelCapabilityCatalog).toHaveBeenCalledTimes(3);
+      }
     }
   });
 

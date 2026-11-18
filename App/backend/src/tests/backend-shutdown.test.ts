@@ -95,7 +95,7 @@ describe("local backend graceful shutdown", () => {
     const getModelCapabilityCatalog = vi.fn<Parameters<typeof createModelCapabilityCatalogSyncService>[0]["cloudClient"]["getModelCapabilityCatalog"]>()
       .mockResolvedValue({ status: "updated", catalog });
     const sync = createModelCapabilityCatalogSyncService({
-      cloudClient: { getModelCapabilityCatalog }, getCloudUuid: () => "isolated-test-account", filePath,
+      cloudClient: { getModelCapabilityCatalog }, filePath,
       onUpdated: updated => progressBus.emit("model_catalog.updated", { catalogVersion: updated.catalogVersion })
     });
     const base = await listen(app);
