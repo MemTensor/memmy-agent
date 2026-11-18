@@ -7,7 +7,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { addCollabProject, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
+import { addCollabProject, loadCollabProjects, resetCollabProjectsStore } from "../../app/collab-projects-store.js";
 import { clearDemoGuideDone, markDemoGuideDone } from "../../app/collab-demo-guide-store.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { CreateProjectModal } from "../collab-create-project-dialog.js";
@@ -37,6 +37,17 @@ async function flush(): Promise<void> {
   for (let index = 0; index < 8; index += 1) {
     await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
   }
+}
+
+/**
+ * 把云端「这个人现在能不能体验」写成给定值。
+ *
+ * 项目列表响应里的 `demoEligible` 就是云端 `eligible()` 的结果，弹窗靠它决定要不要走六屏。
+ */
+async function setDemoEligible(eligible: boolean): Promise<void> {
+  await loadCollabProjects({
+    listProjects: async () => ({ projects: [], demoEligible: eligible })
+  } as never);
 }
 
 describe("new project dialog and the demo flag", () => {
@@ -108,6 +119,8 @@ describe("new project dialog and the demo flag", () => {
     resetCollabProjectsStore();
     // 本机「已退出过引导」的标记与用例无关，每个用例从干净状态开始。
     clearDemoGuideDone();
+    // 默认云端说这个人还能体验：六屏是否真的走由它决定，不能演示的用例自己改成 false。
+    await setDemoEligible(true);
     mocks.prepareDirectory.mockResolvedValue("/Users/me/.memmy/local-projects/demo");
     mocks.mutateProject.mockResolvedValue({ status: "committed", project: { id: "local-1" } });
     mocks.createProject.mockResolvedValue({
@@ -247,6 +260,27 @@ describe("new project dialog and the demo flag", () => {
     await createNamed("项目协作体验");
     expect(mocks.createProject).toHaveBeenCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: true });
   });
+  /**
+   * 云端说这个人这次不能演示（已体验过、开关关掉、不在名单）：六屏就不该开。
+   *
+   * 只看本机「退出过引导」时，云端已经记过体验的机器（重装、换过应用数据）会照旧走完六屏，
+   * 点「创建项目」后云端不启动演示，引导就在进看板的那一刻无声消失。
+   */
+  it("opens an ordinary dialog when the cloud cannot demo this person", async () => {
+    await act(async () => {
+      await setDemoEligible(false);
+    });
+    await renderDemoDialog();
+
+    // 名字不再替人预填，六个亮区一个都不挂：这就是一次普通新建。
+    expect(nameInput().value).toBe("");
+    expect(anchors()).toEqual([]);
+    // 分享仍按大卡的意图默认打开，请求标记照旧交给云端判断，界面不自己编结果。
+    expect(document.querySelector<HTMLElement>("[role='switch']")?.getAttribute("aria-checked")).toBe("true");
+    await createNamed("普通项目");
+    expect(mocks.createProject).toHaveBeenCalledWith("普通项目", "/Users/me/.memmy/local-projects/demo", { demo: true });
+  });
+
   it("never asks for the demo once this machine has left the walkthrough", async () => {
     // 用户点过「退出引导」：本机标记已写，之后第一次创建共享项目也不再请求演示。
     markDemoGuideDone();

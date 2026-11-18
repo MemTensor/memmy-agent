@@ -66,20 +66,20 @@
 
 /*
  * 头部操作（邀请 / 收起配置 / 项目设置）：按钮自己要够大才点得中。
- * 逐个按钮给 40px 高的热区，图标按钮做成 40×40 的正方形；彼此只隔 8px，鼠标在两个按钮之间移动时始终落在其中一个上。
+ * 逐个按钮给 40px 高的热区，图标按钮做成 40×40 的正方形；彼此只隔 4px，鼠标在两个按钮之间移动时始终落在其中一个上。
  * ghost 的默认悬停底色几乎看不出来，这里换成薄荷浅底 + 强调色文字，扫过就能看出是可点的。
  */
 .boardActions {
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 :global(.button).boardAction {
   min-height: 40px;
   gap: 7px;
-  padding: 0 16px;
+  padding: 0 12px;
   color: var(--collab-ink-2);
   font-size: 13px;
   font-weight: 650;
@@ -93,12 +93,16 @@
 }
 
 :global(.button-ghost).boardAction:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--collab-accent) 14%, transparent);
+  /*
+   * 悬停底色要用能看见的薄荷：--collab-accent 指向的 --color-accent-mint 是 #c8f0e0 这种很浅的填充色，
+   * 拿它做 14% 半透明叠在白底上只剩几个色阶，鼠标移上去等于没反馈。这里改用 --color-action-sky(#5cbfae) 混白。
+   */
+  background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 20%, #fff);
   color: var(--collab-accent-deep);
 }
 
 :global(.button).boardAction:active:not(:disabled) {
-  background: color-mix(in srgb, var(--collab-accent) 20%, transparent);
+  background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 30%, #fff);
 }
 
 .boardIcon {
@@ -576,13 +580,16 @@
   font-size: 12.5px;
 }
 
+/* 任务行：标题比摘要重、也更深一级，扫列表时先看到任务名 */
 .stream .rowTitle {
   font-size: 14.5px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
+/* 摘要只是提示内容，比标题浅一档；不要和标题一个颜色，否则两行分不出主次 */
 .stream .rowSummary {
   font-size: 13px;
+  color: color-mix(in srgb, var(--collab-muted) 78%, var(--color-background-paper, #fff));
 }
 
 .stream .meta {
@@ -674,13 +681,45 @@
   padding: 20px 0 4px;
 }
 
-/* 没有标题与引导句的空状态：直接从第一条说明开始，不要空出来的段落间距 */
+/* 没有标题与引导句的空状态：只有一句说明，落在看板中间 */
 .guideBare {
-  padding-top: 6px;
+  display: flex;
+  min-height: min(46vh, 380px);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  text-align: center;
 }
 
-.guideBare .guideList {
-  margin-top: 12px;
+/* 空看板那一句：正文色偏浅，两个操作在句子里做成链接 */
+.guideEmptyLine {
+  max-width: 520px;
+  margin: 0;
+  color: var(--collab-muted);
+  font-size: 13px;
+  line-height: 1.9;
+}
+
+.guideEmptyAction {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--collab-accent-deep);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.guideEmptyAction:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.guideEmptyAction:focus-visible {
+  outline: 2px solid var(--collab-accent-deep);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .guideList {
@@ -718,7 +757,7 @@
 .guideText b {
   color: var(--collab-ink-2);
   font-size: 13.5px;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .guideText span {
@@ -753,7 +792,8 @@
   display: flex;
   align-items: center;
   gap: 9px;
-  margin-top: 10px;
+  margin-top: 16px;
+  margin-bottom: 8px;
   padding: 8px 8px 8px 12px;
   border: 1px solid color-mix(in srgb, var(--collab-accent) 30%, transparent);
   border-radius: 10px;
@@ -785,7 +825,7 @@
   color: var(--collab-muted);
   font: inherit;
   font-size: 12.5px;
-  font-weight: 600;
+  font-weight: 400;
   cursor: pointer;
 }
 
@@ -827,8 +867,7 @@
   font-weight: 400;
 }
 
-.configKnowledgeAction,
-.configKnowledgeMore {
+.configKnowledgeAction {
   border: 0;
   padding: 0;
   background: transparent;
@@ -838,15 +877,7 @@
   cursor: pointer;
 }
 
-.configKnowledgeMore {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  margin-top: 10px;
-}
-
-.configKnowledgeAction:hover,
-.configKnowledgeMore:hover { text-decoration: underline; }
+.configKnowledgeAction:hover { text-decoration: underline; }
 
 .searchBox {
   display: flex;
@@ -1378,8 +1409,9 @@
 
 .field > span {
   color: var(--collab-ink-2);
-  font-size: 12.5px;
-  font-weight: 700;
+  font-size: 13px;
+  /* 标签用标准字重：这里原先是 700，比正文和输入内容都粗，读起来像强调 */
+  font-weight: 400;
 }
 
 .field input {
@@ -1442,6 +1474,28 @@
 
 .dirPlaceholder {
   color: var(--collab-ter);
+}
+
+/*
+ * 目录字段里的小按钮（2026-11-18 用户要求）：不描边、不铺底色，就是一段灰字，
+ * 只靠悬停反馈说明它能点。文案颜色跟线框一样收起来，不再用薄荷色抢注意力。
+ */
+:global(.button).dirPickButton {
+  flex: none;
+  min-height: 30px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--collab-muted);
+  font-size: 13px;
+  font-weight: 400;
+  box-shadow: none;
+}
+
+:global(.button).dirPickButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--collab-ink) 6%, transparent);
+  color: var(--collab-ink);
 }
 
 .error {
@@ -1877,7 +1931,7 @@
   padding: 0 16px;
   border-radius: var(--radius-btn, 8px);
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 400;
 }
 
 /* 名称：整行输入框，图标与竖线在框内左侧，聚焦时整框描主题色 */
@@ -1945,7 +1999,7 @@
   margin: 20px 0 8px;
   color: var(--collab-muted);
   font-size: 12.5px;
-  font-weight: 700;
+  font-weight: 400;
 }
 
 /* 文件夹：没选时是一个居中的大框，选了以后变成一行 */
@@ -1993,7 +2047,7 @@
   color: var(--collab-ink-2);
   font: inherit;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 400;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2037,7 +2091,7 @@
   gap: 10px;
   height: 40px;
   margin-top: 8px;
-  padding: 0 12px;
+  padding: 0 12px 0 0;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -2660,16 +2714,14 @@
   background: var(--collab-surface);
 }
 
+/* 项目图标只留一个云 logo：不画方块、不铺白底，颜色也跟着线框改用中性灰（2026-11-18 两次要求） */
 .joinCardIcon {
   display: grid;
   flex: none;
   place-items: center;
-  width: 44px;
-  height: 44px;
-  border: 1px solid var(--collab-line);
-  border-radius: 11px;
-  background: var(--color-background-paper, #fff);
-  color: var(--collab-accent-deep);
+  width: 24px;
+  height: 24px;
+  color: var(--collab-muted);
 }
 
 .joinCardName {
@@ -2718,6 +2770,60 @@
   padding: 0 24px 4px;
 }
 
+/*
+ * 加入项目的按钮：照知识库弹窗（创建个人知识库）那一套。
+ * 34px 高、8px 圆角、13px / 400，中间留 10px；取消是白底描边，主操作是实心薄荷配白字、不要阴影。
+ */
+:global(.modal).createModal.joinModal :global(.modal-footer) :global(.button) {
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid var(--collab-line);
+  border-radius: 8px;
+  background: var(--color-background-paper, #fff);
+  color: var(--collab-ink);
+  font-size: 13px;
+  font-weight: 400;
+  box-shadow: none;
+}
+
+:global(.modal).createModal.joinModal :global(.modal-footer) :global(.button-ghost):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--collab-line) 40%, #fff);
+  color: var(--collab-ink);
+}
+
+:global(.modal).createModal.joinModal :global(.modal-footer) :global(.button-primary) {
+  border-color: transparent;
+  background: var(--color-action-sky);
+  color: #fff;
+}
+
+:global(.modal).createModal.joinModal :global(.modal-footer) :global(.button-primary):hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--color-action-sky-hover);
+  color: #fff;
+}
+
+/* 两个按钮之间照知识库留 10px */
+:global(.modal).createModal.joinModal :global(.modal-footer) .footerButtons {
+  gap: 10px;
+}
+
+/*
+ * 线框统一用中性灰（2026-11-18 用户要求「线框全部改为灰色，和会话页面的输入框对齐」）：
+ * 项目卡片、昵称输入框、目录字段不再用带薄荷调的 --collab-line。颜色取 ink 的 9%，
+ * 与 .agent-composer-shell 的 --border-content-panel 同属一档浅灰，但在白底弹窗里不会淡到看不出轮廓。
+ */
+:global(.modal).createModal.joinModal .joinCard,
+:global(.modal).createModal.joinModal .field input,
+:global(.modal).createModal.joinModal .dirField {
+  border-color: color-mix(in srgb, var(--collab-ink) 9%, transparent);
+}
+
+/* 卡片底色也跟着从薄荷底换成白底，否则灰线包着一块淡绿 */
+:global(.modal).createModal.joinModal .joinCard {
+  background: var(--color-background-paper, #fff);
+}
+
 /* 项目配置：卡片式列表，宽 300px，可收起（PRD 3.8） */
 .config {
   display: flex;
@@ -2743,7 +2849,7 @@
 .configTitle {
   color: var(--collab-ink);
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 500;
 }
 
 .configCards {
@@ -2754,7 +2860,7 @@
 
 .configCard {
   min-width: 0;
-  border: 1px solid var(--collab-line);
+  border: 1px solid color-mix(in srgb, var(--color-text-ink, #111d1c) 9%, transparent);
   border-radius: 12px;
   background: var(--color-background-paper, #fff);
   /* 面板与卡片同为白底，靠这条极轻的投影把卡片托起来，不靠色差 */
@@ -2772,17 +2878,17 @@
 .configCardTitle {
   color: var(--collab-ink-2);
   font-size: 12.5px;
-  font-weight: 700;
+  font-weight: 400;
 }
 
 .configIcon {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: 7px;
   background: transparent;
   color: var(--collab-ter);
   cursor: pointer;
@@ -2908,6 +3014,15 @@
     flex-basis: auto;
     background: var(--color-content-bg, #fff);
     box-shadow: -12px 0 32px rgba(17, 29, 28, 0.12);
+  }
+
+  .iconAction:not(.dangerGhost) {
+    display: none;
+  }
+
+  .searchBox {
+    max-width: 140px;
+    min-width: 80px;
   }
 }
 
@@ -3052,4 +3167,16 @@
   right: 3px;
   color: var(--collab-ter);
   pointer-events: none;
+}
+
+/* 取消与「加入项目」同款：描边按钮，不用主按钮的实底 */
+:global(.modal).simpleCreateModal :global(.modal-footer) :global(.button-ghost) {
+  border: 1px solid var(--collab-line);
+  background: transparent;
+  color: var(--collab-ink);
+  box-shadow: none;
+}
+
+:global(.modal).simpleCreateModal :global(.modal-footer) :global(.button-ghost):hover:not(:disabled) {
+  background: color-mix(in srgb, var(--collab-line) 40%, #fff);
 }

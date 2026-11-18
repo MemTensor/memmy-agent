@@ -1,4 +1,4 @@
-import { ArrowUpRight, AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Layers, Loader2, Link2, ListChecks, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, Pencil, Plug, RefreshCw, Search, Settings, Trash2, User, UserPlus, Users, X } from "lucide-react";
+import { ArrowUpRight, AtSign, BookOpen, ChevronDown, ChevronRight, Cloud, Folder, Layers, Loader2, ListChecks, MoreHorizontal, PanelRight, PanelRightClose, Plug, Plus, RefreshCw, Search, Settings, Trash2, User, UserPlus, Users, X } from "lucide-react";
 import { memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -1310,7 +1310,7 @@ const CollabBoard = memo(function CollabBoard(props: {
                       : t("collab.board.localOnly")}
                   </span>
                   <span className={styles.grow} />
-                  {/* 头部操作整块给足热区：按钮彼此只隔 6px，鼠标从「邀请」移到设置不会落到空处 */}
+                  {/* 头部操作整块给足热区：按钮彼此只隔 4px，鼠标从「邀请」移到设置不会落到空处 */}
                   <span className={styles.boardActions}>
                     {shared ? (
                       <Button
@@ -1464,10 +1464,16 @@ const CollabBoard = memo(function CollabBoard(props: {
                               <Button
                                 size="sm"
                                 variant="primary"
+                                onClick={() => onContinueTask(project.id, null)}
+                              >
+                                {t("collab.sessions.empty.task.title")}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="primary"
                                 data-demo-guide="board-associate"
                                 onClick={() => setPickOpen(true)}
                               >
-                                <Link2 size={14} aria-hidden="true" />
                                 {t("collab.associate")}
                               </Button>
                             </>
@@ -1527,23 +1533,29 @@ const CollabBoard = memo(function CollabBoard(props: {
                           </div>
                         </div>
                       ) : boardRows.length === 0 ? (
-                        // An empty project is the one place to explain the board: what a member can do with it.
-                        // 直接列出两种发起方式，不加「项目暂无任务」标题与一句解释：那两行只是重复工具条已经说清的事。
+                        /* 空项目只留一句说明：两个操作就嵌在这句话里，不摆图标、不铺两段解释。 */
                         <section className={`${styles.guide} ${styles.guideBare}`} aria-label={t("collab.sessions.empty.title")} data-demo-guide="board-list">
-                          <ul className={styles.guideList}>
-                            {([
-                              { key: "task", icon: <MessageSquarePlus size={15} aria-hidden="true" /> },
-                              { key: "associate", icon: <Link2 size={15} aria-hidden="true" /> }
-                            ] as const).map((item) => (
-                              <li key={item.key} className={styles.guideItem}>
-                                <span className={styles.guideIcon} aria-hidden="true">{item.icon}</span>
-                                <div className={styles.guideText}>
-                                  <b>{t(`collab.sessions.empty.${item.key}.title` as MessageKey)}</b>
-                                  <span>{t(`collab.sessions.empty.${item.key}.body` as MessageKey)}</span>
-                                </div>
-                              </li>
-                            ))}
-                          </ul>
+                          <p className={styles.guideEmptyLine}>
+                            {t("collab.sessions.empty.lineLead")}
+                            {" "}
+                            <button
+                              type="button"
+                              className={styles.guideEmptyAction}
+                              onClick={() => onContinueTask(project.id, null)}
+                            >
+                              {t("collab.sessions.empty.lineStart")}
+                            </button>
+                            {" "}
+                            {t("collab.sessions.empty.lineJoin")}
+                            {" "}
+                            <button
+                              type="button"
+                              className={styles.guideEmptyAction}
+                              onClick={() => setPickOpen(true)}
+                            >
+                              {t("collab.sessions.empty.lineLink")}
+                            </button>
+                          </p>
                         </section>
                       ) : (
                         <>
@@ -2147,7 +2159,7 @@ function ProjectConfigPanel(props: {
                 title={t("collab.config.instructionsEdit")}
                 onClick={props.onEdit}
               >
-                <Pencil size={13} aria-hidden="true" />
+                <Plus size={14} aria-hidden="true" />
               </button>
             ) : null}
           </div>
@@ -2170,29 +2182,34 @@ function ProjectConfigPanel(props: {
                 <button type="button" className={styles.configKnowledgeAction} onClick={props.onManageKnowledge}>
                   {t("collab.config.knowledgeManage")}
                 </button>
-              ) : null}
-            </div>
-            <div className={styles.configCardBody}>
-              {props.knowledge?.bases.length ? (
-                <>
-                  <ul className={styles.configKnowledgeList}>
-                    {props.knowledge.bases.slice(0, 3).map((base) => (
-                      <li key={base.id} className={styles.configKnowledgeRow}>
-                        <BookOpen size={12} aria-hidden="true" />
-                        <span className={styles.configKnowledgeName} title={base.name}>{base.name}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </>
               ) : (
-                <>
-                  <span className={styles.configEmpty}>{t("collab.config.knowledgeEmpty")}</span>
-                  <button type="button" className={styles.configKnowledgeMore} onClick={props.onAddKnowledge}>
-                    {t("collab.config.knowledgeAdd")}
-                  </button>
-                </>
+                <button
+                  type="button"
+                  className={styles.configIcon}
+                  aria-label={t("collab.config.knowledgeAdd")}
+                  title={t("collab.config.knowledgeAdd")}
+                  onClick={props.onAddKnowledge}
+                >
+                  <Plus size={14} aria-hidden="true" />
+                </button>
               )}
             </div>
+            {props.knowledge?.bases.length ? (
+              <div className={styles.configCardBody}>
+                <ul className={styles.configKnowledgeList}>
+                  {props.knowledge.bases.slice(0, 3).map((base) => (
+                    <li key={base.id} className={styles.configKnowledgeRow}>
+                      <BookOpen size={12} aria-hidden="true" />
+                      <span className={styles.configKnowledgeName} title={base.name}>{base.name}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <button type="button" className={styles.configCardBody} onClick={props.onAddKnowledge}>
+                <span className={styles.configEmpty}>{t("collab.config.knowledgeEmpty")}</span>
+              </button>
+            )}
           </section>
         ) : null}
       </div>

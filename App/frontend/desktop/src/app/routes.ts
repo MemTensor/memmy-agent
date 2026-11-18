@@ -169,8 +169,47 @@ function hasCompletedAccountGuide(session: AccountSessionView | undefined): bool
   return Boolean(session?.authenticated && session.profile.hasFinishedGuide);
 }
 
+/**
+ * Restores the completed guide state for an account that already finished it on another install.
+ *
+ * A reinstall removes the local data directory, so `account_onboarding_state` falls back to the
+ * new-machine defaults while the cloud still reports `hasFinishedGuide`. Neither of the two reset
+ * branches below covers that pair: one requires a locally completed state, the other requires an
+ * unfinished cloud guide. The installation-local first encounter report is skipped here for the
+ * same reason as the rest of onboarding, it belongs to the machine that already produced it.
+ *
+ * @returns the completed onboarding patch, or null when the account has not finished the guide.
+ */
+function restoreCompletedAccountOnboarding(
+  input: ReconcileInitialOnboardingInput
+): OnboardingStateDto | null {
+  const onboarding = input.bootstrap.onboarding;
+  if (
+    input.bootstrap.app.userMode !== "account" ||
+    !hasCompletedAccountGuide(input.accountSession) ||
+    onboarding.completed
+  ) {
+    return null;
+  }
+
+  return {
+    ...onboarding,
+    completed: true,
+    currentStep: "completed",
+    firstEncounterReportStatus: shouldShowFirstEncounterReport(onboarding)
+      ? "skipped"
+      : onboarding.firstEncounterReportStatus,
+    completedAt: onboarding.completedAt ?? new Date().toISOString()
+  };
+}
+
 /** Handles reconcile initial onboarding. */
 export function reconcileInitialOnboarding(input: ReconcileInitialOnboardingInput): AppBootstrapResponse {
+  const restoredOnboarding = restoreCompletedAccountOnboarding(input);
+  if (restoredOnboarding) {
+    return { ...input.bootstrap, onboarding: restoredOnboarding };
+  }
+
   const firstEncounterPending = shouldShowFirstEncounterReport(input.bootstrap.onboarding);
   if (firstEncounterPending && input.bootstrap.onboarding.completed) {
     const onboarding = input.bootstrap.app.userMode === "byok"
