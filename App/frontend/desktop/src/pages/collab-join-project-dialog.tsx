@@ -21,6 +21,8 @@ export function CollabJoinProjectDialog(props: {
   onJoined: (project: CollabProject) => void;
   /** 申请已提交。调用方把它放进侧边栏，显示项目名称和「申请中」。 */
   onApplied?: (application: { projectId: string; projectName: string }) => void;
+  /** 加入时改了昵称：调用方把账号状态一并更新，界面上的名字立刻跟着变。 */
+  onNicknameChanged?: (nickname: string) => void;
   /** 深链接带进来的邀请码：打开即预填并预览。 */
   initialReference?: string;
 }) {
@@ -41,6 +43,8 @@ export function JoinProjectModal(props: {
   onClose: () => void;
   onJoined: (project: CollabProject) => void;
   onApplied?: (application: { projectId: string; projectName: string }) => void;
+  /** 加入时改了昵称：调用方把账号状态一并更新，界面上的名字立刻跟着变。 */
+  onNicknameChanged?: (nickname: string) => void;
   /**
    * 带着邀请码打开：浏览器里的邀请链接经 memmy://invite/<code> 拉起桌面端时用。
    * 直接预填并预览，用户点开链接就是想加入，不必再粘贴一次。
@@ -116,6 +120,8 @@ export function JoinProjectModal(props: {
     try {
       const wanted = nickname.trim();
       const result = await props.collab.joinProject(reference.trim(), directory ?? undefined, wanted || undefined);
+      // 昵称已在云端写进去了：先把本地的账号状态改掉，界面上的名字不用等刷新。
+      if (wanted) props.onNicknameChanged?.(wanted);
       if (result.status === "pending") {
         props.onApplied?.({ projectId: result.projectId, projectName: preview.projectName });
         props.onClose();

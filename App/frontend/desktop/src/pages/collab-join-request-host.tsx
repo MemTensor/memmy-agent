@@ -12,7 +12,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { CollabClient, CollabManagedJoinRequest } from "../api/collab-client.js";
 import { Button } from "../components/button.js";
-import { Memmy } from "../components/mascot/memmy.js";
 import { Modal } from "../components/modal.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { memberColor } from "./collab-member-color.js";
@@ -146,9 +145,6 @@ export function CollabJoinRequestHost(props: {
         </>
       )}
     >
-      <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-        <Memmy pose="plead" size={64} />
-      </div>
       <div className={styles.person}>
         <span className={styles.avatar} style={{ background: memberColor(current.name) }} aria-hidden="true">
           {Array.from(current.name.trim())[0] ?? "?"}

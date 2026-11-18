@@ -2172,6 +2172,10 @@ export function AppFrame(props: AppFrameProps) {
           addPendingApplication(application);
           if (collabClient) void loadCollabProjects(collabClient);
         }}
+        onNicknameChanged={(nickname) => {
+          // 昵称已在云端更新，同步到本地 Redux state，侧边栏和标题栏立即显示新名字。
+          dispatch(appActions.accountUpdated({ nickname }));
+        }}
         onJoined={(project) => {
           setInviteLinkCode(null);
           if (project.localProjectId) {
