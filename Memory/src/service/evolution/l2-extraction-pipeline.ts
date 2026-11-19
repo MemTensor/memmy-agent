@@ -39,6 +39,14 @@ const LEASE_MS = 15 * 60_000;
 const MAX_L1_PER_BATCH = 5;
 const SOURCE = "worker.l2_extraction.v2";
 
+/** Current per-L1 admission only; no repeated cumulative evidence snapshots. */
+function sourceAdmissions(sources: L2Candidate[]) {
+  return Object.fromEntries(sources.map(source => [source.sourceMemoryId, {
+    routes: source.routes,
+    signals: source.signals.map(({ eventId, sourceBasis, feedbackId, repairId }) => ({ eventId, sourceBasis, feedbackId, repairId }))
+  }]));
+}
+
 /** Exact hashing: stableHash intentionally truncates long strings and cannot version full evidence. */
 function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -379,6 +387,8 @@ export class UnifiedL2ExtractionPipeline {
     const evidence = sources.filter((source) => operation.l1_ids.includes(source.sourceMemoryId));
     const updated = revisedL2Memory(current, lesson, operation.l1_ids,
       evidence.flatMap((source) => source.episodeId ? [source.episodeId] : []), at);
+    const revisedPolicy = updated.properties.internal_info.policy;
+    if (isRecord(revisedPolicy)) revisedPolicy.source_admissions = sourceAdmissions(evidence);
     updated.properties.internal_info.source_versions = Object.fromEntries(evidence.map((source) => [source.sourceMemoryId, source.sourceVersion]));
     await this.vectors([l2ComparisonText(updated)], "document", renew);
     // Use the same role/text as the existing retrieval embedding worker, not comparison text.
@@ -447,7 +457,9 @@ export class UnifiedL2ExtractionPipeline {
       ...sources.filter((source) => source.routes.some((route) => route !== "ordinary")).map((source) => source.sourceMemoryId)])];
     const successfulIds = [...new Set([...strings(policy.successful_source_trace_ids),
       ...sources.filter(ordinarySuccess).map((source) => source.sourceMemoryId)])].filter((id) => !specialIds.includes(id));
-    const fields = { support, source_memory_ids: traceIds, source_l1_memory_ids: traceIds, source_trace_ids: traceIds,
+    const fields = { support, source_admissions: {
+      ...(isRecord(policy.source_admissions) ? policy.source_admissions : {}), ...sourceAdmissions(sources)
+    }, source_memory_ids: traceIds, source_l1_memory_ids: traceIds, source_trace_ids: traceIds,
       source_episode_ids: episodeIds, special_source_trace_ids: specialIds, successful_source_trace_ids: successfulIds };
     const updated = this.deps.repos.memories.update({ ...memory, updatedAt: at,
       info: { ...memory.info, ...fields },
@@ -486,7 +498,7 @@ export class UnifiedL2ExtractionPipeline {
     const successfulIds = sources.filter(ordinarySuccess).map((candidate) => candidate.sourceMemoryId);
     const specialIds = sources.filter((candidate) => candidate.routes.some((route) => route !== "ordinary")).map((candidate) => candidate.sourceMemoryId);
     const confidenceCaps = signals.flatMap((signal) => typeof signal.confidenceCap === "number" ? [signal.confidenceCap] : []);
-    const fields = { schema_version: 2, content_revision: 1, lesson_type: lesson.type, support: episodeIds.length, gain: 0, raw_gain: 0,
+    const fields = { source_admissions: sourceAdmissions(sources), schema_version: 2, content_revision: 1, lesson_type: lesson.type, support: episodeIds.length, gain: 0, raw_gain: 0,
       status: "candidate", source_memory_ids: traceIds, source_l1_memory_ids: traceIds,
       source_trace_ids: traceIds, source_episode_ids: episodeIds, source_feedback_ids: feedbackIds, source_repair_ids: repairIds,
       successful_source_trace_ids: successfulIds, special_source_trace_ids: specialIds,

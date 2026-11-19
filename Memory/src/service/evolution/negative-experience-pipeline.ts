@@ -11,7 +11,8 @@ import type {
 } from "../../storage/repositories.js";
 import type { MemoryRow } from "../../types.js";
 import type { LlmClient } from "../../model/types.js";
-import { stableHash } from "../../utils/id.js";
+import { stableHash, stableStringify } from "../../utils/id.js";
+import { revisionInputHash, episodeGeneration, episodeRewardInputVersion } from "./episode-revision.js";
 import { isRecord } from "../../utils/json.js";
 import { clip } from "../../utils/text.js";
 import {
@@ -20,7 +21,7 @@ import {
 } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { synthesizeFailureExperienceSink } from "../feedback/feedback-experience.js";
-import { upsertL2Candidate, type L2CandidateSignal } from "./l2-candidate-service.js";
+import { upsertL2Candidate, withdrawEpisodeRewardCandidate, type L2CandidateSignal } from "./l2-candidate-service.js";
 
 const pipelineLogger = createMemoryLogger("pipeline");
 
@@ -58,6 +59,14 @@ interface NegativeExperienceDraft {
   evidenceStrength: number;
 }
 
+type NegativeContribution = Omit<NegativeExperienceDraft, "episode" | "sourceMemory" | "feedback" | "repair"> & {
+  sourceKey: string;
+  episodeId: string;
+  sourceMemoryId?: string;
+  feedbackId?: string;
+  repairId?: string;
+};
+
 export interface NegativeExperiencePipelineDeps {
   repos: Repositories;
   config: MemmyConfig;
@@ -82,59 +91,162 @@ export class NegativeExperiencePipeline {
       && !this.deps.config.algorithm.feedback.valueDistributionRepairEnabled
     ) return;
     if (this.deps.config.algorithm.l2Induction.mode === "unified") {
-      this.enqueueUnifiedCandidates(job);
+      this.deps.repos.transaction(() => this.enqueueUnifiedCandidates(job));
+      return;
+    }
+    const episode = job.episodeId ? this.deps.repos.runtime.getEpisode(job.episodeId) : undefined;
+    if (!episode || episode.userId !== job.userId || episode.status !== "closed") return;
+    if (typeof job.payload.episodeGeneration === "number" &&
+        job.payload.episodeGeneration !== episodeGeneration(episode)) return;
+    const source = negativeExperienceSource(job.payload.source);
+    if (!source) return;
+    if (source === "episode_reward" && typeof job.payload.rewardVersion === "string" &&
+        job.payload.rewardVersion !== revisionInputHash([episode.rTask, episode.rewardDetail])) return;
+    // Queue IDs and model wording are not the identity of an evidence source.
+    const sourceId = source === "negative_feedback" ? text(job.payload.feedbackId)
+      : source === "value_distribution" ? text(job.payload.repairId) : episode.id;
+    if (!sourceId) return;
+    const completionKey = `negative-source:v1:${stableHash(stableStringify([episode.userId, source, sourceId]))}`;
+    const inputVersion = this.inputVersion(job, episode);
+    const completed = this.deps.repos.runtime.getKv(completionKey)?.value;
+    if (isRecord(completed) && completed.inputVersion === inputVersion) return;
+    if (source === "episode_reward" && typeof episode.rTask === "number" &&
+        (episode.rewardDetail.skipped === true || episode.rTask > this.deps.config.algorithm.negativeExperience.failureRTaskThreshold)) {
+      this.deps.repos.transaction(() => {
+        const previous = isRecord(completed) && typeof completed.memoryId === "string"
+          ? this.deps.repos.memories.getIncludingDeleted(completed.memoryId) : undefined;
+        if (previous && !previous.deletedAt && ["activated", "resolving"].includes(previous.status)) {
+          this.withdrawContribution(job, previous, completionKey);
+        }
+        this.deps.repos.runtime.setKv(completionKey, { inputVersion, memoryId: previous?.id, withdrawn: true }, job.createdAt);
+      });
       return;
     }
     const draft = await this.buildDraft(job);
     if (!draft || !isActionableNegativeExperience(draft)) return;
+    this.deps.repos.transaction(() => {
+      const current = this.deps.repos.runtime.getEpisode(episode.id);
+      if (!current || current.status !== "closed" || this.inputVersion(job, current) !== inputVersion) {
+        throw new Error("Negative experience inputs changed during generation");
+      }
+      const latest = this.deps.repos.runtime.getKv(completionKey)?.value;
+      if (isRecord(latest) && latest.inputVersion === inputVersion) return;
+      const previous = isRecord(latest) && typeof latest.memoryId === "string"
+        ? this.deps.repos.memories.getIncludingDeleted(latest.memoryId) : undefined;
+      // A user deletion/archive wins over regeneration of that source.
+      const retirement = previous?.properties.internal_info.negative_retirement;
+      const ownRetirement = previous?.status === "archived" && isRecord(retirement) &&
+        retirement.sourceKey === completionKey && retirement.retiredVersion === previous.version &&
+        previous.properties.internal_info.negative_generated_hash === revisionInputHash(previous.memoryValue);
+      if (previous && (previous.deletedAt || (!ownRetirement && !["activated", "resolving"].includes(previous.status)))) return;
+      const memoryId = this.materializeDraft(job, draft, completionKey);
+      if (previous && previous.id !== memoryId) this.withdrawContribution(job, previous, completionKey);
+      this.deps.repos.runtime.setKv(completionKey, { inputVersion, memoryId }, job.createdAt);
+    });
+  }
 
+  private inputVersion(job: EvolutionJobRecord, episode: EpisodeRecord): string {
+    const feedbackId = text(job.payload.feedbackId);
+    const repairId = text(job.payload.repairId);
+    return revisionInputHash({
+      episode: episodeRewardInputVersion(this.deps.repos, episode),
+      reward: [episode.rTask, episode.rewardDetail, episode.meta.reward],
+      source: job.payload.source, issue: job.payload.issue, rewardReason: job.payload.rewardReason,
+      feedback: feedbackId ? this.deps.repos.runtime.getFeedback(feedbackId) : undefined,
+      repair: repairId ? this.deps.repos.runtime.getDecisionRepair(repairId) : undefined,
+      language: this.deps.config.language, config: this.deps.config.algorithm.negativeExperience,
+      model: [this.deps.skillLlm.config.provider, this.deps.skillLlm.config.model]
+    });
+  }
+
+  private materializeDraft(job: EvolutionJobRecord, draft: NegativeExperienceDraft, sourceKey: string,
+    replacement?: { memory: MemoryRow; contributions: NegativeContribution[] }): string {
     const config = this.deps.config.algorithm.negativeExperience;
-    const sourceTraceIds = draft.sourceTraceIds.slice(0, config.maxSourceIds);
     const signature = negativeExperienceSignature(draft);
     const scopeIdentity = [
       (draft.sourceMemory ? projectIdFromMemory(draft.sourceMemory) : undefined) ?? draft.episode.projectId ?? "",
       (draft.sourceMemory ? profileIdFromMemory(draft.sourceMemory) : undefined) ?? ""
     ].join(":");
     const key = `policy:avoid:${stableHash(`${scopeIdentity}:${signature}`).slice(0, 24)}`;
-    const existing = this.findExisting(draft, key);
+    let existing = replacement?.memory ?? this.findExisting(draft, key);
+    if (existing?.deletedAt || existing?.status === "deleted") {
+      throw new Error("Negative experience target was deleted by the user");
+    }
+    if (existing?.status === "archived") {
+      const retirement = existing.properties.internal_info.negative_retirement;
+      if (!isRecord(retirement) || retirement.retiredVersion !== existing.version ||
+          existing.properties.internal_info.negative_generated_hash !== revisionInputHash(existing.memoryValue)) {
+        throw new Error("Negative experience target was archived or edited by the user");
+      }
+      const { negative_retirement: _retirement, ...internal } = existing.properties.internal_info;
+      const status = retirement.previousStatus === "activated" ? "activated" : "resolving";
+      existing = this.deps.repos.memories.update({ ...existing, status,
+        properties: { ...existing.properties, status, internal_info: internal }, updatedAt: job.createdAt });
+    }
+    if (existing && !["activated", "resolving"].includes(existing.status)) throw new Error("Negative experience target is not active");
+    const storedHash = existing?.properties.internal_info.negative_generated_hash;
+    if (typeof storedHash === "string" && storedHash !== revisionInputHash(existing!.memoryValue)) {
+      throw new Error("Negative experience has user edits; preserve it for review");
+    }
+    const { episode, sourceMemory, feedback, repair, ...content } = draft;
+    const contribution: NegativeContribution = { ...content, sourceKey, episodeId: episode.id,
+      sourceMemoryId: sourceMemory?.id, feedbackId: feedback?.id, repairId: repair?.id };
+    const priorContributions = this.contributions(existing);
+    const contributions = replacement?.contributions ?? [
+      ...priorContributions.filter(item => item.sourceKey !== sourceKey), contribution
+    ];
+    // Legacy rows have no attributable per-source text: retain their aggregate until a reviewed migration.
+    const legacyAggregate = existing && !Array.isArray(existing.properties.internal_info.negative_contributions)
+      ? { policy: existing.properties.internal_info.policy,
+          eventIds: existing.properties.internal_info.source_event_ids,
+          repairIds: existing.properties.internal_info.source_repair_ids,
+          sources: existing.properties.internal_info.negative_experience_sources }
+      : existing?.properties.internal_info.negative_legacy_aggregate;
+    const hasLegacyAggregate = isRecord(legacyAggregate);
     const existingInternal: Record<string, unknown> = existing && isRecord(existing.properties.internal_info)
       ? existing.properties.internal_info
       : {};
-    const existingPolicy = isRecord(existingInternal.policy) ? existingInternal.policy : {};
+    const originalPolicy = isRecord(existingInternal.policy) ? existingInternal.policy : {};
+    const existingPolicy = hasLegacyAggregate && isRecord(legacyAggregate.policy) ? legacyAggregate.policy : { ...originalPolicy,
+      source_episode_ids: [], source_trace_ids: [], source_feedback_ids: [], decision_guidance: {} };
+    const gain = number(originalPolicy.gain) ?? 0;
+    const rawGain = number(originalPolicy.raw_gain) ?? 0;
+    const policyStatus = text(originalPolicy.status) ?? "candidate";
+    const knownFeedbackIds = new Set(priorContributions.flatMap(item => item.feedbackId ? [item.feedbackId] : []));
+    const independentFeedbackIds = stringArray(originalPolicy.source_feedback_ids).filter(id => !knownFeedbackIds.has(id));
     const sourceEventIds = cappedDistinct(
-      [...stringArray(existingInternal.source_event_ids), draft.sourceEventId],
+      [...(hasLegacyAggregate ? stringArray(legacyAggregate.eventIds) : []), ...contributions.map(item => item.sourceEventId)],
       config.maxSourceIds
     );
-    if (stringArray(existingInternal.source_event_ids).includes(draft.sourceEventId)) return;
 
     const mergedEpisodeIds = cappedDistinct(
-      [...stringArray(existingPolicy.source_episode_ids), draft.episode.id],
+      [...stringArray(existingPolicy.source_episode_ids), ...contributions.map(item => item.episodeId)],
       config.maxSourceIds
     );
     const mergedTraceIds = cappedDistinct(
-      [...stringArray(existingPolicy.source_trace_ids), ...sourceTraceIds],
+      [...stringArray(existingPolicy.source_trace_ids), ...contributions.flatMap(item => item.sourceTraceIds)],
       config.maxSourceIds
     );
     const mergedFeedbackIds = cappedDistinct(
       [
-        ...stringArray(existingPolicy.source_feedback_ids),
-        ...(draft.feedback ? [draft.feedback.id] : [])
+        ...stringArray(existingPolicy.source_feedback_ids), ...independentFeedbackIds,
+        ...contributions.flatMap(item => item.feedbackId ? [item.feedbackId] : [])
       ],
       config.maxSourceIds
     );
     const mergedRepairIds = cappedDistinct(
       [
-        ...stringArray(existingInternal.source_repair_ids),
-        ...(draft.repair ? [draft.repair.id] : [])
+        ...(hasLegacyAggregate ? stringArray(legacyAggregate.repairIds) : []),
+        ...contributions.flatMap(item => item.repairId ? [item.repairId] : [])
       ],
       config.maxSourceIds
     );
     const antiPatterns = cappedDistinct(
-      [...decisionGuidance(existingPolicy, "anti_pattern"), draft.antiPattern],
+      [...decisionGuidance(existingPolicy, "anti_pattern"), ...contributions.map(item => item.antiPattern)],
       config.maxAntiPatterns
     );
     const preferences = cappedDistinct(
-      [...decisionGuidance(existingPolicy, "preference"), draft.preference],
+      [...decisionGuidance(existingPolicy, "preference"), ...contributions.map(item => item.preference)],
       config.maxPreferences
     );
     const support = Math.max(1, mergedEpisodeIds.length);
@@ -150,7 +262,7 @@ export class NegativeExperiencePipeline {
       verification: draft.verification,
       boundary: draft.boundary,
       support,
-      confidence: draft.confidence
+      confidence: draft.confidence, gain, rawGain
     });
     const policy = {
       ...existingPolicy,
@@ -160,12 +272,12 @@ export class NegativeExperiencePipeline {
       verification: draft.verification,
       boundary: draft.boundary,
       support,
-      gain: 0,
-      raw_gain: 0,
+      gain,
+      raw_gain: rawGain,
       policy_confidence: draft.confidence,
       evidence_strength: draft.evidenceStrength,
       salience: draft.salience,
-      status: "candidate",
+      status: policyStatus,
       experience_type: draft.experienceType,
       evidence_polarity: "negative",
       source_cohort: "neg_episode",
@@ -194,7 +306,7 @@ export class NegativeExperiencePipeline {
       profileId: draft.sourceMemory ? profileIdFromMemory(draft.sourceMemory) : undefined,
       layer: "L2",
       kind: "policy",
-      lifecycleStatus: "candidate",
+      lifecycleStatus: existing?.status === "activated" ? "active" : "candidate",
       memoryType: "LongTermMemory",
       key: existing?.memoryKey ?? key,
       value: body,
@@ -202,11 +314,11 @@ export class NegativeExperiencePipeline {
       info: {
         signature,
         support,
-        gain: 0,
-        raw_gain: 0,
+        gain,
+        raw_gain: rawGain,
         policy_confidence: draft.confidence,
         evidence_strength: draft.evidenceStrength,
-        status: "candidate",
+        status: policyStatus,
         source_episode_ids: mergedEpisodeIds,
         source_trace_ids: mergedTraceIds,
         source_feedback_ids: mergedFeedbackIds,
@@ -216,6 +328,10 @@ export class NegativeExperiencePipeline {
         is_caveat: true
       },
       internal: {
+        ...existingInternal,
+        ...(hasLegacyAggregate ? { negative_legacy_aggregate: legacyAggregate } : {}),
+        negative_contributions: contributions,
+        negative_generated_hash: revisionInputHash(body),
         source: "worker.negative_experience.v1",
         plugin_algorithm: "negative_experience.v1",
         source_event_ids: sourceEventIds,
@@ -224,7 +340,7 @@ export class NegativeExperiencePipeline {
         source_feedback_ids: mergedFeedbackIds,
         source_repair_ids: mergedRepairIds,
         negative_experience_sources: cappedDistinct(
-          [...stringArray(existingInternal.negative_experience_sources), draft.source],
+          [...(hasLegacyAggregate ? stringArray(legacyAggregate.sources) : []), ...contributions.map(item => item.source)],
           config.maxSourceIds
         ),
         policy
@@ -265,12 +381,66 @@ export class NegativeExperiencePipeline {
         createdAt: job.createdAt
       });
     }
+    return upsert.memory.id;
+  }
+
+  private contributions(memory?: MemoryRow): NegativeContribution[] {
+    const value = memory?.properties.internal_info.negative_contributions;
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is NegativeContribution => isRecord(item) &&
+      typeof item.sourceKey === "string" && typeof item.episodeId === "string" &&
+      typeof item.title === "string" && typeof item.antiPattern === "string" &&
+      typeof item.preference === "string" && Array.isArray(item.sourceTraceIds));
+  }
+
+  private withdrawContribution(job: EvolutionJobRecord, previous: MemoryRow, sourceKey: string): void {
+    const contributions = this.contributions(previous);
+    if (!contributions.some(item => item.sourceKey === sourceKey)) return;
+    const hash = previous.properties.internal_info.negative_generated_hash;
+    if (typeof hash !== "string" || hash !== revisionInputHash(previous.memoryValue)) {
+      throw new Error("Negative experience withdrawal would overwrite user edits");
+    }
+    if (isRecord(previous.properties.internal_info.negative_legacy_aggregate)) {
+      throw new Error("Legacy negative aggregate cannot be safely separated without review");
+    }
+    const remaining = contributions.filter(item => item.sourceKey !== sourceKey);
+    if (remaining.length) {
+      const latest = remaining.at(-1)!;
+      const episode = this.deps.repos.runtime.getEpisode(latest.episodeId);
+      if (!episode) throw new Error("Negative experience remaining source is missing");
+      this.materializeDraft(job, { ...latest, episode,
+        sourceMemory: latest.sourceMemoryId ? this.deps.repos.memories.get(latest.sourceMemoryId) : undefined,
+        feedback: latest.feedbackId ? this.deps.repos.runtime.getFeedback(latest.feedbackId) : undefined,
+        repair: latest.repairId ? this.deps.repos.runtime.getDecisionRepair(latest.repairId) : undefined
+      }, latest.sourceKey, { memory: previous, contributions: remaining });
+      return;
+    }
+    const policy = isRecord(previous.properties.internal_info.policy) ? previous.properties.internal_info.policy : {};
+    const attributableFeedback = new Set(contributions.flatMap(item => item.feedbackId ? [item.feedbackId] : []));
+    if (stringArray(policy.source_feedback_ids).some(id => !attributableFeedback.has(id))) {
+      throw new Error("Negative experience has independent feedback; preserve it for review");
+    }
+    const retired = this.deps.repos.memories.update({ ...previous, status: "archived",
+      properties: { ...previous.properties, status: "archived", internal_info: {
+        ...previous.properties.internal_info, negative_contributions: [],
+        negative_retirement: { sourceKey, retiredVersion: previous.version + 1, previousStatus: previous.status }
+      } }, updatedAt: job.createdAt });
+    this.deps.repos.runtime.appendChange({ memoryId: previous.id, entityId: previous.id,
+      namespaceId: this.deps.namespaceIdFromMemory(previous), userId: previous.userId,
+      kind: "policy", op: "updated", changeType: "negative_source_replaced",
+      before: previous, after: retired, source: "worker.negative_experience.v1", createdAt: job.createdAt });
   }
 
   private enqueueUnifiedCandidates(job: EvolutionJobRecord): void {
     const source = negativeExperienceSource(job.payload.source);
     const episode = job.episodeId ? this.deps.repos.runtime.getEpisode(job.episodeId) : undefined;
     if (!source || !episode || episode.userId !== job.userId) return;
+    if (source === "episode_reward" && typeof job.payload.rewardVersion === "string" &&
+        job.payload.rewardVersion !== revisionInputHash([episode.rTask, episode.rewardDetail])) return;
+    // Explicit corrections have their own identity and remain valid when a task reopens.
+    if (source !== "negative_feedback" && (episode.status !== "closed" ||
+        (typeof job.payload.episodeGeneration === "number" &&
+          job.payload.episodeGeneration !== episodeGeneration(episode)))) return;
     const feedbackId = text(job.payload.feedbackId);
     const repairId = text(job.payload.repairId);
     const feedback = feedbackId ? this.deps.repos.runtime.getFeedback(feedbackId) : undefined;
@@ -296,6 +466,19 @@ export class NegativeExperiencePipeline {
       });
       return;
     }
+    if (source === "episode_reward" && typeof episode.rTask === "number" &&
+        (episode.rewardDetail.skipped === true || episode.rTask > this.deps.config.algorithm.negativeExperience.failureRTaskThreshold)) {
+      for (const { memory } of sources) {
+        const candidate = withdrawEpisodeRewardCandidate(this.deps.repos, {
+          sourceMemoryId: memory.id, userId: job.userId, episodeId: episode.id, at: job.createdAt
+        });
+        if (candidate?.status === "pending") this.deps.enqueueJob({ jobType: "l2_induction", userId: job.userId,
+          sessionId: episode.sessionId, episodeId: episode.id, targetMemoryId: memory.id,
+          dedupeKey: `l2.unified.withdraw:${candidate.id}:${candidate.sourceVersion}`,
+          payload: { unified: true, reason: "negative.reward_withdrawn" }, createdAt: job.createdAt });
+      }
+      return;
+    }
     const sourceIds = new Set(sources.map(({ memory }) => memory.id));
     const rawIds = new Set(sources.map(({ trace }) => trace.rawTurnId).filter(Boolean));
     const rawTurns = this.deps.repos.runtime.listRawTurnsByEpisode(episode.id)
@@ -306,7 +489,9 @@ export class NegativeExperiencePipeline {
       ?? text(episode.rewardDetail.reason)
       ?? text(isRecord(episode.meta.reward) ? episode.meta.reward.reason : undefined);
     const signal: L2CandidateSignal = {
-      eventId: text(job.payload.sourceEventId) ?? job.id,
+      eventId: source === "negative_feedback" ? feedback!.id
+        : source === "episode_reward" ? episode.id
+        : `negative:${source}:${repair?.id ?? episode.id}`,
       route: "negative",
       feedbackId: feedback?.id,
       repairId: repair?.id,
@@ -452,7 +637,7 @@ export class NegativeExperiencePipeline {
 
   private findExisting(draft: NegativeExperienceDraft, key: string): MemoryRow | undefined {
     void draft;
-    return this.deps.repos.memories.getByKey("L2", key);
+    return this.deps.repos.memories.getByKeyIncludingDeleted("L2", key);
   }
 }
 
@@ -525,6 +710,8 @@ function renderNegativeExperienceBody(input: {
   boundary: string;
   support: number;
   confidence: number;
+  gain?: number;
+  rawGain?: number;
 }): string {
   return [
     input.title,
@@ -534,8 +721,8 @@ function renderNegativeExperienceBody(input: {
     `Verification: ${input.verification}`,
     `Boundary: ${input.boundary}`,
     `Support: ${input.support}`,
-    "Gain: 0",
-    "Raw gain: 0",
+    `Gain: ${input.gain ?? 0}`,
+    `Raw gain: ${input.rawGain ?? 0}`,
     `Confidence: ${input.confidence}`
   ].join("\n");
 }

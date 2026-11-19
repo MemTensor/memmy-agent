@@ -1,3 +1,5 @@
+import { Repositories } from "../../../src/storage/repositories.js";
+import { initialPolicyContributions, revisePolicySources } from "../../../src/service/evolution/episode-contributions.js";
 import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
 import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { join } from "node:path";
@@ -26,6 +28,133 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / evolution / skill lifecycle", () => {
+  it.each(["plain", "trial", "multiple", "invalid", "race"] as const)("MEMMY-647 preserves contribution history through generation: %s", async scenario => {
+    const race = scenario === "race";
+    const config = structuredClone(LEGACY_TEST_CONFIG);
+    config.algorithm.skill.minSupport = 1;
+    config.algorithm.skill.cooldownMs = 0;
+    const base = createSkillRebuildLlm();
+    let duringGeneration: (() => void) | undefined;
+    const skillLlm: LlmClient = { ...base, async completeJson(messages, options) {
+      duringGeneration?.();
+      return base.completeJson(messages, options);
+    } };
+    const { db, service } = createTestService({ config, skillLlm });
+    const repos = new Repositories(db.db);
+    const userId = `647-crystallize-${race}`;
+    const session = service.openSession({ namespace: { source: "codex", profileId: "jiang", userId }, workspaceId: "647-baseline" });
+    const complete = await service.completeTurn(`turn-${userId}`, { sessionId: session.sessionId,
+      query: "python pytest inspect failure retry after fixing issue",
+      answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result." });
+    makeTraceEligibleForL2(db, complete.l1MemoryId);
+    insertActivePolicyMemory(db, { id: "policy_647_baseline", userId, sessionId: session.sessionId, agentId: "codex",
+      appId: "647-baseline", profileId: "jiang", sourceTraceId: complete.l1MemoryId, sourceEpisodeId: assignedEpisodeId(service, complete) });
+    const contributions = revisePolicySources(initialPolicyContributions(0.2, 1, 0.4, 0.5),
+      [{ id: assignedEpisodeId(service, complete), supportValues: [1], referenceValues: [] }], 0.2);
+    const row = repos.memories.get("policy_647_baseline")!;
+    repos.memories.update({ ...row, properties: { ...row.properties, internal_info: { ...row.properties.internal_info,
+      policy: { ...(row.properties.internal_info.policy as Record<string, unknown>), support: 1, gain: contributions.lastGain,
+        gain_contributions: contributions } } } });
+    db.db.prepare("UPDATE evolution_jobs SET status = 'succeeded'").run();
+    if (race) duringGeneration = () => {
+      duringGeneration = undefined;
+      const current = repos.memories.get(row.id)!;
+      repos.memories.update({ ...current, properties: { ...current.properties, internal_info: { ...current.properties.internal_info,
+        policy: { ...(current.properties.internal_info.policy as Record<string, unknown>), gain: 0.1 } } } });
+    };
+    queueSkillCrystallizationJobForTest(db, { id: "job_647_baseline", userId, sessionId: session.sessionId,
+      episodeId: assignedEpisodeId(service, complete), policyId: row.id });
+    await service.runWorkerOnce(10);
+    const skills = repos.memories.list({ memoryLayer: "Skill" }, 100);
+    if (race) {
+      expect(repos.runtime.getJob("job_647_baseline")?.status).toBe("failed");
+      expect(skills).toHaveLength(0);
+    } else {
+      expect(repos.runtime.getJob("job_647_baseline")?.status).toBe("succeeded");
+      expect(skills).toHaveLength(1);
+      expect(skills[0]!.properties.internal_info.skill).toMatchObject({
+        eta: 0.66, eta_policy_baseline: { policyId: row.id, policyRevision: 1, through: 1 },
+        eta_contributions: { baseline: { eta: 0.66, attempts: 0, passes: 0 }, order: [] }
+      });
+      db.db.prepare("UPDATE memories SET tags_json = ? WHERE id = ?").run(JSON.stringify(["python","pytest","warmup"]), complete.l1MemoryId);
+      queueSkillCrystallizationJobForTest(db, {id: "review_warmup", userId, sessionId: session.sessionId, episodeId: assignedEpisodeId(service,complete),policyId:row.id});
+      await service.runWorkerOnce(10);
+      expect(repos.runtime.getJob("review_warmup")?.status).toBe("succeeded");
+      const originalObserved = repos.memories.get(skills[0]!.id)!;
+      const rawObserved = originalObserved.properties.internal_info.skill as Record<string, unknown>;
+      const noBaseline = { ...originalObserved, properties: { ...originalObserved.properties, internal_info: { ...originalObserved.properties.internal_info,
+        skill: { ...rawObserved, eta_policy_baseline: undefined, eta_contributions: undefined, eta_policy_observations: undefined } } } };
+      repos.memories.update(noBaseline);
+      const { SkillPipeline } = await import("../../../src/service/evolution/skill-pipeline.js");
+      const { policyMetaFromMemory } = await import("../../../src/algorithm/plugin-algorithms.js");
+      const unexpected = () => { throw new Error("unexpected dependency"); };
+      const driftPipeline = new SkillPipeline({repos, config, skillLlm, traceMeta:()=>null,buildMemory:unexpected,upsertEvolutionMemory:unexpected,isArchivedEvolutionMemory:()=>false,enqueueJob:unexpected,namespaceIdFromMemory:()=>"test"});
+      driftPipeline.applySkillRewardDriftForPolicy(policyMetaFromMemory(repos.memories.get(row.id)!)!,new Date().toISOString());
+      if (scenario === "multiple") {
+        const second = repos.memories.get(row.id)!;
+        repos.memories.insert({ ...second, id: "policy_647_second", memoryKey: "policy_647_second" });
+        const current = repos.memories.get(originalObserved.id)!;
+        repos.memories.update({ ...current, properties: { ...current.properties, internal_info: { ...current.properties.internal_info,
+          skill: { ...current.properties.internal_info.skill as Record<string, unknown>, source_policy_ids: [row.id, "policy_647_second"] } } } });
+        driftPipeline.applySkillRewardDriftForPolicy(policyMetaFromMemory(repos.memories.get("policy_647_second")!)!, new Date().toISOString());
+      }
+      if (scenario === "trial") {
+        const { SkillTrialResolver } = await import("../../../src/service/trials/skill-trial-resolver.js");
+        const resolver = new SkillTrialResolver({ repos, config, requireRawTurn: unexpected, assertRawTurnInScope: unexpected,
+          requireExistingMemory: unexpected, assertMemoryInScope: unexpected, traceMeta: () => null, feedbackTargetFromRawTurn: () => undefined });
+        const at = new Date(Date.now() + 1000).toISOString();
+        const trial = repos.runtime.insertSkillTrial({ id: "647-retained-trial", userId: originalObserved.userId,
+          skillMemoryId: originalObserved.id, status: "pass", outcome: "success", createdAt: at, resolvedAt: at });
+        resolver.updateSkillTrialStats(trial, at);
+      }
+      if (scenario === "invalid") {
+        const current = repos.memories.get(originalObserved.id)!;
+        repos.memories.update({ ...current, properties: { ...current.properties, internal_info: { ...current.properties.internal_info,
+          skill: { ...current.properties.internal_info.skill as Record<string, unknown>, eta_policy_observations: { bad: { schemaVersion: 815 } } } } } });
+      }
+      const beforeRegeneration = repos.memories.get(originalObserved.id)!;
+      const observed = (repos.memories.get(originalObserved.id)!.properties.internal_info.skill as Record<string,unknown>).eta_contributions;
+      expect(observed).toBeDefined();
+      db.db.prepare("UPDATE memories SET tags_json = ? WHERE id = ?").run(JSON.stringify(["python","pytest","new-evidence"]), complete.l1MemoryId);
+      queueSkillCrystallizationJobForTest(db, {id: "review_unchanged", userId, sessionId: session.sessionId, episodeId: assignedEpisodeId(service,complete),policyId:row.id});
+      await service.runWorkerOnce(10);
+      if (scenario === "invalid") {
+        expect(repos.runtime.getJob("review_unchanged")?.status).toBe("failed");
+        expect(repos.memories.get(originalObserved.id)).toEqual(beforeRegeneration);
+        db.close();
+        return;
+      }
+      expect(repos.runtime.getJob("review_unchanged")?.status).toBe("succeeded");
+      const afterObserved = repos.memories.get(originalObserved.id)!;
+      expect(afterObserved.memoryValue).toBe(originalObserved.memoryValue);
+      expect(afterObserved.properties.internal_info.skill).toHaveProperty("eta_contributions",observed);
+      const preserved = beforeRegeneration.properties.internal_info.skill as Record<string, unknown>;
+      expect(afterObserved.properties.internal_info.skill).toMatchObject({ eta: preserved.eta,
+        trials_attempted: preserved.trials_attempted, trials_passed: preserved.trials_passed,
+        eta_policy_observations: preserved.eta_policy_observations });
+      driftPipeline.applySkillRewardDriftForPolicy(policyMetaFromMemory(repos.memories.get(row.id)!)!, new Date().toISOString());
+      expect(repos.memories.get(originalObserved.id)).toEqual(afterObserved);
+      const original = skills[0]!;
+      const rawSkill = original.properties.internal_info.skill as Record<string, unknown>;
+      repos.memories.update({ ...original, properties: { ...original.properties, internal_info: { ...original.properties.internal_info,
+        skill: { ...rawSkill, eta: 0.91, trials_attempted: 10, trials_passed: 9 } } } });
+      const oldPolicy = repos.memories.get(row.id)!;
+      repos.memories.update({ ...oldPolicy, properties: { ...oldPolicy.properties, internal_info: { ...oldPolicy.properties.internal_info,
+        policy: { ...(oldPolicy.properties.internal_info.policy as Record<string, unknown>), content_revision: 2,
+          procedure: "Inspect pytest failure, apply a focused fix, and verify the retry result." } } } });
+      queueSkillCrystallizationJobForTest(db, { id: "job_647_new_body", userId, sessionId: session.sessionId,
+        episodeId: assignedEpisodeId(service, complete), policyId: row.id });
+      await service.runWorkerOnce(10);
+      expect(repos.runtime.getJob("job_647_new_body")?.status).toBe("succeeded");
+      expect(repos.memories.get(original.id)?.properties.internal_info.skill).toMatchObject({
+        eta: 0.66, trials_attempted: 0, trials_passed: 0,
+        eta_policy_baseline: { policyId: row.id, policyRevision: 2 },
+        eta_contributions: { baseline: { eta: 0.66, attempts: 0, passes: 0 }, order: [] }
+      });
+    }
+    db.close();
+  });
+
   it("[BC-24] keeps scanned and memory.add Skills immutable while updating only a memory-generated Skill", async () => {
     const { db, service } = createTestService({ skillLlm: createSkillRebuildLlm() });
     const userId = "bc-24-user";
@@ -304,8 +433,18 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     db.close();
   });
 
-  it("[BC-19] merges compatible skills in place and preserves all policy sources", async () => {
-    const { db, service } = createTestService({ skillLlm: createSkillRebuildLlm() });
+  it.each(["success", "generation_failure", "alias_commit_failure", "concurrent_edit", "dependency_change"] as const)("[BC-19] merges compatible skills atomically: %s", async scenario => {
+    const reject = scenario !== "success";
+    let duringGeneration: (() => void) | undefined;
+    const base = createSkillRebuildLlm();
+    const skillLlm: LlmClient = { ...base, async completeJson(messages, options) {
+      if (options.operation === "skill.rebuild.v6") {
+        duringGeneration?.();
+        if (scenario === "generation_failure") throw new Error("injected merge generation failure");
+      }
+      return base.completeJson(messages, options);
+    } };
+    const { db, service } = createTestService({ skillLlm });
     const userId = "user-compatible-skill-merge";
     const session = service.openSession({
       namespace: {
@@ -379,6 +518,19 @@ describe("MemoryService / evolution / skill lifecycle", () => {
         }]
       }
     });
+    let beforeMerge = db.db.prepare("SELECT id, status, memory_value, properties_json FROM memories WHERE memory_layer = 'Skill' ORDER BY id").all();
+    if (scenario === "alias_commit_failure") db.db.exec("CREATE TRIGGER fail_alias BEFORE UPDATE ON memories WHEN NEW.id = 'skill-compatible-b' AND NEW.status = 'archived' BEGIN SELECT RAISE(ABORT, 'injected alias failure'); END");
+    if (scenario === "dependency_change") duringGeneration = () => {
+      insertActivePolicyMemory(db, { id: "policy-source-b", userId, sessionId: session.sessionId, agentId: "codex",
+        appId: "workspace-compatible-skill-merge", profileId: "jiang", sourceTraceId: complete.l1MemoryId,
+        sourceEpisodeId: assignedEpisodeId(service, complete) });
+    };
+    if (scenario === "concurrent_edit") duringGeneration = () => {
+      const repos = new Repositories(db.db);
+      const alias = repos.memories.get("skill-compatible-b")!;
+      repos.memories.update({ ...alias, memoryValue: "Independent user edit" });
+      beforeMerge = db.db.prepare("SELECT id, status, memory_value, properties_json FROM memories WHERE memory_layer = 'Skill' ORDER BY id").all();
+    };
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
     queueSkillCrystallizationJobForTest(db, {
       id: "job-compatible-skill-merge",
@@ -389,6 +541,12 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     });
 
     await service.runWorkerOnce(20);
+    if (reject) {
+      expect(db.db.prepare("SELECT id, status, memory_value, properties_json FROM memories WHERE memory_layer = 'Skill' ORDER BY id").all()).toEqual(beforeMerge);
+      expect(new Repositories(db.db).runtime.getJob("job-compatible-skill-merge")?.status).toBe("failed");
+      db.close();
+      return;
+    }
 
     const rows = db.db.prepare(
       `SELECT id, status, properties_json

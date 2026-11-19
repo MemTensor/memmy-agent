@@ -110,6 +110,33 @@ export function upsertL2Candidate(repos: Repositories, input: UpsertL2CandidateI
   });
 }
 
+/** Retract only the task's inferred failure; feedback and repair signals keep their own identity. */
+export function withdrawEpisodeRewardCandidate(repos: Repositories, input: {
+  sourceMemoryId: string; userId: string; episodeId: string; at: string;
+}): L2Candidate | null {
+  return repos.transaction(() => {
+    const id = `l2c_${hash([input.userId, input.sourceMemoryId])}`;
+    const row = repos.runtime.getUnifiedL2Candidate(id, input.userId);
+    const previous = candidateEvidence(row?.evidence);
+    if (!row || !previous || previous.episodeId !== input.episodeId) return null;
+    const signals = previous.signals.filter(signal => !(signal.route === "negative" && !signal.feedbackId && !signal.repairId &&
+      (signal.eventId === input.episodeId || signal.sourceBasis === "implicit_failure_analysis")));
+    if (signals.length === previous.signals.length) return null;
+    const source = readSource(repos, input.sourceMemoryId, input.userId);
+    if (!source || source.episodeId !== input.episodeId) return null;
+    const routes = previous.routes.filter(route => route !== "negative" || signals.some(signal => signal.route === route));
+    const sourceVersion = sourceVersionFor(source.memory, source.episodeId, signals);
+    repos.runtime.upsertUnifiedL2Candidate({ ...row, evidence: {
+      schemaVersion: 2, episodeId: source.episodeId, routes, signals, sourceVersion
+    }, updatedAt: input.at });
+    if (!routes.length) {
+      repos.runtime.rejectUnifiedL2Candidate(id, input.userId, sourceVersion, input.at);
+      return null;
+    }
+    return toCandidate(repos.runtime.getUnifiedL2Candidate(id, input.userId)!, source.memory);
+  });
+}
+
 /** No ordinary-route value/vector gate is reapplied to admitted special-route evidence. */
 export function listL2Candidates(repos: Repositories, input: {
   userId: string;
