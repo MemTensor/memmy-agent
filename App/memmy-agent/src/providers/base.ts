@@ -606,16 +606,17 @@ export abstract class LLMProvider {
         return response;
       }
 
+      if (retryMode === "standard" && attempt >= LLMProvider.CHAT_RETRY_DELAYS.length) {
+        await onRetryWait?.(`Model request failed after ${LLMProvider.CHAT_RETRY_DELAYS.length + 1} attempts, giving up.`);
+        return response;
+      }
+
       const delay =
         LLMProvider.extractRetryAfterFromResponse(response) ??
         (retryMode === "persistent"
           ? Math.min(LLMProvider.PERSISTENT_MAX_DELAY, LLMProvider.CHAT_RETRY_DELAYS[Math.min(attempt, LLMProvider.CHAT_RETRY_DELAYS.length - 1)])
           : LLMProvider.CHAT_RETRY_DELAYS[attempt]);
 
-      if (delay == null) {
-        await onRetryWait?.(`Model request failed after ${LLMProvider.CHAT_RETRY_DELAYS.length + 1} retries, giving up.`);
-        return response;
-      }
       const retryAttempt = attempt + 1;
       await onRetryWait?.(`Model request failed, retrying attempt ${retryAttempt} in ${delay}s...`);
       await this.sleepWithHeartbeat(delay, (message) => onRetryWait?.(`Retry attempt ${retryAttempt}: ${message}`));

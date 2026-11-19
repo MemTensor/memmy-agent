@@ -1,6 +1,7 @@
 import type { EventCaptureSubscription, CaptureCheckpoint, CaptureRange } from "./event-capture-source.js";
 import { CaptureCoverageGaps } from "./coverage-gaps.js";
 import { persistedCheckpoint, type PersistedCheckpoint } from "./recorder-checkpoint.js";
+import { SummaryRetries, SUMMARY_RETRY_INTERVAL_MS, SUMMARY_MAX_ATTEMPTS } from "./summary-retry.js";
 import { CONTINUOUS_RECORDER_CAPABILITY, rotateRecorderOutput } from "./recorder-rotation.js";
 import type { HistoryPlatformDriver, HistoryPermissions, HistoryPermission } from "./platform-driver.js";
 import { collectorGate, CollectorBusyError } from "./collector-gate.js";
@@ -275,6 +276,7 @@ function completeRawEvidence(raw: Buffer): string {
 }
 // How many preceding windows the model is shown, so it can relate this one to them.
 const PRIOR_SUMMARY_COUNT = 2;
+const SUMMARY_BACKFILL_BATCH_SIZE = 5;
 // Reads retry every poll; only this many failures in a row ask the user to reconnect.
 const WECHAT_READ_FAILURES_BEFORE_ERROR = 4;
 // The saved keys no longer open the databases, so retrying cannot recover.
@@ -668,6 +670,8 @@ export class ComputerHistoryDemoService {
   /** Coalesce only an active pass, so failures remain eligible for retry. */
   private backfill: Promise<number> | null = null;
   private summaryRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly summaryRetries: SummaryRetries;
+  private summaryAttempts = 0;
   private shuttingDown = false;
   /** A deletion or a newer input invalidates every older model response. */
   private readonly summaryVersions = new Map<string, number>();
@@ -741,6 +745,7 @@ export class ComputerHistoryDemoService {
     const memmyHome = process.env.MEMMY_HOME?.trim() || path.join(os.homedir(), ".memmy");
     this.historyDirectory = path.resolve(input.historyDirectory
       ?? path.join(memmyHome, "computer-history", "histories"));
+    this.summaryRetries = new SummaryRetries(path.join(this.historyDirectory, ".summary-retries.json"));
     this.recordingDirectory = path.resolve(input.recordingDirectory
       ?? path.join(memmyHome, "computer-history", "recordings"));
     this.workflowDirectory = path.resolve(input.workflowDirectory
@@ -1466,9 +1471,17 @@ export class ComputerHistoryDemoService {
     llmRuntime: LLMRuntimeResolver | null,
     source: "account" | "byok" | null = null,
     unavailableReason: string | null = null,
+    retryScope?: string,
   ): void {
     this.modelSource = source;
     if (this.llmRuntime !== llmRuntime) {
+      if (llmRuntime) {
+        try { this.summaryRetries.setModel(retryScope, this.llmRuntime !== null); }
+        catch (error) {
+          this.setNarrationError(error instanceof Error ? error.message : String(error));
+          return;
+        }
+      }
       this.backfill = null;
       this.summaryJobs.clear();
       this.narratedOpenSegments.clear();
@@ -1499,13 +1512,13 @@ export class ComputerHistoryDemoService {
       this.summaryRetryTimer = setTimeout(() => {
         this.summaryRetryTimer = null;
         this.retrySummariesInBackground();
-      }, 60_000);
+      }, SUMMARY_RETRY_INTERVAL_MS);
       this.summaryRetryTimer.unref();
     });
   }
 
   /**
-   * Writes every machine summary the model never got to.
+   * Writes a bounded batch of machine summaries the model never got to.
    *
    * A summary is only shown once written, so one the model never reached is not
    * merely plainer — it is absent from the timeline. That covers summaries from
@@ -1514,7 +1527,12 @@ export class ComputerHistoryDemoService {
    * so a backlog does not go out as a burst of concurrent requests.
    */
   async backfillUnwrittenSummaries(): Promise<number> {
-    if (!this.llmRuntime) return 0;
+    if (!this.llmRuntime || this.shuttingDown) return 0;
+    try { if (Date.now() < this.summaryRetries.retryAt) return 0; }
+    catch (error) {
+      this.setNarrationError(error instanceof Error ? error.message : String(error));
+      return 0;
+    }
     if (this.backfill) return this.backfill;
     const pending = this.writeUnwrittenSummaries();
     this.backfill = pending;
@@ -1528,6 +1546,7 @@ export class ComputerHistoryDemoService {
   private async writeUnwrittenSummaries(): Promise<number> {
     this.recoverInterruptedSegments();
     let written = 0;
+    const started = this.summaryAttempts;
     const runtime = this.llmRuntime;
     const entries = this.readMarkdownDirectory(this.historyDirectory).reverse();
     // A failed replacement keeps its full evidence beside the standing entry.
@@ -1540,19 +1559,13 @@ export class ComputerHistoryDemoService {
         pending.set(staged.slice(0, -".staging".length), staged);
       }
     }
-    // Finish ten-minute evidence before deriving its six-hour account.
-    const files = [...pending.entries()].sort(([left], [right]) => (
-      Number(left.endsWith("-6h-summary.md")) - Number(right.endsWith("-6h-summary.md"))
-        || left.localeCompare(right)
-    ));
+    // Eligible old records keep their place even when new windows keep arriving.
+    const files = [...pending.entries()].sort(([left], [right]) => left.localeCompare(right));
     const rollups = new Map<string, string>();
     for (const [destination, file] of files) {
-      if (this.shuttingDown || this.llmRuntime !== runtime) break;
+      if (this.shuttingDown || this.llmRuntime !== runtime || Date.now() < this.summaryRetries.retryAt
+        || this.summaryAttempts - started >= SUMMARY_BACKFILL_BATCH_SIZE) return written;
       const id = path.basename(destination, ".md");
-      if (id.endsWith("-6h-summary")) {
-        rollups.set(destination, file);
-        continue;
-      }
       const markdown = readText(file);
       if (!markdown) continue;
       const entry = { id, filePath: destination, markdown };
@@ -1561,11 +1574,13 @@ export class ComputerHistoryDemoService {
       if (file === destination && isNarrated(entry.markdown)) continue;
       // The open segment is still being written to; it is narrated in place.
       if (entry.filePath === this.segment?.historyFile) continue;
-      if (await this.writeSummaryWith(file, "10min", this.eventStreamPathFor(entry.id))) {
+      const window = id.endsWith("-6h-summary") ? "6h" : "10min";
+      if (await this.writeSummaryWith(file, window, window === "6h" ? null : this.eventStreamPathFor(entry.id))) {
         written += 1;
       }
     }
-    if (this.shuttingDown || this.llmRuntime !== runtime) return written;
+    if (this.shuttingDown || this.llmRuntime !== runtime || Date.now() < this.summaryRetries.retryAt
+      || this.summaryAttempts - started >= SUMMARY_BACKFILL_BATCH_SIZE) return written;
     // Include windows whose ten-minute entries were already ready before this
     // process started. Retrying only newly narrated entries left missing and
     // legacy rollups stranded forever. Stable input hashes avoid model churn.
@@ -1573,7 +1588,8 @@ export class ComputerHistoryDemoService {
       rollups.set(file.replace(/\.staging$/u, ""), file);
     }
     for (const [destination, file] of rollups) {
-      if (this.shuttingDown || this.llmRuntime !== runtime) break;
+      if (this.shuttingDown || this.llmRuntime !== runtime || Date.now() < this.summaryRetries.retryAt
+        || this.summaryAttempts - started >= SUMMARY_BACKFILL_BATCH_SIZE) return written;
       const markdown = readText(file);
       if (!markdown || !isMachineSummary(readSourceType(markdown))) continue;
       if (file === destination && isNarrated(markdown)) continue;
@@ -1602,6 +1618,11 @@ export class ComputerHistoryDemoService {
     const standingCurrent = historyEntries.find((entry) => entry.id === currentId);
     const currentRaw = (!standingCurrent || !isNarrated(standingCurrent.markdown)) ? this.currentRawHistory() : null;
     const skillIdsByHistory = this.readSkillLinks();
+    let retryWarning: string | null = null;
+    try {
+      const stopped = this.summaryRetries.stoppedCount;
+      if (stopped) retryWarning = `Computer History: ${stopped} summaries stopped after ${SUMMARY_MAX_ATTEMPTS} automatic attempts. Change the summary model or update their evidence to retry.`;
+    } catch (error) { retryWarning = error instanceof Error ? error.message : String(error); }
     return {
       memorySync: this.memoryAdapter.status(),
       observation: {
@@ -1610,7 +1631,7 @@ export class ComputerHistoryDemoService {
         segmentId: this.segment?.id ?? null,
         segmentStartedAt: this.segment?.startedAt ?? null,
         error: this.observationError,
-        narrationError: this.narrationError,
+        narrationError: retryWarning ?? this.narrationError,
         narrationErrorCategory: this.narrationErrorCategory,
         retentionDeferred: this.retentionDeferred,
         modelSource: this.modelSource,
@@ -2280,6 +2301,29 @@ export class ComputerHistoryDemoService {
     const weChatConsentId = this.weChatConsent.read().consentId;
     if (containsWeChat && !weChatConsentId) return Promise.resolve(false);
     if (window === "6h" && !this.preservesRollupCoverage(destination, markdown)) return Promise.resolve(false);
+    const retryId = path.basename(destination);
+    const retained = window === "10min" ? this.readRetentionCheckpoint(retryId.slice(0, -3)) : null;
+    let rawVersion: [number, number] | null = null;
+    if (eventsFile) {
+      try { const stat = fs.statSync(eventsFile); rawVersion = [stat.size, stat.mtimeMs]; } catch { /* Raw retention may have run. */ }
+    }
+    // Expiring raw JSONL must not reset attempts for the same archived evidence.
+    const evidenceVersion = retained && (!rawVersion
+      || (rawVersion[0] === retained.rawBytes && rawVersion[1] === retained.rawMtimeMs))
+      ? [retained.rawSha256, retained.evidenceSha256] : rawVersion;
+    const retryInput = hashText(JSON.stringify([language, applicationsFromMarkdown(markdown),
+      evidenceVersion ?? markdown]));
+    let retryEpoch: number;
+    try {
+      if (!this.summaryRetries.eligible(retryId, retryInput)
+        || (this.summaryRetries.needsProbe && this.summaryJobs.size > 0)) return Promise.resolve(false);
+      retryEpoch = this.summaryRetries.epoch;
+      this.summaryAttempts++;
+      this.summaryRetries.start(retryId, retryInput);
+    } catch (error) {
+      this.setNarrationError(error instanceof Error ? error.message : String(error));
+      return Promise.resolve(false);
+    }
     const isCurrent = () => !this.shuttingDown
       && this.llmRuntime === llmRuntime
       && this.summaryLanguage() === language
@@ -2288,6 +2332,7 @@ export class ComputerHistoryDemoService {
       && readText(file) === markdown;
     const promise = this.narratePreparedSummary(
       file, destination, window, eventsFile, summaryId, markdown, llmRuntime, language, isCurrent,
+      retryId, retryInput, retryEpoch,
     ).finally(() => {
       if (this.summaryJobs.get(destination)?.promise === promise) this.summaryJobs.delete(destination);
     });
@@ -2305,6 +2350,9 @@ export class ComputerHistoryDemoService {
     llmRuntime: LLMRuntimeResolver,
     language: MemmyOutputLanguage | undefined,
     isCurrent: () => boolean,
+    retryId: string,
+    retryInput: string,
+    retryEpoch: number,
   ): Promise<boolean> {
     // A segment is narrated from its own event stream, compacted into activity
     // arcs. A rollup has no stream of its own and is narrated from the
@@ -2328,10 +2376,11 @@ export class ComputerHistoryDemoService {
       window,
       language,
       priorSummaries: this.priorSummaries(summaryId ?? path.basename(destination, ".md")),
-      onError: (reason, category) => {
+      onError: (reason, category, kind = "input") => {
         // Narration is best effort, but a silent no-op is indistinguishable
         // from a feature that was never wired, so say why it produced nothing.
         if (!isCurrent()) return;
+        this.summaryRetries.fail(retryId, retryInput, category === "quota_exhausted" ? "service" : kind);
         this.setNarrationError(reason, category);
         console.warn(`[computer-history] summary narration skipped: ${reason}`);
       },
@@ -2345,10 +2394,14 @@ export class ComputerHistoryDemoService {
       // combine an old response with a file another pass has since rewritten.
       atomicWriteText(destination, applyNarrative(markdown, narrative));
       if (file !== destination) fs.rmSync(file, { force: true });
-      this.setNarrationError(null);
+      this.summaryRetries.success(retryId, retryInput, retryEpoch);
+      if (!this.summaryRetries.needsProbe) {
+        this.setNarrationError(null);
+      }
       if (window === "10min") this.memoryAdapter.schedule();
       return true;
     } catch (error) {
+      this.summaryRetries.fail(retryId, retryInput, "storage");
       this.setNarrationError(error instanceof Error ? error.message : String(error));
       return false;
     }
@@ -3247,6 +3300,8 @@ export class ComputerHistoryDemoService {
     this.invalidateSummary(file);
     fs.rmSync(file, { force: true });
     fs.rmSync(`${file}.staging`, { force: true });
+    try { this.summaryRetries.remove(path.basename(file)); }
+    catch (error) { this.setNarrationError(error instanceof Error ? error.message : String(error)); }
     const checkpoint = this.retentionCheckpointPath(id);
     if (checkpoint) {
       fs.rmSync(checkpoint, { force: true });

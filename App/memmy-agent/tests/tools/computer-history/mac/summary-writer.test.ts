@@ -10,6 +10,7 @@ import {
 } from "../../../../src/tools/computer-history/mac/summary-writer.js";
 import { buildSixHourSummary } from "../../../../src/tools/computer-history/mac/rollup.js";
 import { estimatePromptTokens } from "../../../../src/utils/helpers.js";
+import * as tokenHelpers from "../../../../src/utils/helpers.js";
 import type { LLMRuntime } from "../../../../src/utils/llm-runtime.js";
 
 const summary = [
@@ -50,6 +51,84 @@ function runtime(content: string) {
 }
 
 describe("segment narrative", () => {
+  it.each([
+    [429, "service"], [401, "service"], [403, "service"], [503, "service"],
+    [400, "input"], [413, "input"], [408, "transient"],
+  ] as const)("classifies structured HTTP %s failures as %s for scheduling", async (status, kind) => {
+    const onError = vi.fn();
+    const resolver = () => ({ model: "test", provider: { chatWithRetry: async () => ({
+      content: "synthetic failure", finishReason: "error", errorStatusCode: status,
+    }) } as any });
+    expect(await writeSegmentNarrative(resolver, {
+      applications: [], evidence: "Synthetic activity", window: "10min", onError,
+    })).toBeNull();
+    expect(onError).toHaveBeenCalledExactlyOnceWith("synthetic failure", undefined, kind);
+  });
+
+  it.each(["10min", "6h"] as const)("counts unchanged messages once while trimming %s input within the token limit", async (window) => {
+    const countTokens = tokenHelpers.estimatePromptTokens;
+    const counter = vi.spyOn(tokenHelpers, "estimatePromptTokens");
+    try {
+      const { resolver, chatWithRetry } = runtime('{"title":"t","description":"d","body":"b"}');
+      await writeSegmentNarrative(resolver, {
+        applications: [], window, language: "zh-CN",
+        evidence: ["CURRENT_START", "讨论方案，审批尚未完成。\n".repeat(800), "CURRENT_FINAL"].join("\n"),
+        priorSummaries: ["此前讨论。".repeat(300), "先前计划。".repeat(300)],
+      });
+      expect(chatWithRetry).toHaveBeenCalledOnce();
+      const messages = (chatWithRetry.mock.calls[0][0] as any).messages;
+      expect(countTokens(messages)).toBeLessThanOrEqual(MAX_NARRATIVE_INPUT_TOKENS);
+      const counted = counter.mock.calls.flatMap(([input]) => input);
+      expect(counted.filter((message) => message.role === "system")).toHaveLength(1);
+      const prompts = counted.filter((message) => message.content.startsWith("Summary window:"));
+      expect(prompts.length).toBeGreaterThan(1);
+      expect(new Set(prompts.map((message) => message.content)).size).toBe(prompts.length);
+      expect(prompts.at(-1)?.content).toBe(messages[1].content);
+      expect(messages[1].content).toContain("CURRENT_START");
+      expect(messages[1].content).toContain("CURRENT_FINAL");
+    } finally {
+      counter.mockRestore();
+    }
+  });
+
+  it.each([-1, 0, 1])("enforces the exact estimated token boundary (offset %s)", async (offset) => {
+    const counter = vi.spyOn(tokenHelpers, "estimatePromptTokens").mockImplementation((messages) =>
+      messages.reduce((total, message) => total + (message.role === "system"
+        ? MAX_NARRATIVE_INPUT_TOKENS - 100 : 100 + offset), 0));
+    try {
+      const { resolver, chatWithRetry } = runtime('{"title":"t","description":"d","body":"b"}');
+      const onError = vi.fn();
+      const result = await writeSegmentNarrative(resolver, {
+        applications: [], evidence: "Observed work", window: "10min", onError,
+      });
+      if (offset > 0) {
+        expect(result).toBeNull();
+        expect(chatWithRetry).not.toHaveBeenCalled();
+        expect(onError).toHaveBeenCalledExactlyOnceWith("summary input exceeds the text-summary token budget");
+      } else {
+        expect(result).not.toBeNull();
+        expect(chatWithRetry).toHaveBeenCalledOnce();
+        expect(onError).not.toHaveBeenCalled();
+      }
+    } finally {
+      counter.mockRestore();
+    }
+  });
+
+  it("does not send an oversized fixed prompt even after evidence is trimmed to its minimum", async () => {
+    const { resolver, chatWithRetry } = runtime("{}");
+    const onError = vi.fn();
+    // Separate tokens so this tests input rejection rather than worst-case BPE merging.
+    const oversizedApplication = "界\n".repeat(4_000);
+    expect(estimatePromptTokens([{ role: "user", content: oversizedApplication }]))
+      .toBeGreaterThan(MAX_NARRATIVE_INPUT_TOKENS);
+    expect(await writeSegmentNarrative(resolver, {
+      applications: [oversizedApplication], evidence: "Observed work\n".repeat(100), window: "6h", onError,
+    })).toBeNull();
+    expect(chatWithRetry).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledExactlyOnceWith("summary input exceeds the text-summary token budget");
+  });
+
   it.each(["known", "unknown", "small-window", "unavailable"])("preserves narrative input budgeting with a prepared task snapshot: %s", async (kind) => {
     const chatWithRetry = vi.fn(async (_args: any) => ({ content: '{"title":"t","description":"d","body":"b"}' }));
     const provider = { chatWithRetry } as any;
