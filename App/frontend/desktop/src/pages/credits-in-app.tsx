@@ -373,11 +373,15 @@ function AccountCheckinCard(props: { compact?: boolean; dismissible?: boolean })
       requestId.current = null;
       window.dispatchEvent(new CustomEvent("credits.changed", { detail: { userId: state.account.userId, accountVersion: result.accountVersion } }));
       account.reload();
-      // The home reminder has done its job once claimed: collapse it and confirm with a toast instead of a static "done" row.
-      if (props.dismissible) {
-        notifications?.notify({ variant: "success", title: t("credits.checkin.done"), emphasis: `+${CHECKIN_DAILY.toLocaleString(language)} ${t("credits.checkin.received")}`, autoDismissMs: 4000 });
-        dismiss();
+      if (result.claimed && !result.alreadyClaimed) {
+        notifications?.notify({
+          variant: "success",
+          title: t("credits.checkin.done"),
+          emphasis: `+${Number(result.grant.amount).toLocaleString(language)} ${t("credits.checkin.received")}`,
+          autoDismissMs: 3000,
+        });
       }
+      if (props.dismissible) dismiss();
     } catch (error) {
       if (error instanceof ApiRequestError && error.code === "CHECKIN_ALREADY_CLAIMED") {
         requestId.current = null;
