@@ -4,7 +4,7 @@ import { readModelCapabilityCatalog, writeModelCapabilityCatalog } from "../infr
 
 export type ModelCapabilityCatalogSyncResult =
   | { status: "updated" | "not-modified"; catalog: ModelCapabilityCatalog }
-  | { status: "failed"; reason: "retries-exhausted" | "unauthenticated" | "stopped"; catalog: ModelCapabilityCatalog | null; error: unknown };
+  | { status: "failed"; reason: "retries-exhausted" | "stopped"; catalog: ModelCapabilityCatalog | null; error: unknown };
 
 export interface ModelCapabilityCatalogSyncService {
   sync(): Promise<ModelCapabilityCatalogSyncResult>;
@@ -14,7 +14,6 @@ export interface ModelCapabilityCatalogSyncService {
 
 export function createModelCapabilityCatalogSyncService(options: {
   cloudClient: Pick<CloudClient, "getModelCapabilityCatalog">;
-  getCloudUuid(): string | null;
   filePath?: string;
   onUpdated?: (catalog: ModelCapabilityCatalog) => void;
 }): ModelCapabilityCatalogSyncService {
@@ -29,10 +28,7 @@ export function createModelCapabilityCatalogSyncService(options: {
     try {
       const local = await readModelCapabilityCatalog(options.filePath);
       if (stopped) return failure("stopped", new Error("Model catalog synchronization stopped"));
-      const uuid = options.getCloudUuid();
-      if (!uuid?.trim()) return failure("unauthenticated", new Error("Model catalog requires an account credential"));
       const result = await options.cloudClient.getModelCapabilityCatalog({
-        uuid,
         ...(local ? { catalogVersion: local.catalogVersion } : {})
       });
       if (stopped) return failure("stopped", new Error("Model catalog synchronization stopped"));
@@ -58,11 +54,11 @@ export function createModelCapabilityCatalogSyncService(options: {
   }
 
   async function synchronize(): Promise<ModelCapabilityCatalogSyncResult> {
-    const delays = [5_000, 10_000, 30_000];
+    const delays = [2_000, 4_000, 8_000];
     for (let index = 0; ; index++) {
       if (stopped) return failure("stopped", new Error("Model catalog synchronization stopped"));
       const result = await attempt();
-      if (result.status !== "failed" || result.reason === "unauthenticated") return result;
+      if (result.status !== "failed") return result;
       if (stopped) return { ...result, reason: "stopped" };
       const delay = delays[index];
       if (delay === undefined) return result;

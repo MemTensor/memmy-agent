@@ -77,7 +77,7 @@ export function createRuntimeModelCapabilityCatalog(options: {
           || baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash || !["", "/"].includes(baseUrl.pathname)) {
           throw new Error("Model catalog synchronization requires a local Backend");
         }
-        // Four cloud requests plus 5/10/30-second waits can exceed ordinary local API timeouts.
+        // Four cloud requests plus 2/4/8-second waits can exceed ordinary local API timeouts.
         const timeout = AbortSignal.timeout(90_000);
         const response = await fetchImpl(new URL("/api/app/model-catalog/refresh", baseUrl), {
           method: "POST",
