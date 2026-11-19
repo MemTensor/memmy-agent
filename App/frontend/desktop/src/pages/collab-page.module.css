@@ -66,7 +66,8 @@
 
 /*
  * 头部操作（邀请 / 收起配置 / 项目设置）：按钮自己要够大才点得中。
- * 逐个按钮给 40px 高的热区，图标按钮做成 40×40 的正方形；彼此只隔 4px，鼠标在两个按钮之间移动时始终落在其中一个上。
+ * 逐个按钮给 40px 高的热区，图标按钮做成 40×40 的正方形。
+ * 视觉上按钮之间留 4px 间距，热区再把这条缝铺满：鼠标从「邀请」移到设置时不会落进缝里丢掉悬停。
  * ghost 的默认悬停底色几乎看不出来，这里换成薄荷浅底 + 强调色文字，扫过就能看出是可点的。
  */
 .boardActions {
@@ -77,6 +78,7 @@
 }
 
 :global(.button).boardAction {
+  position: relative;
   min-height: 40px;
   gap: 7px;
   padding: 0 12px;
@@ -86,10 +88,25 @@
 }
 
 :global(.button).boardIconAction {
+  position: relative;
   width: 40px;
   min-width: 40px;
   padding: 0;
   color: var(--collab-muted);
+}
+
+/*
+ * 把两枚按钮之间那 4px 缝隙也变成热区：外扩的基准是**内边距盒**，不是看得见的外边，
+ * 中间还隔着 1px 透明边框，所以横向写 -3px 才等于「越过边框再往外 2px」，两枚按钮各盖住缝的一半，
+ * 正好接上、不留空也不越过对方的薄荷块。（写 -2px 会漏掉中间 2px，那 2px 悬停和点击都没有反应。）
+ * 纵向那一 1px 同理：写 -1px 把上下透明边框也包进来，否则缝里最上面最下面各剩 1px 点不到。
+ */
+:global(.button).boardAction::before {
+  content: "";
+  position: absolute;
+  inset: -1px -3px;
+  /* 只当热区：不画东西；命中时目标仍是按钮本身，所以悬停样式和点击行为都不变。 */
+  background: transparent;
 }
 
 :global(.button-ghost).boardAction:hover:not(:disabled) {
@@ -99,6 +116,8 @@
    */
   background: color-mix(in srgb, var(--color-action-sky, #5cbfae) 20%, #fff);
   color: var(--collab-accent-deep);
+  /* 全局 .button:hover 会整体上移 1px，热区跟着动，鼠标停在底边就会一闪一闪：头部这几个按钮不做位移。 */
+  transform: none;
 }
 
 :global(.button).boardAction:active:not(:disabled) {
