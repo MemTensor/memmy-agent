@@ -39,11 +39,20 @@ export function filterUsageCalls(calls: UsageCall[], source: UsageTab, range: { 
   }).sort((a,b) => Date.parse(b.at)-Date.parse(a.at));
 }
 
-export function usageRows(calls: UsageCall[]): UsageRow[] {
-  return calls.map((call): UsageRow => ({
-    id:call.id, source:call.source, date:formatDayKey(new Date(call.at)), at:call.at, calls:[call],
-    credits:call.credits, models:[call.model], operation:call.operation, status:call.status
-  })).sort((a,b) => Date.parse(b.at)-Date.parse(a.at) || a.id.localeCompare(b.id));
+export function groupUsageCalls(calls: UsageCall[]): UsageRow[] {
+  const groups = new Map<string, UsageCall[]>();
+  for (const c of calls) {
+    const day = formatDayKey(new Date(c.at));
+    const key = c.source === "agent" ? `agent:${c.id}` : `memory:${day}:${c.operation}:${c.model}`;
+    groups.set(key, [...(groups.get(key) ?? []), c]);
+  }
+  return [...groups].map(([id, items]): UsageRow => {
+    const ordered = [...items].sort((a,b) => Date.parse(b.at)-Date.parse(a.at));
+    const first = ordered[0]!;
+    return { id, source:first.source, date:formatDayKey(new Date(first.at)), at:first.at, calls:ordered,
+      credits:usageTotal(ordered), models:[...new Set(ordered.map(c => c.model))], operation:first.operation,
+      status:ordered.some(c => c.status === "processing") ? "processing" : ordered.some(c => c.status === "interrupted") ? "interrupted" : "settled" };
+  }).sort((a,b) => Date.parse(b.at)-Date.parse(a.at) || a.id.localeCompare(b.id));
 }
 
 const PROMPTS = [

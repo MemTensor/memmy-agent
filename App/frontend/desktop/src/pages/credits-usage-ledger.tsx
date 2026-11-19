@@ -5,7 +5,7 @@ import { CreditRequestHover } from "./credit-request-hover.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { useCreditDemo } from "../app/use-credit-demo.js";
 import { creditRangeStart, formatDayKey, type LedgerSpan } from "../app/credits-preview-quota.js";
-import { createUsageMock, filterUsageCalls, usageRows, usageCsv, usageRange, type UsageCall, type UsageRow, type UsageTab } from "../app/credit-usage-ledger.js";
+import { createUsageMock, filterUsageCalls, groupUsageCalls, usageCsv, usageRange, type UsageCall, type UsageRow, type UsageTab } from "../app/credit-usage-ledger.js";
 import { useOptionalApiClients } from "../app/providers.js";
 import { useAppState } from "../state/app-state.js";
 import { useCreditRefresh } from "../app/use-credit-refresh.js";
@@ -124,14 +124,15 @@ export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
   const end=span==="custom" ? custom.end : formatDayKey(now);
   const range=usageRange(start,end)!;
   const filtered=filterUsageCalls(calls,tab,range,now);
-  const rows=usageRows(filtered);
+  const rows=groupUsageCalls(filtered);
   const cursor = cursors[page - 1];
   const from = `${start}T00:00:00+08:00`;
   const toDate = new Date(`${end}T00:00:00Z`); toDate.setUTCDate(toDate.getUTCDate() + 1);
   const to = `${toDate.toISOString().slice(0, 10)}T00:00:00+08:00`;
   const load = useCallback(async (signal: AbortSignal) => {
     if (!client) throw new Error("Credits unavailable");
-    return client.usage({ domain: tab, from, to, limit: size, ...(cursor ? { cursor } : {}) }, signal);
+    const result = await client.usage({ domain: tab, from, to, limit: size, ...(cursor ? { cursor } : {}) }, signal);
+    return { ...result, refreshedAt: new Date() };
   }, [client, userId, tab, from, to, size, cursor]);
   const liveUsage = useCreditRefresh(load, live && !!client, userId);
   const waitingForRows = live && !liveUsage.data && !liveUsage.error;
@@ -149,6 +150,7 @@ export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
   const prompt=(call:UsageCall)=>english?call.promptEn:call.prompt;
   const title=(row:UsageRow)=>row.source==="memory" ? operation(row.calls[0]!) : row.operation==="title" ? `${operation(row.calls[0]!)} · ${prompt(row.calls[0]!)}` : prompt(row.calls[0]!);
   const model=(row:UsageRow)=>row.models.length===1 ? row.models[0] : t("usage.multipleModels",{model:row.models[0]!,count:row.models.length});
+  const dateLabel=(row:UsageRow)=>row.source==="agent" ? stamp(row.at) : row.date===formatDayKey(now) ? stamp(now.toISOString()) : new Date(row.at).toLocaleDateString(language,{month:"2-digit",day:"2-digit"});
   const reset=()=>{setPage(1);setCursors([undefined]);setExportStatus("");};
   function refreshUsage() {
     if (live) { if (page > 1) { setPage(1); setCursors([undefined]); } else liveUsage.refresh(); return; }
@@ -217,8 +219,8 @@ export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
       <div className={styles.exportStatus} role="status">{liveUsage.error && !liveUsage.data ? t(liveUsage.error === "auth" ? "credits.live.auth" : "credits.live.error") : exportStatus}</div>
       <div role="tabpanel" id="usage-list" aria-labelledby={`usage-tab-${tab}`} aria-busy={live && liveUsage.loading} className={styles.tableScroll} ref={tableRef} style={waitingForRows ? { minHeight: tableHeight.current } : undefined}>
         <table className={styles.table}><thead><tr><th>{t(tab==="agent"?"credits.ledger.time":"usage.date")}</th><th>{t(tab==="agent"?"usage.request":"usage.operation")}</th><th>{t("credits.ledger.model")}</th><th className={styles.amount}>{t("credits.ledger.credits")}</th></tr></thead>
-          <tbody>{!live && visible.map(row=><tr key={row.id}><td className={styles.time}>{stamp(row.at, tab === "memory")}</td><td>{row.source==="agent" ? <CreditRequestHover content={title(row)} requestId={row.calls[0]!.id} /> : <span>{title(row)}</span>}{row.source==="agent" && <small className={styles.rowRequestId}>{row.calls[0]!.id}</small>}{row.source==="agent" && row.status==="interrupted" && <small className={styles.state}>{t(`usage.status.${row.status}`)}</small>}</td><td className={styles.model}>{model(row)}</td><td className={styles.amount}>{number(row.credits)}</td></tr>)}{live && liveUsage.data?.items.map(row => <tr key={row.callId ?? JSON.stringify([row.businessDate, row.operation, row.model])}>
-            <td className={styles.time}>{stamp(row.startedAt, tab === "memory")}</td>
+          <tbody>{!live && visible.map(row=><tr key={row.id}><td className={styles.time}>{dateLabel(row)}</td><td>{row.source==="agent" ? <CreditRequestHover content={title(row)} requestId={row.calls[0]!.id} /> : <span>{title(row)}</span>}{row.source==="agent" && <small className={styles.rowRequestId}>{row.calls[0]!.id}</small>}{row.source==="agent" && row.status==="interrupted" && <small className={styles.state}>{t(`usage.status.${row.status}`)}</small>}</td><td className={styles.model}>{model(row)}</td><td className={styles.amount}>{number(row.credits)}</td></tr>)}{live && liveUsage.data?.items.map(row => <tr key={row.callId ?? JSON.stringify([row.businessDate, row.operation, row.model])}>
+            <td className={styles.time}>{tab === "agent" ? stamp(row.startedAt) : row.businessDate === new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(now) ? stamp(liveUsage.data!.refreshedAt.toISOString()) : row.businessDate}</td>
             <td>{tab === "agent" ? <><CreditRequestHover content={(row.operation === "GENERATE_TITLE" || row.operation === "TITLE" || row.operation === "SESSION_DAG" ? `${operationName(row.operation, t)} · ` : "") + (row.requestContent ?? t("credits.live.contentUnavailable"))} requestId={row.requestId ?? row.callId!} loadDetail={row.callId && client ? signal => client.usageDetail(row.callId!, signal) : undefined} /><small className={styles.rowRequestId}>{row.requestId ?? row.callId}</small></> : <span>{operationName(row.operation, t)}</span>}
             </td><td className={styles.model}>{row.model}</td><td className={styles.amount}>{formatCreditAmount(row.chargedCredits, language)}</td>
           </tr>)}</tbody>
