@@ -627,7 +627,10 @@ it("shows a centered sign-in empty state without extra copy", async () => {
   expect(onSignIn).toHaveBeenCalledTimes(1);
 });
 
-it("shows share failure inside the modal instead of the page banner", async () => {
+it.each([
+  [404, "目标用户不存在"],
+  [409, "该成员已加入知识库"],
+] as const)("shows the sharing error text in the modal for HTTP %i", async (status, message) => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const state: KnowledgeSettings = {
     authenticated: true,
@@ -641,8 +644,8 @@ it("shows share failure inside the modal instead of the page banner", async () =
       const path = String(url);
       if (init.method === "POST" && path.includes("/members"))
         return Promise.resolve(
-          new Response(JSON.stringify({ error: "目标用户不存在" }), {
-            status: 404,
+          new Response(JSON.stringify({ error: `[HTTP ${status}] ${message}` }), {
+            status,
           }),
         );
       if (path.includes("/members"))
@@ -708,7 +711,7 @@ it("shows share failure inside the modal instead of the page banner", async () =
       .click();
   });
   const shareError = container.querySelector(".mk-share-modal .mk-share-error");
-  expect(shareError?.textContent).toBe("目标用户不存在");
+  expect(shareError?.textContent).toBe(message);
   expect(getComputedStyle(shareError!).color).toBe("#c05a55");
   expect(container.querySelector(".mk-error")).toBeNull();
   expect(container.textContent).not.toContain("HTTP 404");

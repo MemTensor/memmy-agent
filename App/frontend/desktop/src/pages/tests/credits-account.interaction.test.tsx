@@ -35,7 +35,7 @@ function fixture() {
     grants: vi.fn(async () => ({ items: [reward, { ...reward, grantId: "2", sourceType: "PLAN" as const, sourceName: "Free", granted: "1000.00", remaining: "1000.00", reserved: "0.00" }], hasMore: false, nextCursor: null as string | null })),
     ledger: vi.fn(async () => ({ items: [], hasMore: false, nextCursor: null })) } satisfies CreditsClient;
 }
-function Harness({ client, home = false }: { client: CreditsClient; home?: boolean }) {
+function Harness({ client, home = false }: { client: CreditsClient; home?: boolean | "compact" }) {
   const { state, dispatch } = useAppState(); const { setClients } = useApiClients();
   switchAccount = id => dispatch(appActions.accountUpdated({ userId: id }));
   useEffect(() => {
@@ -46,7 +46,7 @@ function Harness({ client, home = false }: { client: CreditsClient; home?: boole
   if (state.bootstrap?.app.userMode !== "account") return null;
   if (state.navigation.currentPath === "/credit-reward-details") return <CreditsSourceDetailPage source="reward" />;
   if (state.navigation.currentPath === "/plans") return <CreditsPlansPage />;
-  return home ? <HomeCheckinCard dismissible /> : <CreditsSettingsPanel />;
+  return home ? <HomeCheckinCard compact={home === "compact"} dismissible={home === true} /> : <CreditsSettingsPanel />;
 }
 async function mount(client: CreditsClient) { await act(async () => root.render(<AppProviders><Harness client={client} /></AppProviders>)); }
 async function click(label: string) {
@@ -405,6 +405,26 @@ it("home check-in reminder collapses after a successful claim and confirms with 
   expect(window.localStorage.getItem("memmy.home.checkinDismissedOn:100001")).not.toBeNull();
   expect(document.body.textContent).toContain("今日已签到");
   expect(document.body.textContent).toContain("+100 积分已到账");
+});
+it("shows the compact check-in confirmation for three seconds before sliding out", async () => {
+  const { NotificationCenterProvider } = await import("../../components/notification-center.js");
+  const client = fixture();
+  client.checkin.mockResolvedValue({ claimed: true, alreadyClaimed: false, grant: { amount: "100.00" }, accountVersion: 3 });
+  await act(async () => root.render(<AppProviders><NotificationCenterProvider><Harness client={client} home="compact" /></NotificationCenterProvider></AppProviders>));
+  vi.useFakeTimers();
+  try {
+    await click("签到 +100");
+    const card = document.querySelector(".memmy-notification-stack .memmy-notification");
+    expect(card?.textContent).toContain("+100 积分已到账");
+    act(() => vi.advanceTimersByTime(2999));
+    expect(card?.classList.contains("memmy-notification--leaving")).toBe(false);
+    act(() => vi.advanceTimersByTime(1));
+    expect(card?.classList.contains("memmy-notification--leaving")).toBe(true);
+    act(() => vi.advanceTimersByTime(240));
+    expect(card?.isConnected).toBe(false);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 it("check-in retries reuse the request ID and refresh the authoritative status", async () => {
   window.localStorage.removeItem("memmy.home.checkinDismissedOn:100001");
