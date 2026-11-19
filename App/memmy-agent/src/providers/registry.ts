@@ -227,6 +227,15 @@ export const PROVIDERS: ProviderSpec[] = [
     defaultApiBase: "https://api.novita.ai/openai",
   }),
   new ProviderSpec({
+    name: "atlascloud",
+    keywords: ["atlascloud"],
+    envKey: "ATLASCLOUD_API_KEY",
+    displayName: "Atlas Cloud",
+    isGateway: true,
+    detectByBaseKeyword: "atlascloud",
+    defaultApiBase: "https://api.atlascloud.ai/v1",
+  }),
+  new ProviderSpec({
     name: "volcengine",
     keywords: ["volcengine", "volces", "ark"],
     envKey: "OPENAI_API_KEY",
