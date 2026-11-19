@@ -17,8 +17,12 @@ export interface CollabProjectsSnapshot {
   selectedId: string | null;
   loading: boolean;
   error: string | null;
-  /** Set when the sidebar asks for the new-project dialog; the frame opens it once and clears the flag. */
-  createPending: boolean;
+  /**
+   * 新建弹窗开着没有：这个状态放在 store 里而不是某个页面自己的 state 里。
+   * 首页在浏览完地址后又会被保留挂载，看板上可能同时存在两个应用外壳，
+   * 各自持一份就会一个关掉、另一个还开着，切回首页时弹窗自己冒出来。
+   */
+  createOpen: boolean;
   /** 新建弹窗打开时「与成员共享」是否默认开启；目前只有新功能介绍的最后一页会要求开启。 */
   createShareDefault: boolean;
   /**
@@ -54,7 +58,7 @@ let snapshot: CollabProjectsSnapshot = {
   selectedId: null,
   loading: false,
   error: null,
-  createPending: false,
+  createOpen: false,
   createShareDefault: false,
   createDemo: false,
   taskPickerFor: null,
@@ -222,19 +226,32 @@ export function markCollabProjectBound(projectId: string, localProjectId: string
 /**
  * Opens the new-project dialog; `share` also turns sharing on when the dialog appears.
  *
+ * 打开与关闭都在 store 里：弹窗是应用级的，同一个请求可能被多个挂着的应用外壳看到，
+ * 任意一处关闭都对所有外壳生效。
+ *
  * @param options.demo 这次是新手引导的体验入口：弹窗预填名称并提前打开共享，引导先只亮「创建项目」。
  */
 export function requestCreateProject(options?: { share?: boolean; demo?: boolean }): void {
   update({
-    createPending: true,
+    createOpen: true,
     createShareDefault: options?.share === true,
     createDemo: options?.demo === true
   });
 }
 
-/** Clears the request the frame just acted on, so navigating back does not reopen the dialog. */
-export function consumeCreateProjectRequest(): void {
-  if (snapshot.createPending) update({ createPending: false, createShareDefault: false, createDemo: false });
+/** Closes the new-project dialog, whether it was cancelled, used, or switched to the join dialog. */
+export function closeCreateProject(): void {
+  if (!snapshot.createOpen && !snapshot.createShareDefault && !snapshot.createDemo) return;
+  update({ createOpen: false, createShareDefault: false, createDemo: false });
+}
+
+/**
+ * 引导在弹窗上被退出（本机从此不再自动演示）：这一次新建改按普通新建处理，
+ * 免得同一次弹窗里再点「创建项目」时还带着体验，让云端又重新开一场演示。
+ */
+export function clearCreateProjectDemo(): void {
+  if (!snapshot.createDemo) return;
+  update({ createDemo: false });
 }
 
 /**
@@ -285,7 +302,7 @@ export function clearCollabProjects(): void {
     selectedId: null,
     loading: false,
     error: null,
-    createPending: false,
+    createOpen: false,
     createShareDefault: false,
     createDemo: false,
     taskPickerFor: null,
@@ -304,7 +321,7 @@ export function resetCollabProjectsStore(): void {
     selectedId: null,
     loading: false,
     error: null,
-    createPending: false,
+    createOpen: false,
     createShareDefault: false,
     createDemo: false,
     taskPickerFor: null,

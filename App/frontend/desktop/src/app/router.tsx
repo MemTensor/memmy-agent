@@ -292,7 +292,7 @@ export function AppRouter(props: { onRetry: () => void }) {
           opacity: 0, pointerEvents: "none",
         }}
           aria-hidden={currentPath !== "/main"}>
-          <HomePage />
+          <HomePage hiddenSurface={currentPath !== "/main"} />
         </div>
       )}
       {currentPath === "/main" ? null : (

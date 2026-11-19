@@ -199,7 +199,7 @@ describe("collab launch waits for the existing guidance", () => {
 
     expect(window.localStorage.getItem(COLLAB_LAUNCH_PROMPT_STORAGE_KEY)).toBe("1");
     expect(getCollabProjectsSnapshot()).toMatchObject({
-      createPending: true,
+      createOpen: true,
       createShareDefault: true,
       createDemo: false
     });
@@ -214,7 +214,7 @@ describe("collab launch waits for the existing guidance", () => {
     });
 
     const snapshot = getCollabProjectsSnapshot();
-    expect(snapshot.createPending).toBe(true);
+    expect(snapshot.createOpen).toBe(true);
     expect(snapshot.createDemo).toBe(true);
   });
 });

@@ -24,13 +24,13 @@ const clients = {
   memmyAgent: null
 } as unknown as AppClients;
 
-function Shell() {
+function Shell(props: { title?: string; ownsOverlays?: boolean }) {
   const { dispatch } = useAppState();
   useEffect(() => {
     dispatch(appActions.bootstrapLoaded(mockBootstrap, "/main"));
   }, [dispatch]);
   return (
-    <AppFrame title="项目">
+    <AppFrame title={props.title ?? "项目"} ownsOverlays={props.ownsOverlays}>
       <div>工作区</div>
     </AppFrame>
   );
@@ -80,6 +80,44 @@ describe("sidebar new-project button", () => {
     await flush();
   }
 
+  it("只让显示中的那个外壳渲染新建项目弹窗", async () => {
+    await act(async () => {
+      root.render(
+        <AppStateProvider>
+          <ApiClientsContext.Provider value={{ clients, setClients: () => undefined }}>
+            <TaskBusProvider>
+              <I18nProvider language="zh-CN">
+                {/* 看过浏览器或录音之后，首页会以隐藏外壳的形式继续挂载在看板旁边：两个外壳同时挂在同一份 store 上。 */}
+                <Shell title="首页" ownsOverlays={false} />
+                <Shell title="项目" />
+              </I18nProvider>
+            </TaskBusProvider>
+          </ApiClientsContext.Provider>
+        </AppStateProvider>
+      );
+    });
+    await flush();
+
+    const buttons = container.querySelectorAll<HTMLButtonElement>("button.app-frame-workspace-add");
+    expect(buttons).toHaveLength(2);
+    // 看板上点「新建项目」：请求只有一个，但两个外壳都读同一份状态。
+    await act(async () => buttons[1]!.click());
+    await flush();
+
+    const dialogs = container.querySelectorAll('[role="dialog"]');
+    expect(dialogs, "同一份请求只该开出一个弹窗").toHaveLength(1);
+    expect(dialogs[0]!.textContent).toContain("创建项目");
+    expect(getCollabProjectsSnapshot().createOpen).toBe(true);
+
+    // 关掉之后两个外壳都不再显示：切回首页时不会又冒出一个空白的弹窗。
+    await act(async () => {
+      dialogs[0]!.querySelector<HTMLButtonElement>('button[aria-label="关闭"]')?.click();
+    });
+    await flush();
+    expect(container.querySelectorAll('[role="dialog"]')).toHaveLength(0);
+    expect(getCollabProjectsSnapshot().createOpen).toBe(false);
+  });
+
   it.each([
     ["zh-CN", "新建项目", "创建项目"],
     ["en-US", "New project", "Create project"]
@@ -98,10 +136,10 @@ describe("sidebar new-project button", () => {
     expect(container.querySelector(".app-frame-workspace-picker-menu")).toBeNull();
     expect(container.querySelector(".home-project-picker__menu")).toBeNull();
     expect(container.querySelector(".home-project-picker__search")).toBeNull();
-    // 新建项目弹窗直接打开，请求已被消费。
+    // 新建项目弹窗直接打开，打开状态记在共享 store 里。
     const dialog = container.querySelector('[role="dialog"]');
     expect(dialog, "点一次就应该出现新建项目弹窗").toBeTruthy();
     expect(dialog!.textContent).toContain(dialogTitle);
-    expect(getCollabProjectsSnapshot().createPending).toBe(false);
+    expect(getCollabProjectsSnapshot().createOpen).toBe(true);
   });
 });
