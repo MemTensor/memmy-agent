@@ -284,6 +284,26 @@ it("renders real usage in the original table without new detail or balance panel
   expect(client.ledger).not.toHaveBeenCalled(); expect(client.usageDetail).not.toHaveBeenCalled();
 });
 
+it("keeps the billing date on daily memory totals when the page is refreshed", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(new Date("2026-11-19T11:13:00+08:00"));
+    const client = fixture();
+    const memoryRow = { ...usageRow, domain: "memory", operation: "MEMORY_SUMMARY", callId: null, callCount: 2 };
+    const items = ["2026-11-19", "2026-11-18"].map(businessDate => ({ ...memoryRow, businessDate }));
+    client.usage.mockResolvedValue({ items, hasMore: false, nextCursor: null } as never);
+    await mount(client);
+    await click("记忆服务");
+    const dates = () => [...host.querySelectorAll("#usage-list tbody td:first-child")].map(cell => cell.textContent);
+    expect(dates()).toEqual(["2026-11-19", "2026-11-18"]);
+    vi.setSystemTime(new Date("2026-11-19T12:25:00+08:00"));
+    await click("刷新消耗明细");
+    expect(dates()).toEqual(["2026-11-19", "2026-11-18"]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it("holds the previous height only while loading, then fits the actual rows", async () => {
   const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ height: 480 } as DOMRect);
   const client = fixture();
