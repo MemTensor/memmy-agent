@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createUsageMock, filterUsageCalls, groupUsageCalls, usageCsv, usageRange, usageTotal, type UsageCall } from "../credit-usage-ledger.js";
+import { createUsageMock, filterUsageCalls, usageRows, usageCsv, usageRange, usageTotal, type UsageCall } from "../credit-usage-ledger.js";
 const now=new Date(2026,9,16,12);
 const sample=createUsageMock(now);
 describe("credit usage projections",()=>{
@@ -21,23 +21,24 @@ describe("credit usage projections",()=>{
     const evolution=JSON.parse(sample.find(c=>c.operation==="evolution")!.modelInput);
     expect(JSON.parse(evolution.messages[1].content).raw_turns[0].user_text).toBeTruthy();
   });
-  it("filters individual calls before aggregation across midnight and deduplicates IDs",()=>{
+  it("filters individual calls across midnight and deduplicates IDs",()=>{
     const base=sample[0]!;
     const calls:UsageCall[]=[{...base,id:"old",at:new Date(2026,9,15,23,59).toISOString(),credits:3},{...base,id:"new",at:new Date(2026,9,16,0,1).toISOString(),credits:2}];
     const filtered=filterUsageCalls([...calls,calls[1]!,{...calls[1]!,id:"pending",status:"processing"}],"agent",usageRange("2026-10-16","2026-10-16")!,now);
-    expect(groupUsageCalls(filtered)).toHaveLength(1);
-    expect(groupUsageCalls(filtered)[0]!.credits).toBe(2);
+    expect(usageRows(filtered)).toHaveLength(1);
+    expect(usageRows(filtered)[0]!.credits).toBe(2);
     expect(filtered).toHaveLength(1);
   });
-  it("groups memory by local date, operation and model rather than processing task",()=>{
+  it("keeps each memory call separate even with the same date, operation and model",()=>{
     const base=sample.find(c=>c.source==="memory")!;
-    const rows=groupUsageCalls([base,{...base,id:"same",requestId:"another-task"},{...base,id:"model",model:"another-model"},{...base,id:"op",operation:"summary"},{...base,id:"date",at:new Date(2026,9,15,12).toISOString()}]);
-    expect(rows).toHaveLength(4);
-    expect(rows.find(r=>r.calls.length===2)?.credits).toBe(base.credits*2);
+    const rows=usageRows([base,{...base,id:"same",requestId:"another-task"},{...base,id:"model",model:"another-model"},{...base,id:"op",operation:"summary"},{...base,id:"date",at:new Date(2026,9,15,12).toISOString()}]);
+    expect(rows).toHaveLength(5);
+    expect(rows.every(r=>r.calls.length===1 && r.credits===r.calls[0]!.credits && r.at===r.calls[0]!.at)).toBe(true);
+    expect(new Set(rows.map(r=>r.id)).size).toBe(5);
   });
   it("keeps model totals and zero-credit title requests auditable",()=>{
     const selected=filterUsageCalls(sample,"agent",usageRange("2026-10-10","2026-10-16")!,now);
-    const rows=groupUsageCalls(selected);
+    const rows=usageRows(selected);
     expect(rows.length).toBeGreaterThan(10);
     expect(rows.every(r=>r.calls.length===1 && r.models.length===1)).toBe(true);
     expect(rows).toHaveLength(selected.length);

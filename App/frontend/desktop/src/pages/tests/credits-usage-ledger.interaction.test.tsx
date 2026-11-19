@@ -67,28 +67,30 @@ describe("usage list interaction",()=>{
     expect(rows()).toHaveLength(10);
     const range=button('选择日期').textContent;
     click(button('下一页'));expect(rows()).toHaveLength(10);expect(button('选择日期').textContent).toBe(range);
-    click(button('记忆服务'));expect(host.querySelector('[aria-live="polite"]')?.textContent).toBe('1 / 4');expect(rows()).toHaveLength(10);
-    click(button('今天'));expect(rows()).toHaveLength(5);
+    click(button('记忆服务'));expect(host.querySelector('[aria-live="polite"]')?.textContent).toBe('1 / 34');expect(rows()).toHaveLength(10);
+    click(button('今天'));expect(rows()).toHaveLength(10);
     click(button('Agent 任务'));expect(rows()).toHaveLength(6);expect(button('今天').getAttribute('aria-pressed')).toBe('true');
     click(button('30 天'));change(host.querySelector('select')!,'20');expect(rows()).toHaveLength(20);
   });
-  it("keeps memory summaries flat, separates model changes, and refreshes without resetting the page",()=>{
+  it("shows individual memory calls and refreshes without changing their time or amount",()=>{
     const before=readCreditDemo();click(button('记忆服务'));click(button('今天'));
-    expect(rows()).toHaveLength(5);
+    change(host.querySelector('select')!,'50');
+    expect(rows()).toHaveLength(42);
     expect(host.querySelector('tbody button')).toBeNull();
     expect(rows()[0]?.cells[0]?.textContent).toMatch(/10\/16.*11:54/);
-    expect(rows()[4]?.cells[0]?.textContent).toMatch(/10\/16.*11:42/);
+    expect(rows()[4]?.cells[0]?.textContent).toMatch(/10\/16.*11:51/);
     const summaries=[...rows()].filter(row=>row.textContent?.includes('记忆摘要'));
-    expect(summaries).toHaveLength(2);
+    expect(summaries).toHaveLength(12);
     expect(summaries.map(row=>row.textContent).join(' ')).toContain('DeepSeek-V3');
     expect(summaries.map(row=>row.textContent).join(' ')).toContain('Qwen3-32B');
     expect(host.textContent).not.toContain('今天 · 截至');
+    change(host.querySelector('select')!,'10');
     click(button('7 天'));click(button('下一页'));
     const first=rows()[0]!.textContent;
     click(button('刷新消耗明细'));
     expect(rows()[0]!.textContent).toBe(first);
     expect(host.textContent).toContain('已刷新 12:00');
-    expect(host.querySelector('[aria-live="polite"]')?.textContent).toBe('2 / 4');
+    expect(host.querySelector('[aria-live="polite"]')?.textContent).toBe('2 / 34');
     expect(readCreditDemo()).toEqual(before);
   });
   it("applies custom dates, handles empty ranges and keeps balances unchanged",()=>{

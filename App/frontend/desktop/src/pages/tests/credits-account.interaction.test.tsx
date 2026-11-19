@@ -284,24 +284,26 @@ it("renders real usage in the original table without new detail or balance panel
   expect(client.ledger).not.toHaveBeenCalled(); expect(client.usageDetail).not.toHaveBeenCalled();
 });
 
-it("shows the latest call time for each daily memory total across refreshes", async () => {
+it("keeps individual memory calls and their original times and charges across refreshes", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
   try {
     vi.setSystemTime(new Date("2026-11-19T11:13:00+08:00"));
     const client = fixture();
-    const memoryRow = { ...usageRow, domain: "memory", operation: "MEMORY_SUMMARY", callId: null, callCount: 2 };
+    const memoryRow = { ...usageRow, domain: "memory", operation: "MEMORY_SUMMARY", callCount: 1 };
     const items = [
-      { ...memoryRow, businessDate: "2026-11-19", startedAt: new Date(2026, 10, 19, 9, 42).toISOString() },
-      { ...memoryRow, businessDate: "2026-11-18", startedAt: new Date(2026, 10, 18, 16, 27).toISOString() },
+      { ...memoryRow, callId: "memory-new", chargedCredits: "0.20", businessDate: "2026-11-19", startedAt: new Date(2026, 10, 19, 9, 42).toISOString() },
+      { ...memoryRow, callId: "memory-old", chargedCredits: "0.10", businessDate: "2026-11-19", startedAt: new Date(2026, 10, 19, 9, 41).toISOString() },
     ];
     client.usage.mockResolvedValue({ items, hasMore: false, nextCursor: null } as never);
     await mount(client);
     await click("记忆服务");
     const dates = () => [...host.querySelectorAll("#usage-list tbody td:first-child")].map(cell => cell.textContent);
-    expect(dates()).toEqual([expect.stringMatching(/11\/19.*09:42/), expect.stringMatching(/11\/18.*16:27/)]);
+    expect(dates()).toEqual([expect.stringMatching(/11\/19.*09:42/), expect.stringMatching(/11\/19.*09:41/)]);
+    expect([...host.querySelectorAll("#usage-list tbody td:last-child")].map(cell => cell.textContent)).toEqual(["0.20", "0.10"]);
+    expect(host.textContent).toContain("共 2 条");
     vi.setSystemTime(new Date("2026-11-19T12:25:00+08:00"));
     await click("刷新消耗明细");
-    expect(dates()).toEqual([expect.stringMatching(/11\/19.*09:42/), expect.stringMatching(/11\/18.*16:27/)]);
+    expect(dates()).toEqual([expect.stringMatching(/11\/19.*09:42/), expect.stringMatching(/11\/19.*09:41/)]);
   } finally {
     vi.useRealTimers();
   }
