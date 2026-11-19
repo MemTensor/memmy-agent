@@ -528,8 +528,15 @@ export interface CollabService {
   /**
    * Creates the cloud project. `demo` 只在桌面端认为「本人第一次创建共享项目」时带：
    * 是否真的开始演示由云端决定，传了也不代表一定演示。
+   *
+   * `localProjectId` 让这次创建可重复执行：这个本机项目已经绑过一个还在的云端项目时直接复用它，
+   * 不再新建；新项目也带着它一起创建，云端据此去重。绑定在返回前就写好了，所以调用方不必再补一次。
    */
-  createProject(name: string, directory?: string, options?: { demo?: boolean }): Promise<{ project: CollabProject; localDirectory: string }>;
+  createProject(
+    name: string,
+    directory?: string,
+    options?: { demo?: boolean; localProjectId?: string }
+  ): Promise<{ project: CollabProject; localDirectory: string }>;
   /** 演示期间的心跳与步骤上报；返回的项目视图里演示已结束时 `demo` 为 null。 */
   demoHeartbeat(projectId: string, step: "1" | "2" | "3" | "finish"): Promise<{ demo: CollabDemoView | null }>;
   /** 结束演示：云端立即把演示成员移出项目；幂等。 */
@@ -1364,9 +1371,38 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       if (!entry.isDirectory()) continue;
       const stored = parseStoredLinks(await readFile(join(projectsDir, entry.name, LINKS_FILE), "utf8").catch(() => ""));
       // A bound project syncs its Memmy tasks even when no other agent sessions are associated.
-      if (stored?.accountId === accountId && (stored.groups.length || stored.sessions.length || stored.localProjectId)) all.push(stored);
+      // 只写了工作目录的记录也在扫描范围内：判定重复绑定时要能看见它并释放。
+      if (stored?.accountId === accountId && (stored.groups.length || stored.sessions.length || stored.localProjectId || stored.workingDirectory)) all.push(stored);
     }
     return all;
+  }
+
+  /**
+   * 一个本机项目在同一个账号下同时只对应一个在线项目：先把它从别的在线项目上解下来。
+   * 调用方负责在 exclusive 内调用，这样两次写之间不会有其它人插进来。
+   */
+  async function releaseOtherBindings(accountId: string, localProjectId: string, keepProjectId: string): Promise<void> {
+    for (const other of await readAllLinks(accountId)) {
+      if (other.localProjectId !== localProjectId || other.projectId === keepProjectId) continue;
+      other.localProjectId = null;
+      await writeLinks(other);
+    }
+  }
+
+  /**
+   * 这个本机项目已经共享到的在线项目，直接问云端要列表：绑定只在云端有那条记录时才算数，
+   * 否则给出去的会是一个打不开的项目。
+   */
+  async function projectBoundTo(accountId: string, localProjectId: string): Promise<{ project: CollabProject; localDirectory: string } | null> {
+    const bound = (await readAllLinks(accountId)).filter((stored) => stored.localProjectId === localProjectId);
+    if (!bound.length) return null;
+    const data = await cloud("/projects");
+    const projects = list(data.projects).map(toProject);
+    for (const stored of bound) {
+      const project = projects.find((candidate) => candidate.id === stored.projectId);
+      if (project) return { project: { ...project, localProjectId }, localDirectory: stored.workingDirectory ?? "" };
+    }
+    return null;
   }
 
   async function writeLinks(stored: StoredLinks): Promise<void> {
@@ -1900,19 +1936,34 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     },
 
     async createProject(name, directory, options) {
+      const account = requireAccount();
+      const localProjectId = options?.localProjectId?.trim() || "";
+      // 幂等：这个本机项目已经共享过，云端项目和绑定都还在，就用那一个。
+      // 没有这一步，云端的项目还在、本机记录丢了（响应超时、写文件失败）时，再点一次共享就是第二个同名项目。
+      const reused = localProjectId ? await projectBoundTo(account.accountId, localProjectId) : null;
+      if (reused) return reused;
       const data = await cloud("/projects", {
         method: "POST",
-        body: { name, ...(options?.demo ? { demo: true } : {}) }
+        body: {
+          name,
+          ...(options?.demo ? { demo: true } : {}),
+          // 云端按 (所有者, localProjectId) 去重：请求已到、响应丢了再重试，拿回的是同一个项目。
+          ...(localProjectId ? { localProjectId } : {})
+        }
       });
       const project = toProject(data.project);
       const localDirectory = await prepareWorkingDirectory(onlineWorkdirRoot, project.name, directory);
-      const account = requireAccount();
+      // 目录与绑定在同一次加锁里写完：中途失败不会留下「云端有项目、本机不知道」的孤儿，
+      // 也就不会在下次打开时把它当成新项目再绑一次。
       await exclusive(async () => {
+        if (localProjectId) await releaseOtherBindings(account.accountId, localProjectId, project.id);
         const stored = await readLinks(project.id, account.accountId);
         stored.workingDirectory = localDirectory;
+        // 云端带着同一个键回来时（重试命中了去重），这个项目原本属于这个本机项目。
+        if (localProjectId) stored.localProjectId = localProjectId;
         await writeLinks(stored);
       });
-      return { project: { ...project, localProjectId: null }, localDirectory };
+      return { project: { ...project, localProjectId: localProjectId || null }, localDirectory };
     },
 
     async ensureWorkingDirectory(projectId, name, directory) {
@@ -1938,6 +1989,9 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
     async bindLocalProject(projectId, localProjectId) {
       const account = requireAccount();
       return exclusive(async () => {
+        // 一个本机项目同时只对应一个在线项目。换绑时先释放旧的：否则两个同名项目一起持有它，
+        // 之后按名称找项目就有多个候选，命令行那边会卡死在「用完整名称指定」上。
+        await releaseOtherBindings(account.accountId, localProjectId, projectId);
         const stored = await readLinks(projectId, account.accountId);
         stored.localProjectId = localProjectId;
         await writeLinks(stored);
@@ -2426,7 +2480,14 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       const query = new URLSearchParams();
       query.set("q", searchKeywords(words.join(" ")).join(" "));
       if (member) query.set("member", member);
-      if (input.project) query.set("project", input.project);
+      if (input.project) {
+        const want = input.project.trim();
+        // --project 也收 id（或前几位）：云端按项目名过滤，所以这里先翻成名称。
+        const lookup = /^[0-9a-f-]{4,36}$/iu.test(want) ? await this.listProjects() : null;
+        const resolved = lookup?.projects.find((project) => project.id === want)
+          ?? lookup?.projects.find((project) => project.id.startsWith(want));
+        query.set("project", resolved?.name ?? want);
+      }
       // 窗口随请求下发：云端在分页前过滤，正文命中一多也不会把近期任务挤掉。旧云端不认这个参数，
       // 下面的本地过滤照旧生效，两边各自发版都能用。
       if (input.since) query.set("since", input.since);
@@ -2532,18 +2593,23 @@ export function createCollabService(options: CollabServiceOptions): CollabServic
       }
       const named = input.project?.trim() ?? "";
       const { projects } = await this.listProjects();
-      const namedMatches = named ? bound.filter((stored) => projects.find((project) => project.id === stored.projectId)?.name === named) : bound;
+      const nameOf = (projectId: string) => projects.find((project) => project.id === projectId)?.name ?? projectId;
+      const label = (projectId: string) => `${nameOf(projectId)} #${projectId.slice(0, 8)}`;
+      // --project 先认 id（含短前缀），再认名称：同名的多个项目只能靠 id 分开。
+      const namedMatches = !named ? bound : (() => {
+        const byId = bound.filter((stored) => stored.projectId === named);
+        if (byId.length) return byId;
+        const byName = bound.filter((stored) => nameOf(stored.projectId) === named);
+        if (byName.length) return byName;
+        return bound.filter((stored) => stored.projectId.startsWith(named));
+      })();
       if (named && !namedMatches.length) {
-        const names = bound
-          .map((stored) => projects.find((project) => project.id === stored.projectId)?.name ?? stored.projectId)
-          .join("、");
+        const names = bound.map((stored) => label(stored.projectId)).join("、");
         return { text: `没有名为「${named}」的协作项目，当前任务属于：${names}。向用户确认后重试。` };
       }
       if (namedMatches.length > 1) {
-        const names = namedMatches
-          .map((stored) => projects.find((project) => project.id === stored.projectId)?.name ?? stored.projectId)
-          .join("、");
-        return { text: `当前任务关联了多个协作项目：${names}。请用户选择后加上 --project <完整名称> 重试。` };
+        const names = namedMatches.map((stored) => label(stored.projectId)).join("、");
+        return { text: `当前任务关联了多个协作项目：${names}。请用户选择后加上 --project <id 或完整名称> 重试（# 后是项目 id 的前 8 位）。` };
       }
       const stored = namedMatches[0]!;
       const name = projects.find((project) => project.id === stored.projectId)?.name ?? "";

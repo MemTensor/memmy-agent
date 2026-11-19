@@ -950,9 +950,11 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
 /**
  * Renders the chat home page.
  *
+ * @param props.hiddenSurface 这个首页只是被保留挂载（当前显示的是看板等别的页面）：
+ *   应用级弹窗交给显示中的那个外壳渲染，避免同一份请求在两层外壳里各开一个。
  * @returns The chat home page node.
  */
-export function HomePage() {
+export function HomePage(props: { hiddenSurface?: boolean } = {}) {
   const { clients } = useApiClients();
   const [gatewayStartupIssue, setGatewayStartupIssue] = useState<AgentGatewayStartupIssue | undefined>(
     clients?.runtimeConfig.agentGateway?.startupIssue
@@ -3416,6 +3418,7 @@ export function HomePage() {
           threadPanel.closeTab("recording:main");
         }
       }}
+      ownsOverlays={props.hiddenSurface !== true}
       topBar={hasConversationShell ? (
         <AgentThreadToolbar
           key={chatScopeKey}

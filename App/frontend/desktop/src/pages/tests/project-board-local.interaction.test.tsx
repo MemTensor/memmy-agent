@@ -224,7 +224,8 @@ describe("project board", () => {
     await act(async () => document.querySelector<HTMLElement>(".modal-body [role='switch']")!.click());
     await flush();
 
-    expect(mocks.createProject).toHaveBeenCalledWith(PROJECT.name, PROJECT.rootPath);
+    // 带上本机项目：服务端据此判断这个项目已经共享过，不再新建一个同名项目。
+    expect(mocks.createProject).toHaveBeenCalledWith(PROJECT.name, PROJECT.rootPath, { localProjectId: PROJECT.id });
     expect(mocks.bindLocalProject).toHaveBeenCalledWith(CLOUD_PROJECT.id, PROJECT.id);
     // The project already has sessions, so the person picks which of them members may read.
     expect(document.body.textContent).toContain("选择要同步的任务");

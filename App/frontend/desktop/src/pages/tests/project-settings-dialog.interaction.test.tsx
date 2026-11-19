@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "../../api/http.js";
 import type { CollabClient } from "../../api/collab-client.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
+import { getCollabProjectsSnapshot } from "../../app/collab-projects-store.js";
 import { ProjectBoardSettingsDialog } from "../collab-page.js";
 
 const mocks = vi.hoisted(() => ({
@@ -266,8 +267,25 @@ describe("项目设置弹窗", () => {
     await act(async () => switchNamed("开启项目协作")!.click());
     await flush();
     expect(mocks.createProject).toHaveBeenCalledTimes(1);
-    expect(mocks.createProject).toHaveBeenCalledWith(PROJECT.name, PROJECT.rootPath);
+    expect(mocks.createProject).toHaveBeenCalledWith(PROJECT.name, PROJECT.rootPath, { localProjectId: PROJECT.id });
     expect(handlers.onShared).toHaveBeenCalled();
+  });
+
+  it("绑定失败时界面仍然算已共享：云端项目已经建好，不能再让人点一次", async () => {
+    mocks.createProject.mockResolvedValue({ project: SHARED });
+    // 本机那一笔没写成（例如磁盘满）：服务端在建项时已经绑好，界面不该退回「可以再点一次」的状态。
+    mocks.bindLocalProject.mockRejectedValueOnce(new Error("disk full"));
+    await render({ shared: null });
+
+    await act(async () => switchNamed("开启项目协作")!.click());
+    await flush();
+
+    expect(mocks.createProject).toHaveBeenCalledTimes(1);
+    expect(handlers.onShared).toHaveBeenCalled();
+    expect(handlers.onFailed).not.toHaveBeenCalled();
+    // 侧栏与看板读的 store 里已经记下这条绑定。
+    expect(getCollabProjectsSnapshot().projects?.find((project) => project.id === SHARED.id)?.localProjectId)
+      .toBe(PROJECT.id);
   });
 
   it("未共享的本机项目：点整行任意位置也能开启协作", async () => {

@@ -443,7 +443,7 @@ describe("AppFrame", () => {
       source.indexOf('title={t("appFrame.tasks")}')
     );
 
-    // 一次点击就走新建项目：按钮直接调用 newProject()，弹窗由 createPending 打开。
+    // 一次点击就走新建项目：按钮直接调用 newProject()，弹窗由共享 store 的 createOpen 打开。
     expect(projectHeaderBlock).toContain("newProject();");
     expect(projectHeaderBlock).not.toContain("setProjectCreateMenuAnchor");
     expect(projectHeaderBlock).not.toContain("SidebarWorkspacePickerMenu");

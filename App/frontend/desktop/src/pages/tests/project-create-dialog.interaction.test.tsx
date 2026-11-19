@@ -205,7 +205,8 @@ describe("new project dialog", () => {
     await flush();
 
     // 本机还没有任何在线项目：这一次新建带上演示标记，云端再决定是否真的演示。
-    expect(mocks.createProject).toHaveBeenCalledWith("demo", "/Users/me/.memmy/local-projects/demo", { demo: true });
+    // 新建的这条本机项目随请求一起给出，云端重试时拿回同一个项目。
+    expect(mocks.createProject).toHaveBeenCalledWith("demo", "/Users/me/.memmy/local-projects/demo", { demo: true, localProjectId: "local-1" });
     expect(mocks.bindLocalProject).toHaveBeenCalledWith("cloud-1", "local-1");
     // A brand-new project has no sessions yet, so nothing is asked and nothing pops up over the board.
     expect(getCollabProjectsSnapshot().taskPickerFor).toBeNull();

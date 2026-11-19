@@ -555,6 +555,47 @@ describe("collab service", () => {
     expect(page.sessions[1]!.conversationId).toBeUndefined();
   });
 
+  it("reuses the online project this local project already runs in, instead of creating another", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(root);
+    const project = { id: "p-9f1c2e", name: "灵动锦鲤01", role: "owner", memberCount: 1, sessionCount: 0, createdAt: null };
+    const { fetcher, calls } = fakeFetch({
+      "POST /api/collab/projects": () => ({ code: 0, data: { project } }),
+      "GET /api/collab/projects": () => ({ code: 0, data: { projects: [project] } })
+    });
+    const svc = service(fetcher, { projectsDir: join(root, "projects") });
+
+    // 第一次：云端新建，绑定在同一次请求里写好，不必等前端再调一次。
+    const created = await svc.createProject("灵动锦鲤01", undefined, { localProjectId: "local-9" });
+    expect(created.project).toMatchObject({ id: "p-9f1c2e", localProjectId: "local-9" });
+    expect(calls[0]!.body).toMatchObject({ name: "灵动锦鲤01", localProjectId: "local-9" });
+    expect(await svc.localProjectIdFor("p-9f1c2e")).toBe("local-9");
+
+    // 第二次：已经有绑定，直接拿回来，一个建项请求都不发。
+    calls.length = 0;
+    const again = await svc.createProject("灵动锦鲤01", undefined, { localProjectId: "local-9" });
+    expect(again.project).toMatchObject({ id: "p-9f1c2e", localProjectId: "local-9" });
+    expect(calls.map((call) => `${call.method} ${new URL(call.url).pathname}`)).toEqual(["GET /api/collab/projects"]);
+  });
+
+  it("keeps one local project bound to one online project", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
+    roots.push(root);
+    const { fetcher } = fakeFetch({
+      "POST /api/collab/projects": () => ({
+        code: 0,
+        data: { project: { id: "p-2", name: "灵动锦鲤01", role: "owner", memberCount: 1, sessionCount: 0, createdAt: null } }
+      })
+    });
+    const svc = service(fetcher, { projectsDir: join(root, "projects") });
+
+    await svc.bindLocalProject("p-1", "local-9");
+    // 换绑：旧的这一条要被释放，否则两个同名项目会一起持有同一个本机项目。
+    await svc.bindLocalProject("p-2", "local-9");
+    expect(await svc.localProjectIdFor("p-1")).toBeNull();
+    expect(await svc.localProjectIdFor("p-2")).toBe("local-9");
+  });
+
   it("creates a cloud project with a managed working directory when none was chosen", async () => {
     const root = mkdtempSync(join(tmpdir(), "memmy-collab-home-"));
     roots.push(root);
@@ -1333,11 +1374,11 @@ describe("collab service", () => {
       "当前任务：claude_code · 「会话 a1」 · 2026-10-22",
       "",
       "你加入了 2 个协作项目：",
-      "Memmy 开发 · 5 位成员 · 32 个任务",
-      "设计评审 · 3 位成员 · 0 个任务",
+      "Memmy 开发 #p-1 · 5 位成员 · 32 个任务",
+      "设计评审 #p-2 · 3 位成员 · 0 个任务",
       "",
       "请用户选择项目，确认后运行：",
-      "memmy-project session add --project \"<完整名称>\""
+      "memmy-project session add --project \"<名称或 id>\""
     ].join("\n"));
 
     const partial = await svc.addCurrentSession({ project: "开发", cwd: "/repo" });

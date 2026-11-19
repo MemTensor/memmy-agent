@@ -323,8 +323,13 @@ export interface CollabClient {
   /**
    * Creates the cloud project and returns the directory its tasks run in, absent on a backend without it.
    * `demo` 只在「本人第一次创建共享项目」时带：是否真的开始演示由云端决定，传了也不代表一定演示。
+   * `localProjectId` 让这次创建可重复：同一个本机项目已经共享过时拿回的是原来那个项目，不会再建一个。
    */
-  createProject(name: string, directory?: string, options?: { demo?: boolean }): Promise<{ project: CollabProject; localDirectory?: string }>;
+  createProject(
+    name: string,
+    directory?: string,
+    options?: { demo?: boolean; localProjectId?: string }
+  ): Promise<{ project: CollabProject; localDirectory?: string }>;
   /** 演示进行中的心跳与步骤上报：云端按它判断演示还活着。旧后端没有这两个接口。 */
   demoHeartbeat?(projectId: string, step: "1" | "2" | "3" | "finish"): Promise<{ demo: CollabDemo }>;
   /** 结束演示：云端立即把演示成员移出项目；幂等，发不出去靠云端心跳超时兜底。 */
@@ -467,7 +472,8 @@ export function createHttpCollabClient(config: RuntimeConfig): CollabClient {
         body: {
           name,
           ...(directory ? { directory } : {}),
-          ...(options?.demo ? { demo: true } : {})
+          ...(options?.demo ? { demo: true } : {}),
+          ...(options?.localProjectId ? { localProjectId: options.localProjectId } : {})
         }
       });
     },

@@ -97,9 +97,9 @@ function resetStorage(name: "localStorage" | "sessionStorage"): void {
 }
 
 /** The new-project dialog is mounted by AppFrame, so the store flag is what this host hands over. */
-function createProjectRequested(): { createPending: boolean; createShareDefault: boolean } {
+function createProjectRequested(): { createOpen: boolean; createShareDefault: boolean } {
   const snapshot = getCollabProjectsSnapshot();
-  return { createPending: snapshot.createPending, createShareDefault: snapshot.createShareDefault };
+  return { createOpen: snapshot.createOpen, createShareDefault: snapshot.createShareDefault };
 }
 
 describe("collab launch prompt", () => {
@@ -210,7 +210,7 @@ describe("collab launch prompt", () => {
     await click(primary());
 
     expect(dialog()).toBeNull();
-    expect(createProjectRequested()).toEqual({ createPending: true, createShareDefault: true });
+    expect(createProjectRequested()).toEqual({ createOpen: true, createShareDefault: true });
     // The run's one announcement is spent, so the other large prompts wait for the next launch.
     expect(hasCollabLaunchPromptClaimedThisRun()).toBe(true);
   });
@@ -224,7 +224,7 @@ describe("collab launch prompt", () => {
     });
 
     expect(dialog()).toBeNull();
-    expect(createProjectRequested().createPending).toBe(false);
+    expect(createProjectRequested().createOpen).toBe(false);
   });
 
   it("closes when the backdrop is clicked", async () => {

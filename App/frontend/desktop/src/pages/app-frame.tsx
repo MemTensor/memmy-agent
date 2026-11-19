@@ -28,7 +28,8 @@ import {
   addCollabProject,
   addPendingApplication,
   clearCollabProjects,
-  consumeCreateProjectRequest,
+  clearCreateProjectDemo,
+  closeCreateProject,
   getCollabProjectsSnapshot,
   loadCollabProjects,
   markCollabProjectBound,
@@ -134,6 +135,12 @@ export interface AppFrameProps {
   recordingViewed?: boolean;
   /** Called before the sidebar switches to a new task. */
   onNewTask?: () => void;
+  /**
+   * 这个外壳是不是当前显示的那一个。首页在看过浏览器/录音之后会被保留挂载，
+   * 这时看板上同时存在两个外壳：隐藏的那个不渲染应用级弹窗，
+   * 否则同一份请求会开出两个弹窗，关掉看得见的那个之后切回首页还会冒出来。
+   */
+  ownsOverlays?: boolean;
   /** When set, replaces the main app sidebar with settings section navigation. */
   settingsNav?: SettingsSidebarNav;
   children: ReactNode;
@@ -427,28 +434,47 @@ export function AppFrame(props: AppFrameProps) {
   const collabBindAttempts = useRef<Set<string>>(new Set());
   /** A project joined from the join dialog: its board opens once its local project exists. */
   const openBoardWhenBound = useRef<string | null>(null);
+  // 本机项目清单用 ref 读：自愈要根据目录找已有项目，但不该因为侧边栏重画就重跑一遍。
+  const localProjectsRef = useRef(state.agent.projects);
+  localProjectsRef.current = state.agent.projects;
   useEffect(() => {
     if (!collabClient || !collabEnabled) return;
     const pending = (collabSnapshot.projects ?? []).filter((project) => (
       !project.localProjectId && !collabBindAttempts.current.has(project.id)
     ));
     if (!pending.length) return;
+    // 已经被别的在线项目占用的本机项目：那里的任务属于那个项目，不能再分给这个孤儿。
+    const boundLocalIds = new Set(
+      (collabSnapshot.projects ?? [])
+        .map((project) => project.localProjectId)
+        .filter((id): id is string => Boolean(id))
+    );
     void (async () => {
       for (const project of pending) {
         collabBindAttempts.current.add(project.id);
         try {
           const directory = await collabClient.ensureWorkingDirectory(project.id, project.name);
-          const outcome = await taskStateCoordinator.mutateProject({
-            kind: "create",
-            // A folder the person chose when joining may hold their own files and projects: the shared project
-            // gets a record of its own there, so it never adopts a local project and uploads its tasks.
-            input: directory.chosen
-              ? { mode: "existing", path: directory.localDirectory, name: project.name, allowShared: true }
-              : { mode: "blank", path: directory.localDirectory, name: project.name }
-          });
-          const localProjectId = outcome.status === "committed" ? outcome.project?.id : undefined;
+          // 这个目录已经有本机项目、且它还没被别的在线项目占用，就直接用它。
+          // 否则每打开一次就为同一个目录再建一个同名项目，最后清理时分不清哪个是哪个。
+          const reusable = localProjectsRef.current.find((localProject) => (
+            sameWorkspacePath(localProject.rootPath, directory.localDirectory)
+            && !boundLocalIds.has(localProject.id)
+          ));
+          let localProjectId = reusable?.id;
+          if (!localProjectId) {
+            const outcome = await taskStateCoordinator.mutateProject({
+              kind: "create",
+              // A folder the person chose when joining may hold their own files and projects: the shared project
+              // gets a record of its own there, so it never adopts a local project and uploads its tasks.
+              input: directory.chosen
+                ? { mode: "existing", path: directory.localDirectory, name: project.name, allowShared: true }
+                : { mode: "blank", path: directory.localDirectory, name: project.name }
+            });
+            localProjectId = outcome.status === "committed" ? outcome.project?.id : undefined;
+          }
           if (!localProjectId) continue;
           await collabClient.bindLocalProject(project.id, localProjectId);
+          boundLocalIds.add(localProjectId);
           markCollabProjectBound(project.id, localProjectId);
           if (openBoardWhenBound.current === project.id) {
             openBoardWhenBound.current = null;
@@ -649,11 +675,6 @@ export function AppFrame(props: AppFrameProps) {
   }, [collabSnapshot.projects, state.agent.projects, renamingProjectId]);
 
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
-  const [createProjectOpen, setCreateProjectOpen] = useState(false);
-  /** 新建弹窗打开时「与成员共享」的初始状态：只有新功能介绍的最后一页会要求默认开启。 */
-  const [createProjectShare, setCreateProjectShare] = useState(false);
-  /** 这次新建是从新功能大卡点进来的体验入口：引导先只亮「创建项目」。 */
-  const [createProjectDemo, setCreateProjectDemo] = useState(false);
   const [joinProjectOpen, setJoinProjectOpen] = useState(false);
   /** 浏览器里的邀请链接经 memmy://invite/<code> 带进来的邀请码：弹窗打开时直接预填并预览。 */
   const [inviteLinkCode, setInviteLinkCode] = useState<string | null>(null);
@@ -689,22 +710,18 @@ export function AppFrame(props: AppFrameProps) {
   /** The online project the person is about to leave, while the confirmation is open. */
   const [leaveOnlineProjectId, setLeaveOnlineProjectId] = useState<string | null>(null);
   const [leavingOnlineProject, setLeavingOnlineProject] = useState(false);
-  // The sidebar, the board's empty state and the board header all ask for this dialog through one flag.
-  const createPending = collabSnapshot.createPending;
+  // 新建弹窗的开与关都在 store 里：首页在浏览完后会被保留挂载，看板上可能同时有两个应用外壳，
+  // 各自持一份 state 就会出现「关掉后切回首页，弹窗又冒出来」。
+  const createProjectOpen = collabSnapshot.createOpen;
+  // 体验入口：弹窗还没建出项目，引导先停在这里，蒙版只亮「创建项目」。
   useEffect(() => {
-    if (!createPending) return;
-    setCreateProjectShare(collabSnapshot.createShareDefault);
-    setCreateProjectDemo(collabSnapshot.createDemo);
-    setCreateProjectOpen(true);
-    // 体验入口：弹窗还没建出项目，引导先停在这里，蒙版只亮「创建项目」。
-    if (collabSnapshot.createDemo) startDemoGuideBeforeProject({ force: isDesktopPromptPreview("collabLaunch") });
-    consumeCreateProjectRequest();
-  }, [createPending, collabSnapshot.createShareDefault, collabSnapshot.createDemo]);
-  // 引导在新建弹窗上被退出（本机从此不再自动演示）：弹窗回到普通新建，
-  // 免得同一次弹窗里再点「创建项目」时还带着 `demo`，让云端又重新开一场演示。
+    if (!createProjectOpen || !collabSnapshot.createDemo) return;
+    startDemoGuideBeforeProject({ force: isDesktopPromptPreview("collabLaunch") });
+  }, [createProjectOpen, collabSnapshot.createDemo]);
+  // 引导在新建弹窗上被退出（本机从此不再自动演示）：弹窗回到普通新建。
   useEffect(() => {
     if (demoGuideActive || !readDemoGuideDone()) return;
-    setCreateProjectDemo(false);
+    clearCreateProjectDemo();
   }, [demoGuideActive]);
   const [taskListMenuAnchor, setTaskListMenuAnchor] = useState<SidebarMenuAnchor | null>(null);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
@@ -2270,119 +2287,124 @@ export function AppFrame(props: AppFrameProps) {
         openTaskPage={() => dispatch(appActions.navigate("/main"))}
         onNotice={showCollabNotice}
       />
-      <CollabJoinProjectDialog
-        open={joinProjectOpen}
-        // 深链接带进来的邀请码：弹窗打开即预填并预览。
-        initialReference={inviteLinkCode ?? undefined}
-        onClose={() => {
-          setJoinProjectOpen(false);
-          setInviteLinkCode(null);
-        }}
-        onApplied={(application) => {
-          addPendingApplication(application);
-          if (collabClient) void loadCollabProjects(collabClient);
-        }}
-        onNicknameChanged={(nickname) => {
-          // 昵称已在云端更新，同步到本地 Redux state，侧边栏和标题栏立即显示新名字。
-          dispatch(appActions.accountUpdated({ nickname }));
-        }}
-        onJoined={(project) => {
-          setInviteLinkCode(null);
-          if (project.localProjectId) {
-            // Already a member with a project on this computer: just open it.
-            openProjectBoard(project.localProjectId);
-            return;
-          }
-          // A project left earlier in this run gets another binding attempt now that the person is back in.
-          collabBindAttempts.current.delete(project.id);
-          openBoardWhenBound.current = project.id;
-          addCollabProject(project);
-        }}
-      />
-      <CollabCreateProjectDialog
-        open={createProjectOpen}
-        // API Key 模式不连接云端：新建弹窗里不出现「与成员共享」，项目就只建在本机。
-        shareAvailable={collabEnabled}
-        defaultShare={createProjectShare}
-        demo={createProjectDemo}
-        onClose={() => {
-          // 人自己关掉弹窗：引导随之收起，什么都不发生；之后手建第一个协作项目走的是原来那套。
-          setCreateProjectOpen(false);
-          dismissDemoGuideBeforeProject();
-        }}
-        onCreated={(localProjectId, outcome) => {
-          setCreateProjectOpen(false);
-          // 没共享出去就没有演示：收起「建项目之前」的引导，项目照常建在本机。
-          if (!outcome.shareRequested) dismissDemoGuideBeforeProject();
-          // Only now, once the project exists, does the window move on.
-          const destination = resolveCreatedProjectDestination(localProjectId, outcome.shareRequested);
-          if (destination.kind === "board") {
-            openProjectBoard(localProjectId);
-            return;
-          }
-          // 本机项目直接进入它的新会话：先把侧栏里的这一行露出来，再打开空白草稿。
-          expandProjectInSidebar(localProjectId);
-          openNewAgent(destination.target);
-        }}
-        onShared={(project) => {
-          addCollabProject(project);
-          // 新手引导只认云端：项目视图里 `demo.active` 为真才开始，其余一律按普通项目处理。
-          if (project.demo?.active && collabClient) {
-            startDemoGuide({
-              client: collabClient,
-              projectId: project.id,
-              localProjectId: null,
-              memberUserId: project.demo.memberUserId,
-              memberName: project.demo.memberName,
-              // 剧本内容随项目的 demo 字段下来：界面上的话跟着云端剧本走，不在这边另写一份。
-              copy: project.demo.copy
-            });
-          } else {
-            // 云端说这次不演示（开关关了、名单外、已经体验过）：静默收起，不报错也不提示。
-            dismissDemoGuideBeforeProject();
-          }
-        }}
-        onJoinProject={() => {
-          // 同一个弹窗的另一种模式：关掉新建、打开加入，位置与尺寸都不变。
-          setCreateProjectOpen(false);
-          // 体验入口的另一条路：「加入项目」不是这次演示要走的，蒙版随之收起。
-          dismissDemoGuideBeforeProject();
-          setJoinProjectOpen(true);
-        }}
-        onShareFailed={(reason) => {
-          // The project is usable on this computer; only sharing needs another try from its settings.
-          console.warn(`Project created without sharing: ${reason}`);
-          dismissDemoGuideBeforeProject();
-          // 看板顶部提示：协作项目服务暂不可用，等它恢复后可在项目配置里重试。
-          showCollabNotice(t("collab.notice.shareUnavailable"));
-          dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
-            source: "sidebar",
-            message: "collab.create.shareFailed"
-          })));
-        }}
-        onShareLimitReached={(limit) => {
-          // 额度用完不是故障：项目照建在本机，提示要说清上限是多少、怎么腾出额度。
-          console.warn(`Project created without sharing: owned project limit ${limit} reached`);
-          dismissDemoGuideBeforeProject();
-          showCollabNotice(t("collab.notice.shareQuotaExceeded", { limit }));
-          dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
-            source: "sidebar",
-            message: "collab.create.shareQuotaExceeded"
-          })));
-        }}
-        onBound={(projectId, localProjectId) => {
-          markCollabProjectBound(projectId, localProjectId);
-          demoGuideBoundLocalProject(projectId, localProjectId);
-        }}
-        onBindFailed={(reason) => {
-          // The project exists; only its local record is missing, so the reason is logged rather than shown raw.
-          console.warn(`Project created without its local record: ${reason}`);
-          dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
-            source: "sidebar",
-            message: "collab.create.bindFailed"
-          })));
-        }}
-      />
+      {/* 应用级弹窗只由显示中的那个外壳渲染：保留挂载的首页外壳会同时看到同一份请求。 */}
+      {props.ownsOverlays === false ? null : (
+        <>
+          <CollabJoinProjectDialog
+            open={joinProjectOpen}
+            // 深链接带进来的邀请码：弹窗打开即预填并预览。
+            initialReference={inviteLinkCode ?? undefined}
+            onClose={() => {
+              setJoinProjectOpen(false);
+              setInviteLinkCode(null);
+            }}
+            onApplied={(application) => {
+              addPendingApplication(application);
+              if (collabClient) void loadCollabProjects(collabClient);
+            }}
+            onNicknameChanged={(nickname) => {
+              // 昵称已在云端更新，同步到本地 Redux state，侧边栏和标题栏立即显示新名字。
+              dispatch(appActions.accountUpdated({ nickname }));
+            }}
+            onJoined={(project) => {
+              setInviteLinkCode(null);
+              if (project.localProjectId) {
+                // Already a member with a project on this computer: just open it.
+                openProjectBoard(project.localProjectId);
+                return;
+              }
+              // A project left earlier in this run gets another binding attempt now that the person is back in.
+              collabBindAttempts.current.delete(project.id);
+              openBoardWhenBound.current = project.id;
+              addCollabProject(project);
+            }}
+          />
+          <CollabCreateProjectDialog
+            open={createProjectOpen}
+            // API Key 模式不连接云端：新建弹窗里不出现「与成员共享」，项目就只建在本机。
+            shareAvailable={collabEnabled}
+            defaultShare={collabSnapshot.createShareDefault}
+            demo={collabSnapshot.createDemo}
+            onClose={() => {
+              // 人自己关掉弹窗：引导随之收起，什么都不发生；之后手建第一个协作项目走的是原来那套。
+              closeCreateProject();
+              dismissDemoGuideBeforeProject();
+            }}
+            onCreated={(localProjectId, outcome) => {
+              closeCreateProject();
+              // 没共享出去就没有演示：收起「建项目之前」的引导，项目照常建在本机。
+              if (!outcome.shareRequested) dismissDemoGuideBeforeProject();
+              // Only now, once the project exists, does the window move on.
+              const destination = resolveCreatedProjectDestination(localProjectId, outcome.shareRequested);
+              if (destination.kind === "board") {
+                openProjectBoard(localProjectId);
+                return;
+              }
+              // 本机项目直接进入它的新会话：先把侧栏里的这一行露出来，再打开空白草稿。
+              expandProjectInSidebar(localProjectId);
+              openNewAgent(destination.target);
+            }}
+            onShared={(project) => {
+              addCollabProject(project);
+              // 新手引导只认云端：项目视图里 `demo.active` 为真才开始，其余一律按普通项目处理。
+              if (project.demo?.active && collabClient) {
+                startDemoGuide({
+                  client: collabClient,
+                  projectId: project.id,
+                  localProjectId: null,
+                  memberUserId: project.demo.memberUserId,
+                  memberName: project.demo.memberName,
+                  // 剧本内容随项目的 demo 字段下来：界面上的话跟着云端剧本走，不在这边另写一份。
+                  copy: project.demo.copy
+                });
+              } else {
+                // 云端说这次不演示（开关关了、名单外、已经体验过）：静默收起，不报错也不提示。
+                dismissDemoGuideBeforeProject();
+              }
+            }}
+            onJoinProject={() => {
+              // 同一个弹窗的另一种模式：关掉新建、打开加入，位置与尺寸都不变。
+              closeCreateProject();
+              // 体验入口的另一条路：「加入项目」不是这次演示要走的，蒙版随之收起。
+              dismissDemoGuideBeforeProject();
+              setJoinProjectOpen(true);
+            }}
+            onShareFailed={(reason) => {
+              // The project is usable on this computer; only sharing needs another try from its settings.
+              console.warn(`Project created without sharing: ${reason}`);
+              dismissDemoGuideBeforeProject();
+              // 看板顶部提示：协作项目服务暂不可用，等它恢复后可在项目配置里重试。
+              showCollabNotice(t("collab.notice.shareUnavailable"));
+              dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
+                source: "sidebar",
+                message: "collab.create.shareFailed"
+              })));
+            }}
+            onShareLimitReached={(limit) => {
+              // 额度用完不是故障：项目照建在本机，提示要说清上限是多少、怎么腾出额度。
+              console.warn(`Project created without sharing: owned project limit ${limit} reached`);
+              dismissDemoGuideBeforeProject();
+              showCollabNotice(t("collab.notice.shareQuotaExceeded", { limit }));
+              dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
+                source: "sidebar",
+                message: "collab.create.shareQuotaExceeded"
+              })));
+            }}
+            onBound={(projectId, localProjectId) => {
+              markCollabProjectBound(projectId, localProjectId);
+              demoGuideBoundLocalProject(projectId, localProjectId);
+            }}
+            onBindFailed={(reason) => {
+              // The project exists; only its local record is missing, so the reason is logged rather than shown raw.
+              console.warn(`Project created without its local record: ${reason}`);
+              dispatch(agentActions.operationFailed("sidebar", createAgentOperationError({
+                source: "sidebar",
+                message: "collab.create.bindFailed"
+              })));
+            }}
+          />
+        </>
+      )}
       {deferredGuidanceStep === "improvement" && state.bootstrap?.app.userMode !== "byok" && state.bootstrap?.onboarding.improvementProgram === "unset" && guidanceWorkspaceReady && (
         <ImprovementProgramModal
           onChoice={chooseDeferredImprovementProgram}

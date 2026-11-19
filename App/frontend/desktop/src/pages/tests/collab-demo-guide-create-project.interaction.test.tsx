@@ -217,7 +217,7 @@ describe("new project dialog and the demo flag", () => {
 
   it("asks the cloud for the demo on the first shared project", async () => {
     await createNamed("项目协作体验");
-    expect(mocks.createProject).toHaveBeenCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: true });
+    expect(mocks.createProject).toHaveBeenCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: true, localProjectId: "local-1" });
   });
 
   it("leaves an ordinary new project empty and without the anchor", async () => {
@@ -240,7 +240,7 @@ describe("new project dialog and the demo flag", () => {
       });
     });
     await createNamed("第二个项目");
-    expect(mocks.createProject).toHaveBeenCalledWith("第二个项目", "/Users/me/.memmy/local-projects/demo", { demo: false });
+    expect(mocks.createProject).toHaveBeenCalledWith("第二个项目", "/Users/me/.memmy/local-projects/demo", { demo: false, localProjectId: "local-1" });
   });
 
   it("still asks for the demo from the launch card when the person already has one", async () => {
@@ -258,7 +258,7 @@ describe("new project dialog and the demo flag", () => {
     });
     await renderDemoDialog();
     await createNamed("项目协作体验");
-    expect(mocks.createProject).toHaveBeenCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: true });
+    expect(mocks.createProject).toHaveBeenCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: true, localProjectId: "local-1" });
   });
   /**
    * 云端说这个人这次不能演示（已体验过、开关关掉、不在名单）：六屏就不该开。
@@ -278,19 +278,19 @@ describe("new project dialog and the demo flag", () => {
     // 分享仍按大卡的意图默认打开，请求标记照旧交给云端判断，界面不自己编结果。
     expect(document.querySelector<HTMLElement>("[role='switch']")?.getAttribute("aria-checked")).toBe("true");
     await createNamed("普通项目");
-    expect(mocks.createProject).toHaveBeenCalledWith("普通项目", "/Users/me/.memmy/local-projects/demo", { demo: true });
+    expect(mocks.createProject).toHaveBeenCalledWith("普通项目", "/Users/me/.memmy/local-projects/demo", { demo: true, localProjectId: "local-1" });
   });
 
   it("never asks for the demo once this machine has left the walkthrough", async () => {
     // 用户点过「退出引导」：本机标记已写，之后第一次创建共享项目也不再请求演示。
     markDemoGuideDone();
     await createNamed("我的第一个项目");
-    expect(mocks.createProject).toHaveBeenCalledWith("我的第一个项目", "/Users/me/.memmy/local-projects/demo", { demo: false });
+    expect(mocks.createProject).toHaveBeenCalledWith("我的第一个项目", "/Users/me/.memmy/local-projects/demo", { demo: false, localProjectId: "local-1" });
 
     // 大卡入口同样不带：本机已经退出过，就不再带人走一遍。
     await renderDemoDialog();
     await createNamed("项目协作体验");
-    expect(mocks.createProject).toHaveBeenLastCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: false });
+    expect(mocks.createProject).toHaveBeenLastCalledWith("项目协作体验", "/Users/me/.memmy/local-projects/demo", { demo: false, localProjectId: "local-1" });
   });
 
   it("still asks for the demo when the person has only joined others' projects", async () => {
@@ -306,6 +306,6 @@ describe("new project dialog and the demo flag", () => {
       });
     });
     await createNamed("我的第一个项目");
-    expect(mocks.createProject).toHaveBeenCalledWith("我的第一个项目", "/Users/me/.memmy/local-projects/demo", { demo: true });
+    expect(mocks.createProject).toHaveBeenCalledWith("我的第一个项目", "/Users/me/.memmy/local-projects/demo", { demo: true, localProjectId: "local-1" });
   });
 });

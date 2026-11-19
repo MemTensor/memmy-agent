@@ -4,7 +4,7 @@ import type { CollabClient, CollabProject } from "../../api/collab-client.js";
 import {
   addCollabProject,
   addPendingApplication,
-  consumeCreateProjectRequest,
+  closeCreateProject,
   consumeTaskPickerRequest,
   getCollabProjectsSnapshot,
   loadCollabProjects,
@@ -117,30 +117,36 @@ describe("collab projects store", () => {
     expect(sharedProjectFor(null, "local-a")).toBeNull();
   });
 
-  it("hands one create request to the frame, then clears it", () => {
+  it("keeps the open state until it is closed, for every mounted frame", () => {
     requestCreateProject();
-    expect(getCollabProjectsSnapshot().createPending).toBe(true);
+    expect(getCollabProjectsSnapshot().createOpen).toBe(true);
 
-    consumeCreateProjectRequest();
-    expect(getCollabProjectsSnapshot().createPending).toBe(false);
+    // 打开与关闭都在 store 里：任何一处关闭对所有挂着的外壳都生效，
+    // 所以关掉之后切到另一个页面也不会再冒出一个弹窗。
+    closeCreateProject();
+    expect(getCollabProjectsSnapshot().createOpen).toBe(false);
     expect(getCollabProjectsSnapshot().createDemo).toBe(false);
+
+    // 再关一次什么都不改，便于 onClose 与 onCreated 都调用它。
+    closeCreateProject();
+    expect(getCollabProjectsSnapshot().createOpen).toBe(false);
   });
 
   it("carries the walkthrough entry through the create request", () => {
     // 从新功能大卡点「新建项目」：弹窗要预填名称、提前打开共享，并让引导停在「创建项目」。
     requestCreateProject({ share: true, demo: true });
-    expect(getCollabProjectsSnapshot()).toMatchObject({ createPending: true, createShareDefault: true, createDemo: true });
+    expect(getCollabProjectsSnapshot()).toMatchObject({ createOpen: true, createShareDefault: true, createDemo: true });
 
     // 看完一次就清掉：之后从侧栏新建不会又带着体验。
-    consumeCreateProjectRequest();
-    expect(getCollabProjectsSnapshot()).toMatchObject({ createPending: false, createShareDefault: false, createDemo: false });
+    closeCreateProject();
+    expect(getCollabProjectsSnapshot()).toMatchObject({ createOpen: false, createShareDefault: false, createDemo: false });
 
     // 侧栏、看板空态的普通新建不带这个标记。
     requestCreateProject();
     expect(getCollabProjectsSnapshot().createDemo).toBe(false);
     requestCreateProject({ share: true });
     expect(getCollabProjectsSnapshot().createDemo).toBe(false);
-    consumeCreateProjectRequest();
+    closeCreateProject();
   });
 
   it("keeps a just-submitted application until the cloud lists it, then replaces the list", async () => {
