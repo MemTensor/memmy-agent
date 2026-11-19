@@ -398,7 +398,7 @@ body.memmy-window-fullscreen {
   gap: 0;
   padding: 0;
   overflow: visible;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
+  border: 1px solid var(--border-content-panel);
   border-radius: var(--radius-composer);
   background: color-mix(in srgb, var(--color-canvas-oat) 72%, var(--color-background-paper));
   box-shadow: 0 8px 20px rgba(17, 29, 28, 0.03);

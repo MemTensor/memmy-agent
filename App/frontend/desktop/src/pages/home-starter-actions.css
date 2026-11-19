@@ -12,10 +12,10 @@
   max-width: 100%;
   min-height: 36px;
   padding: 7px 12px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 48%, transparent);
+  border: 1px solid var(--border-content-panel);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--color-background-paper) 72%, transparent);
-  color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
+  background: var(--color-background-paper);
+  color: color-mix(in srgb, var(--color-text-ink) 74%, transparent);
   font-size: 13px;
   line-height: 20px;
   text-align: left;
@@ -23,7 +23,11 @@
   transition: background-color 120ms ease, color 120ms ease;
 }
 .home-prompt-suggestions button span { overflow-wrap: anywhere; }
-.home-prompt-suggestions button:hover {
-  background: color-mix(in srgb, var(--color-canvas-oat) 68%, transparent);
+.home-prompt-suggestions button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-text-ink) 3%, var(--color-background-paper));
   color: var(--color-text-ink);
+}
+.home-prompt-suggestions button:disabled {
+  cursor: default;
+  color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
 }

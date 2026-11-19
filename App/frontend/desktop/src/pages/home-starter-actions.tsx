@@ -5,7 +5,8 @@ import "./home-starter-actions.css";
 /** Starter prompts shown only while the user is composing a new task. */
 export function HomeStarterActions(props: {
   scenarios: PluginScenarioTarget[];
-  onSelect(prompt: string): void;
+  disabled?: boolean;
+  onSend(prompt: string): void;
 }) {
   const { t } = useTranslation();
   const legalDiagnosis = props.scenarios.find((scenario) => scenario.pluginId === "legal-labor"
@@ -14,22 +15,19 @@ export function HomeStarterActions(props: {
   return (
     <div className="home-prompt-suggestions" aria-label={t("home.empty")}>
       {legalDiagnosis && (
-        <button type="button" onClick={() => props.onSelect(legalDiagnosis.prompt)}>
+        <button type="button" disabled={props.disabled} onClick={() => props.onSend(legalDiagnosis.prompt)}>
           <span>{t("home.suggestion.legalDiagnosis")}</span>
         </button>
       )}
-      <button type="button" onClick={() => props.onSelect(t("home.suggestionPrompt.four"))}>
-        <span>{t("home.suggestion.four")}</span>
-      </button>
-      <button type="button" onClick={() => props.onSelect(t("home.suggestionPrompt.two"))}>
+      <button type="button" disabled={props.disabled} onClick={() => props.onSend(t("home.suggestionPrompt.two"))}>
         <span>{t("home.suggestion.two")}</span>
       </button>
       {!legalDiagnosis && (
-        <button type="button" onClick={() => props.onSelect(t("home.suggestionPrompt.one"))}>
+        <button type="button" disabled={props.disabled} onClick={() => props.onSend(t("home.suggestionPrompt.one"))}>
           <span>{t("home.suggestion.one")}</span>
         </button>
       )}
-      <button type="button" onClick={() => props.onSelect(t("home.suggestionPrompt.three"))}>
+      <button type="button" disabled={props.disabled} onClick={() => props.onSend(t("home.suggestionPrompt.three"))}>
         <span>{t("home.suggestion.three")}</span>
       </button>
     </div>

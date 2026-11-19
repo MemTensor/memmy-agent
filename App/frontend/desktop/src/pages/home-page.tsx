@@ -2103,6 +2103,13 @@ export function HomePage() {
     || draftProjectBlocked
     || state.agent.connectionStatus !== "connected"
     || state.agent.recoveringGeneration !== null;
+  const recommendationSendDisabled = !connection
+    || isCreatingChat
+    || messageSendInFlight
+    || currentSessionProjectBlocked
+    || draftProjectBlocked
+    || state.agent.connectionStatus !== "connected"
+    || state.agent.recoveringGeneration !== null;
   const composerStopDisabled = stopInFlight || Boolean(isCurrentGoalActive && goalMutationPending);
   const composerPrimaryAction = agentComposerPrimaryAction({
     isRunning: isCurrentAgentRunning,
@@ -2240,8 +2247,11 @@ export function HomePage() {
   /**
    * Sends one round of a live Agent conversation.
    */
-  async function sendMessage() {
-    if (runExactLocalSlashCommand(input)) {
+  async function sendMessage(suggestedPrompt?: string) {
+    const fromRecommendation = suggestedPrompt !== undefined;
+    const messageInput = suggestedPrompt ?? input;
+    if (fromRecommendation && recommendationSendDisabled) return;
+    if (!fromRecommendation && runExactLocalSlashCommand(input)) {
       return;
     }
     if (resolvedConversationModel.unavailable) {
@@ -2266,12 +2276,13 @@ export function HomePage() {
     const sendScopeKey = chatScopeKey;
     if (messageSendLocksRef.current.has(sendScopeKey)) return;
     const clientRequestId = crypto.randomUUID();
-    const submittedDraft = input;
-    const submittedAttachments = [...pendingAttachments];
-    const submittedCommand = selectedComposerCommand;
-    const submittedMentions = [...pendingMentions];
+    const submittedDraft = messageInput;
+    const submittedAttachments = fromRecommendation ? [] : [...pendingAttachments];
+    const submittedCommand = fromRecommendation ? null : selectedComposerCommand;
+    const submittedMentions = fromRecommendation ? [] : [...pendingMentions];
     // A conversation feature may rewrite what the agent receives; references are added on top of that.
-    const promptedInput = features.agentPrompt(input) ?? input;
+    const agentPrompt = features.agentPrompt(messageInput);
+    const promptedInput = agentPrompt ?? messageInput;
     // The agent needs the file paths; the bubble shows only what the person wrote.
     const contentWithReferences = submittedMentions.length
       ? `${submittedMentions.map((item) => item.reference).join("\n\n")}\n\n${promptedInput}`
@@ -2295,23 +2306,25 @@ export function HomePage() {
         content: contentWithReferences,
         // With references, a command or a rewritten prompt the wire text differs from what was typed;
         // show the typed part.
-        displayContent: (features.agentPrompt(input) || selectedComposerCommand || (submittedMentions.length && composerInput.trim())) ? composerInput : undefined,
+        displayContent: (agentPrompt || submittedCommand || submittedMentions.length) ? messageInput : undefined,
         language,
-        pendingAttachments,
+        pendingAttachments: submittedAttachments,
         uploadAgentMedia: (attachments) => clients!.memmyAgent.uploadAgentMedia(attachments),
         dispatch,
         track,
         setCreatingChat: setIsCreatingChat,
         setComposerMediaError: (message) => setComposerMediaErrorForScope(sendScopeKey, message),
-        clearComposer: () => stageComposerForSend(sendScopeKey),
-        restoreComposer: () => restoreComposerAfterFailedSend(
-          sendScopeKey,
-          submittedDraft,
-          submittedAttachments,
-          submittedCommand,
-          submittedMentions
-        ),
-        settleComposer: () => settleComposerAfterSend(sendScopeKey, submittedAttachments),
+        clearComposer: () => { if (!fromRecommendation) stageComposerForSend(sendScopeKey); },
+        restoreComposer: () => {
+          if (!fromRecommendation) restoreComposerAfterFailedSend(
+            sendScopeKey,
+            submittedDraft,
+            submittedAttachments,
+            submittedCommand,
+            submittedMentions
+          );
+        },
+        settleComposer: () => { if (!fromRecommendation) settleComposerAfterSend(sendScopeKey, submittedAttachments); },
         chatSelectionEpoch: state.agent.chatSelectionEpoch,
         getChatSelectionEpoch: () => chatSelectionEpochRef.current,
         scopeKey: sendScopeKey,
@@ -2693,19 +2706,6 @@ export function HomePage() {
     ) {
       loadSlashCommands({ resetAttempts: true });
     }
-  }
-
-  function selectHomeStarter(prompt: string) {
-    setSelectedComposerCommandForScope(chatScopeKey, null);
-    setCurrentComposerDraft(prompt);
-    setSlashMenuDismissed(true);
-    window.requestAnimationFrame(() => {
-      const input = inputRef.current;
-      if (!input) return;
-      resizeComposerInput(input);
-      input.focus();
-      input.setSelectionRange(prompt.length, prompt.length);
-    });
   }
 
   /** Removes the selected command token while preserving the typed message. */
@@ -3498,7 +3498,7 @@ export function HomePage() {
             </h1>
           </div>
           <div className="home-empty-column home-empty-suggestions">
-            <HomeStarterActions scenarios={features.scenarios} onSelect={selectHomeStarter} />
+            <HomeStarterActions scenarios={features.scenarios} disabled={recommendationSendDisabled} onSend={(prompt) => void sendMessage(prompt)} />
           </div>
           <div className="home-empty-column home-empty-input">
             <AgentOperationErrorSlot message={agentError} />
@@ -4302,7 +4302,7 @@ export function agentStatusText(
   if (status === "error") {
     return t(context.startupIssue === "model_config_invalid" && !context.hasConnected
       ? "home.modelSelector.unavailable"
-      : "home.agent.failed");
+      : "home.agent.connecting");
   }
   if (status === "reconnecting") {
     return t("home.agent.reconnecting");

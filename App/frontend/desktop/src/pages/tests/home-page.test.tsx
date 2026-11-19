@@ -259,14 +259,14 @@ describe("HomePage", () => {
     expect(agentStatusText("connected", "agent_chat", (key, values) => `${key}:${values?.model ?? ""}`)).toBeNull();
     expect(agentStatusText("connecting", null, (key) => key)).toBe("home.agent.connecting");
     expect(agentStatusText("reconnecting", null, (key) => key)).toBe("home.agent.reconnecting");
-    expect(agentStatusText("error", null, (key) => key)).toBe("home.agent.failed");
+    expect(agentStatusText("error", null, (key) => key)).toBe("home.agent.connecting");
     expect(agentStatusText("error", null, (key) => key, {
       startupIssue: "model_config_invalid"
     })).toBe("home.modelSelector.unavailable");
     expect(agentStatusText("error", null, (key) => key, {
       startupIssue: "model_config_invalid",
       hasConnected: true
-    })).toBe("home.agent.failed");
+    })).toBe("home.agent.connecting");
   });
 
   it("shows the specific queue steer failure messages", () => {
@@ -395,9 +395,9 @@ describe("HomePage", () => {
     expect(source).toContain("state.agent.composerPendingAttachmentsByScope");
     expect(source).toContain("agentActions.composerDraftUpdated(scopeKey, nextValue)");
     expect(source).toContain("const sendScopeKey = chatScopeKey;");
-    expect(source).toContain("clearComposer: () => stageComposerForSend(sendScopeKey)");
-    expect(source).toContain("restoreComposer: () => restoreComposerAfterFailedSend(");
-    expect(source).toContain("settleComposer: () => settleComposerAfterSend(sendScopeKey, submittedAttachments)");
+    expect(source).toContain("if (!fromRecommendation) stageComposerForSend(sendScopeKey)");
+    expect(source).toContain("if (!fromRecommendation) restoreComposerAfterFailedSend(");
+    expect(source).toContain("if (!fromRecommendation) settleComposerAfterSend(sendScopeKey, submittedAttachments)");
     expect(source).not.toContain("useState<Record<string, string>>({})");
     expect(source).not.toContain("useState<Record<string, PendingAttachment[]>>({})");
     expect(source).not.toContain("composerMediaErrorByScope");
@@ -541,7 +541,7 @@ describe("HomePage", () => {
 
   it("passes the current UI language into agent websocket messages", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
-    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
+    const sendBlock = source.slice(source.indexOf("async function sendMessage("), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
 
     expect(source).toContain("const { language, t } = useTranslation();");
     expect(sendBlock).toContain("language,");
@@ -549,10 +549,10 @@ describe("HomePage", () => {
 
   it("intercepts exact local slash commands before normal message submission", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
-    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
+    const sendBlock = source.slice(source.indexOf("async function sendMessage("), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
     const localSlashBlock = source.slice(source.indexOf("function runExactLocalSlashCommand"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
 
-    expect(sendBlock).toContain("if (runExactLocalSlashCommand(input))");
+    expect(sendBlock).toContain("if (!fromRecommendation && runExactLocalSlashCommand(input))");
     expect(sendBlock.indexOf("runExactLocalSlashCommand(input)")).toBeLessThan(sendBlock.indexOf("submitAgentComposerMessage({"));
     expect(localSlashBlock).toContain("if (pendingAttachments.length > 0) return false;");
     expect(localSlashBlock).toContain('normalized === "/last-compaction"');
@@ -561,6 +561,17 @@ describe("HomePage", () => {
     expect(localSlashBlock).toContain("requestHistoryDagPanel();");
     expect(localSlashBlock).toContain('normalized === "/status"');
     expect(localSlashBlock).toContain("requestStatusPanel();");
+  });
+
+  it("sends home recommendations directly without staging composer content", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const sendBlock = source.slice(source.indexOf("async function sendMessage("), source.indexOf("async function removeQueuedMessage"));
+
+    expect(source).toContain("onSend={(prompt) => void sendMessage(prompt)}");
+    expect(sendBlock).toContain("const messageInput = suggestedPrompt ?? input;");
+    expect(sendBlock).toContain("const submittedAttachments = fromRecommendation ? [] : [...pendingAttachments];");
+    expect(sendBlock).toContain("content: contentWithReferences,");
+    expect(sendBlock).toContain("clearComposer: () => { if (!fromRecommendation) stageComposerForSend(sendScopeKey); }");
   });
 
   it("keeps last-compaction as a local composer panel backed by the session HTTP snapshot", () => {
@@ -822,7 +833,7 @@ describe("HomePage", () => {
 
   it("prechecks platform quota only for the resolved account-sourced candidate", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
-    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("async function removeQueuedMessage"));
+    const sendBlock = source.slice(source.indexOf("async function sendMessage("), source.indexOf("async function removeQueuedMessage"));
 
     expect(sendBlock).toContain('resolvedConversationModel.candidate?.source === "platform"');
     expect(sendBlock).toContain("isAccountTokenQuotaExhausted(state.bootstrap)");
@@ -900,7 +911,7 @@ describe("HomePage", () => {
       source.indexOf("/**\n   * Updates the input draft")
     );
     const sendBlock = source.slice(
-      source.indexOf("async function sendMessage()"),
+      source.indexOf("async function sendMessage("),
       source.indexOf("/**\n   * Stops the current Agent turn.")
     );
 
