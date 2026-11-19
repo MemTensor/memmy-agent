@@ -1,0 +1,419 @@
+/* 新手引导的蒙版、亮区描边与说明卡。颜色全部取自现有主题变量。 */
+
+.root {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+/* 遮罩分成四块，只有四块接住点击：亮区里的事件照常落到下面的页面上。暗色不由这里铺，见 .stroke。 */
+.mask {
+  position: fixed;
+  background: transparent;
+  pointer-events: auto;
+  cursor: default;
+}
+
+/* 亮区内、描边目标以外的位置也不接点击：一条关键路径上只留一个可点的控件。 */
+.blocker {
+  position: fixed;
+  pointer-events: auto;
+  background: transparent;
+}
+
+/*
+ * 亮区自己画暗色：整块亮区投影 9999px，一层就把亮区以外全部压暗，不再靠四块遮罩拼色。
+ * 圆角按阶段由组件写进 style，参数见规格第四节的表。
+ */
+.stroke {
+  position: fixed;
+  pointer-events: none;
+  box-shadow: 0 0 0 9999px rgba(16, 26, 25, 0.52);
+}
+
+/* 呼吸的那一圈描边放在伪元素上：压暗那一层（.stroke 自己的 9999px）不参与动画。 */
+.stroke::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: inherit;
+  border: 2px solid var(--color-action-sky);
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-action-sky) 12%, transparent); }
+  50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--color-action-sky) 26%, transparent); }
+}
+
+/* 没有任何东西要人点的时候只压暗、不描边（出场那一屏、看板导览、加入与等结果的几屏）。 */
+.stroke.quiet::after {
+  display: none;
+}
+
+/* 亮区里再点一个控件时的第二圈描边：不压暗，只把那个控件圈出来。圆角同样由组件写进 style。 */
+.stroke2 {
+  position: fixed;
+  pointer-events: none;
+  border: 2px solid var(--color-action-sky);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-action-sky) 18%, transparent);
+}
+
+.shake {
+  animation: shake 320ms ease-in-out;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  50% { transform: translateX(4px); }
+  75% { transform: translateX(-3px); }
+}
+
+/*
+ * 要人点的那一个控件旁边的「点这里」：一枚绿色箭头，箭尖钉在控件边沿中点、整个箭头在控件外面朝里指，
+ * 加两圈从箭尖扩散出去的波纹。整块不接点击（箭头压在控件边沿也不能把它挡掉），只负责把人指过去。
+ *
+ * 箭尖就是外面那个 span 的定位点（见 `clickHintPlacement`）：SVG 的 48×48 里尖画在正中 (24,24)，
+ * 元素用负 margin 把自己移到尖与定位点重合，缩放原点也是尖端。
+ * 所以**呼吸时只有箭身在胀缩，尖一毫米不动**；这与上一版「箭尖、元素偏移、缩放原点各用一套常数」完全不同。
+ */
+.clickHint {
+  position: fixed;
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* 波纹从箭尖往外扩：外圈延时半拍，看起来像连点了两下。 */
+.clickRipple {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  border-radius: 50%;
+  border: 2px solid var(--color-action-sky);
+  background: color-mix(in srgb, var(--color-action-sky) 14%, transparent);
+  transform: scale(0.36);
+  opacity: 0;
+  animation: clickRipple 1.9s ease-out infinite;
+}
+
+.clickRippleLate {
+  animation-delay: 0.95s;
+}
+
+@keyframes clickRipple {
+  0% { transform: scale(0.36); opacity: 0.85; }
+  70% { transform: scale(1.55); opacity: 0; }
+  100% { transform: scale(1.55); opacity: 0; }
+}
+
+/*
+ * 箭头本体：48×48 的盒子，尖画在正中，所以负 margin 把尖对到定位点。
+ * `--hint-turn` 由组件按「箭头在控件哪一侧」写进来（下方 180°、上 0°、右 90°、左 270°），
+ * 尖在旋转中心上，转哪个方向都不会移位。
+ * 顺序很关键：先旋转到朝向、再缩放；两者都以 50% 50%（=尖端）为原点，尖因此始终钉在控件边沿。
+ */
+.clickArrow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 48px;
+  height: 48px;
+  margin: -24px 0 0 -24px;
+  transform-origin: 50% 50%;
+  transform: rotate(var(--hint-turn, 0deg)) scale(1);
+  animation: clickBreathe 1.9s ease-in-out infinite;
+  filter: drop-shadow(0 2px 5px rgba(16, 26, 25, 0.22));
+}
+
+/* 填主题色、外面描一圈白：白底控件与压暗底上都分得出来；paint-order 让白边压在填色外面。 */
+.clickArrow path {
+  fill: var(--color-action-sky);
+  stroke: var(--color-background-paper, #fff);
+  stroke-width: 2.4;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  paint-order: stroke;
+}
+
+/* 呼吸：箭身沿指向胀缩一点点再收回，比只画一圈静态描边显眼，也不至于晃眼。原点在尖端，尖不动。 */
+@keyframes clickBreathe {
+  0%, 100% { transform: rotate(var(--hint-turn, 0deg)) scale(1); }
+  50% { transform: rotate(var(--hint-turn, 0deg)) scale(1.1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clickArrow { animation: none; }
+  .clickRipple { animation: none; opacity: 0.45; transform: scale(0.8); }
+}
+
+.card {
+  position: fixed;
+  /* 宽度由组件按「常规 340 / 加宽 400」写进 style：这里不再写死。 */
+  padding: 13px 16px 12px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--color-text-ink, #1b2423) 9%, transparent);
+  background: var(--color-background-paper, #fff);
+  box-shadow: 0 14px 34px rgba(16, 26, 25, 0.16), 0 2px 6px rgba(16, 26, 25, 0.06);
+  pointer-events: auto;
+  color: var(--color-text-ink, #1b2423);
+}
+
+.card[data-shake="true"] {
+  animation: shake 320ms ease-in-out;
+}
+
+/* 吉祥物压在卡片右上角外面一点：放在卡片之外，才不会被卡片的滚动裁掉。 */
+.pet {
+  position: fixed;
+  z-index: 1;
+  pointer-events: none;
+  /* 细描边那一层是给白底上的形象留个轮廓，卡片压上来时也看得清。 */
+  filter: drop-shadow(0 0 1px rgba(16, 26, 25, 0.3)) drop-shadow(0 6px 10px rgba(16, 26, 25, 0.16));
+}
+
+.arrow {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--color-background-paper, #fff);
+  transform: rotate(45deg);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 右边给吉祥物留位置，标题这一行不再被它压住。 */
+  padding-right: 52px;
+  margin-bottom: 5px;
+  min-width: 0;
+}
+
+.badge {
+  flex: none;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-action-sky) 14%, transparent);
+  color: color-mix(in srgb, var(--color-action-sky) 70%, var(--color-text-ink, #1b2423));
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 19px;
+  white-space: nowrap;
+}
+
+/* 导览段的「介绍」：不是进度，颜色比「1 / 3」淡一档，与体验段区分开。 */
+.badgeIntro {
+  background: color-mix(in srgb, var(--color-text-ink, #1b2423) 7%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink, #1b2423) 58%, transparent);
+}
+
+.stepName {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.grow {
+  flex: 1;
+}
+
+.quiet {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: color-mix(in srgb, var(--color-text-ink, #1b2423) 45%, transparent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.quiet:hover {
+  color: color-mix(in srgb, var(--color-text-ink, #1b2423) 70%, transparent);
+}
+
+.title {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--color-text-ink, #1b2423) 72%, transparent);
+}
+
+.status {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--color-text-ink, #1b2423) 55%, transparent);
+}
+
+.error {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--color-status-error, #d1435b);
+}
+
+.foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  /* 一行放不下时宁可两行，也不横向溢出卡片（只会在极窄的窗口里发生）。 */
+  flex-wrap: wrap;
+}
+
+/* 底部左边那两个小字动作：「退出引导」与「跳过这一步」，两个都在同一行。 */
+.footLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 底部右边：「上一步」与主按钮，始终在同一行、靠右。 */
+.footRight {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.action {
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--color-action-sky);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.actionGhost {
+  border: 1px solid color-mix(in srgb, var(--color-text-ink, #1b2423) 16%, transparent);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  background: transparent;
+  color: var(--color-text-ink, #1b2423);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.confirm {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-action-sky) 7%, transparent);
+}
+
+.confirmTitle {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.confirmText {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* 收尾弹窗：蒙版退去，只在中央留一张卡。 */
+.completeLayer {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 26, 25, 0.32);
+  pointer-events: auto;
+}
+
+.complete {
+  width: 400px;
+  max-width: calc(100vw - 40px);
+  padding: 22px 22px 18px;
+  border-radius: 16px;
+  background: var(--color-background-paper, #fff);
+  box-shadow: 0 18px 44px rgba(16, 26, 25, 0.2);
+}
+
+.completeTitle {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.doneList {
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.doneItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.doneMark {
+  flex: none;
+  margin-top: 1px;
+  color: var(--color-action-sky);
+}
+
+.left {
+  margin: 0 0 16px;
+  font-size: 12.5px;
+  color: color-mix(in srgb, var(--color-text-ink, #1b2423) 60%, transparent);
+}
+
+.completeFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 引导自己的一句话提示：蒙版可能在任何页面，提示不依赖看板。 */
+.notice {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 80;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(16, 26, 25, 0.86);
+  color: #fff;
+  font-size: 12.5px;
+  pointer-events: none;
+}

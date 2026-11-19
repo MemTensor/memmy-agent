@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { BookOpen, Check, Clock3, FileText, Loader2, LogIn, MessageSquare, MoreHorizontal, Plus, Puzzle, RefreshCw, Scale, Search, X } from "lucide-react";
+import { BookOpen, Check, Clock3, FileText, Loader2, LogIn, MessageSquare, MoreHorizontal, Plus, Puzzle, RefreshCw, Scale, X } from "lucide-react";
+import { SearchField } from "../components/search-field.js";
 import type { InstalledPlugin, PluginEligibility } from "@memmy/local-api-contracts";
 import { Button } from "../components/button.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
@@ -28,6 +29,14 @@ export interface MarketplacePlugin {
 }
 
 export interface PluginMarketplaceSectionProps {
+  showHeader?: boolean;
+  showFilter?: boolean;
+  showToolbar?: boolean;
+  filter?: "all" | "installed";
+  search?: string;
+  onFilterChange?: (filter: "all" | "installed") => void;
+  onSearchChange?: (value: string) => void;
+  onInstalledCountChange?: (count: number) => void;
   /** The parent supplies the catalog after applying account visibility rules. */
   plugins: MarketplacePlugin[];
   loading?: boolean;
@@ -80,13 +89,18 @@ function pluginNeedsSignIn(plugin: MarketplacePlugin, signedIn: boolean): boolea
 /** Catalog presentation only: installation state always comes from the parent. */
 export function PluginMarketplaceSection(props: PluginMarketplaceSectionProps) {
   const { t } = useTranslation();
-  const [filter, setFilter] = useState<"all" | "installed">("all");
-  const [query, setQuery] = useState("");
+  const [localFilter, setLocalFilter] = useState<"all" | "installed">("all");
+  const filter = props.filter ?? localFilter;
+  const setFilter = props.onFilterChange ?? setLocalFilter;
+  const [localQuery, setLocalQuery] = useState("");
+  const query = props.search ?? localQuery;
+  const setQuery = props.onSearchChange ?? setLocalQuery;
   const [detailId, setDetailId] = useState<string | null>(null);
   const [menuId, setMenuId] = useState<string | null>(null);
   const [uninstallId, setUninstallId] = useState<string | null>(null);
   const sectionRef = useRef<HTMLElement | null>(null);
   const installedCount = props.plugins.filter((plugin) => Boolean(plugin.installed)).length;
+  useEffect(() => props.onInstalledCountChange?.(installedCount), [installedCount, props.onInstalledCountChange]);
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visiblePlugins = props.plugins.filter((plugin) => (
     (filter === "all" || plugin.installed)
@@ -216,7 +230,7 @@ export function PluginMarketplaceSection(props: PluginMarketplaceSectionProps) {
 
   return (
     <section ref={sectionRef} className="memory-panel plugin-marketplace-section" aria-label={t("tools.pluginsTab")}>
-      <div className="memory-panel__header">
+      {props.showHeader !== false ? <div className="memory-panel__header">
         <div className="memory-panel__header-main extension-catalog-heading">
           <Memmy pose="box" size={56} />
           <div className="extension-catalog-heading-copy">
@@ -229,29 +243,30 @@ export function PluginMarketplaceSection(props: PluginMarketplaceSectionProps) {
           className="memory-refresh-button">
           <RefreshCw size={15} className={props.loading ? "animate-spin" : ""} aria-hidden="true" />
         </button>
-      </div>
-      <div className="extension-catalog-toolbar">
-        <div className="memory-log-filter-group" aria-label={t("plugins.ui.filterPlugins")}>
+      </div> : null}
+      {props.showToolbar !== false ? <div className="extension-catalog-toolbar">
+        {props.showFilter !== false ? <div className="memory-log-filter-group" aria-label={t("plugins.ui.filterPlugins")}>
           {(["all", "installed"] as const).map((value) => (
             <button key={value} type="button" aria-pressed={filter === value} onClick={() => { setFilter(value); setMenuId(null); }}
               className={`memory-log-filter${filter === value ? " memory-log-filter--active" : ""}`}>
               {value === "all" ? t("memory.memories.all") : `${t("memory.cliInstalled")} (${installedCount})`}
             </button>
           ))}
-        </div>
-        <label className="extension-catalog-search">
-          <Search size={15} aria-hidden="true" />
-          <input type="search" value={query}
-            aria-label={t("plugins.ui.searchTaskPlugins")} placeholder={t("plugins.ui.searchTaskPlugins")}
-            onChange={(event) => { setQuery(event.target.value); setMenuId(null); }} />
-        </label>
-      </div>
+        </div> : null}
+        <SearchField className="extension-catalog-search" value={query} label={t("plugins.ui.searchTaskPlugins")}
+          onChange={(value) => { setQuery(value); setMenuId(null); }} />
+        {props.showHeader === false ? <button type="button" disabled={props.loading || busy} onClick={props.onRefresh}
+          aria-label={t("common.refresh")} title={t("common.refresh")}
+          className="memory-refresh-button">
+          <RefreshCw size={15} className={props.loading ? "animate-spin" : ""} aria-hidden="true" />
+        </button> : null}
+      </div> : null}
 
       {props.error ? <p role="alert" className="mb-4 rounded-card border border-status-error/20 bg-status-error/5 p-3 text-sm text-status-error">{props.error}</p> : null}
       {props.loading ? <p role="status" className="mb-4 text-sm text-text-ink/55">{t("plugins.ui.loadingPlugins")}</p> : null}
       {!props.loading && visiblePlugins.length === 0 ? (
         <div className="plugin-marketplace-empty-state" role="status">
-          <Puzzle size={18} aria-hidden="true" />
+          <span className="extension-catalog-empty-state__icon"><Puzzle size={20} aria-hidden="true" /></span>
           {normalizedQuery ? t("plugins.ui.noTaskPluginsMatchYourSearch")
             : filter === "installed" ? t("plugins.ui.noPluginsInstalledExploreTheAllTab") : t("plugins.ui.noPluginsAvailable")}
         </div>

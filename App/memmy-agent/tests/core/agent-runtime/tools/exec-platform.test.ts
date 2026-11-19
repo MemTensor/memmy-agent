@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import path from "node:path";
 import iconv from "iconv-lite";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RequestContext } from "../../../../src/core/agent-runtime/tools/context.js";
 import { ExecTool, setIsWindowsForTest } from "../../../../src/core/agent-runtime/tools/shell.js";
 
 const WINDOWS_COMMAND_NOT_FOUND = "'node' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。\r\n";
@@ -195,6 +196,58 @@ describe("ExecTool platform-specific command preparation", () => {
     const result = await prepared(new ExecTool({ pathAppend: "C:\\tools\\bin" }).prepareCommand("dir"));
 
     expect(result.env.PATH).toMatch(/;C:\\tools\\bin$/);
+  });
+
+  it("tells the child process which Memmy task it runs in", async () => {
+    setIsWindowsForTest(false);
+
+    const tool = new ExecTool();
+    tool.setContext(new RequestContext({ channel: "websocket", chatId: "chat-1", sessionKey: "websocket:chat-1" }));
+    expect((await prepared(tool.prepareCommand("ls"))).env.MEMMY_TASK_ID).toBe("chat-1");
+
+    // 其他入口（CLI、其他 Agent 的会话）没有 Memmy 任务，子进程也拿不到这个变量。
+    const cli = new ExecTool();
+    cli.setContext(new RequestContext({ channel: "cli", chatId: "cli-1", sessionKey: "cli:cli-1" }));
+    expect((await prepared(cli.prepareCommand("ls"))).env.MEMMY_TASK_ID).toBeUndefined();
+  });
+
+  it("tells the child process where this Memmy keeps its data", async () => {
+    setIsWindowsForTest(false);
+    const previous = process.env.MEMMY_HOME;
+    process.env.MEMMY_HOME = "/Users/me/Library/Application Support/Memmy";
+
+    try {
+      const tool = new ExecTool();
+      tool.setContext(new RequestContext({ channel: "websocket", chatId: "chat-1", sessionKey: "websocket:chat-1" }));
+      // memmy-project 之类的命令据此连上正在跑这条任务的这个 Memmy，而不是 ~/.memmy 里那份旧记录。
+      expect((await prepared(tool.prepareCommand("ls"))).env.MEMMY_HOME).toBe("/Users/me/Library/Application Support/Memmy");
+
+      // 外部 Agent 走 CLI：它们自己的命令行不该被塞进 Memmy 的数据目录。
+      const cli = new ExecTool();
+      cli.setContext(new RequestContext({ channel: "cli", chatId: "cli-1", sessionKey: "cli:cli-1" }));
+      expect((await prepared(cli.prepareCommand("ls"))).env.MEMMY_HOME).toBeUndefined();
+    } finally {
+      if (previous == null) delete process.env.MEMMY_HOME;
+      else process.env.MEMMY_HOME = previous;
+    }
+  });
+
+  it("leaves the data directory out when this process has none", async () => {
+    setIsWindowsForTest(false);
+    const previous = process.env.MEMMY_HOME;
+    delete process.env.MEMMY_HOME;
+
+    try {
+      const tool = new ExecTool();
+      tool.setContext(new RequestContext({ channel: "websocket", chatId: "chat-1", sessionKey: "websocket:chat-1" }));
+      const env = (await prepared(tool.prepareCommand("ls"))).env;
+      // 没有就不注入：空字符串会让命令行工具以为数据目录就是当前目录。
+      expect("MEMMY_HOME" in env).toBe(false);
+      expect(env.MEMMY_TASK_ID).toBe("chat-1");
+    } finally {
+      if (previous == null) delete process.env.MEMMY_HOME;
+      else process.env.MEMMY_HOME = previous;
+    }
   });
 
   it("skips bwrap on Windows", async () => {

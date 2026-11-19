@@ -2,6 +2,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { readCodexSidebarLayout } from "../theme/codex-sidebar-layout.js";
 
+/** Shared preference for the file and recording preview panes. */
+export const WORKSPACE_PREVIEW_WIDTH_STORAGE_KEY = "memmy.workspaceArtifact.previewWidth";
+const SIDEBAR_WIDTH_CHANGE_EVENT = "memmy:sidebar-width-change";
+
 interface SidebarDragState {
   startX: number;
   startWidth: number;
@@ -128,6 +132,16 @@ export function useResizableSidebar(options: ResizableSidebarOptions): Resizable
   useEffect(() => {
     writeStoredSidebarWidth(storageKey, width);
   }, [storageKey, width]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const syncWidth = (event: Event) => {
+      const change = (event as CustomEvent<{ storageKey: string; width: number }>).detail;
+      if (change?.storageKey === storageKey) setClampedWidth(change.width);
+    };
+    window.addEventListener(SIDEBAR_WIDTH_CHANGE_EVENT, syncWidth);
+    return () => window.removeEventListener(SIDEBAR_WIDTH_CHANGE_EVENT, syncWidth);
+  }, [storageKey, setClampedWidth]);
 
   useEffect(() => {
     if (!dragState || typeof window === "undefined") {
@@ -334,7 +348,9 @@ function writeStoredSidebarWidth(storageKey: string, width: number): void {
   }
 
   try {
+    if (window.localStorage.getItem(storageKey) === String(width)) return;
     window.localStorage.setItem(storageKey, String(width));
+    window.dispatchEvent(new CustomEvent(SIDEBAR_WIDTH_CHANGE_EVENT, { detail: { storageKey, width } }));
   } catch {
     // If the user has disabled storage, this drag is unaffected.
   }

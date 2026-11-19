@@ -94,7 +94,8 @@ describe("Memmy Account routed model aliases", () => {
     expect(body.temperature).toBe(0.2);
     if (expectsQwenControl) expect(body.enable_thinking).toBe(false);
     else expect(body).not.toHaveProperty("enable_thinking");
-    expect(body).not.toHaveProperty("reasoning_effort");
+    if (expectsQwenControl) expect(body).not.toHaveProperty("reasoning_effort");
+    else expect(body.reasoning_effort).toBe("none");
   });
 });
 

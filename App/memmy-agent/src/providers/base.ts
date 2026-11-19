@@ -68,6 +68,7 @@ export class LLMResponse {
   retryAfter?: number | null;
   reasoningContent?: string | null;
   thinkingBlocks?: Record<string, any>[] | null;
+  protocolState?: Record<string, any> | null;
   errorStatusCode?: number | null;
   errorKind?: string | null;
   errorType?: string | null;
@@ -88,6 +89,7 @@ export class LLMResponse {
     retryAfter?: number | null;
     reasoningContent?: string | null;
     thinkingBlocks?: Record<string, any>[] | null;
+    protocolState?: Record<string, any> | null;
     errorStatusCode?: number | null;
     errorKind?: string | null;
     errorType?: string | null;
@@ -107,6 +109,15 @@ export class LLMResponse {
     this.retryAfter = init.retryAfter ?? null;
     this.reasoningContent = init.reasoningContent ?? null;
     this.thinkingBlocks = init.thinkingBlocks ?? null;
+    this.protocolState = init.protocolState ?? null;
+    if (Array.isArray(this.protocolState?.items)) {
+      this.protocolState = { ...this.protocolState, items: this.protocolState.items.map((item: any) => {
+        if (item?.type !== "function_call" || item.name !== "browser_auth_request") return item;
+        const call = this.toolCalls.find(call => call.id.split("|")[0] === item.call_id);
+        return { ...redactBrowserAuthMetadata(item.name, item),
+          arguments: JSON.stringify(redactBrowserAuthArguments(item.name, call?.arguments ?? {})) };
+      }) };
+    }
     this.errorStatusCode = init.errorStatusCode ?? null;
     this.errorKind = init.errorKind ?? null;
     this.errorType = init.errorType ?? null;
