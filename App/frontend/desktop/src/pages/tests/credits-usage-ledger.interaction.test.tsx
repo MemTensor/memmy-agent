@@ -76,7 +76,8 @@ describe("usage list interaction",()=>{
     const before=readCreditDemo();click(button('记忆服务'));click(button('今天'));
     expect(rows()).toHaveLength(5);
     expect(host.querySelector('tbody button')).toBeNull();
-    expect([...rows()].map(row => row.cells[0]?.textContent)).toEqual(Array(5).fill("2026-10-16"));
+    expect(rows()[0]?.cells[0]?.textContent).toMatch(/10\/16.*11:54/);
+    expect(rows()[4]?.cells[0]?.textContent).toMatch(/10\/16.*11:42/);
     const summaries=[...rows()].filter(row=>row.textContent?.includes('记忆摘要'));
     expect(summaries).toHaveLength(2);
     expect(summaries.map(row=>row.textContent).join(' ')).toContain('DeepSeek-V3');
