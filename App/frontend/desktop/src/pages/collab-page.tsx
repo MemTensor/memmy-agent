@@ -1311,7 +1311,8 @@ const CollabBoard = memo(function CollabBoard(props: {
                   </span>
                   <span className={styles.grow} />
                   {/* 头部操作整块给足热区：按钮彼此只隔 4px，鼠标从「邀请」移到设置不会落到空处 */}
-                  <span className={styles.boardActions}>
+                  {/* 上半截落在 46px 窗口拖拽条里，必须挂拖拽排除（见 window-drag-region.tsx），否则那半块点不到 */}
+                  <span className={styles.boardActions} data-window-drag-exclusion="collab-board-actions">
                     {shared ? (
                       <Button
                         size="sm"
@@ -2142,6 +2143,7 @@ function ProjectConfigPanel(props: {
           className={styles.configIcon}
           aria-label={t("collab.config.collapse")}
           title={t("collab.config.collapse")}
+          data-window-drag-exclusion="collab-config-collapse"
           onClick={props.onCollapse}
         >
           <PanelRightClose size={15} aria-hidden="true" />
