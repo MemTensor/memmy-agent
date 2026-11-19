@@ -2393,15 +2393,19 @@ export function ProjectBoardSettingsDialog(props: {
     setBusy(true);
     setAction("sharing");
     try {
-      const created = await props.collab.createProject(props.project.name, props.project.rootPath);
+      // 带上本机项目：已经共享过的直接拿回原来那个云端项目，不会再建一个同名项目。
+      const created = await props.collab.createProject(props.project.name, props.project.rootPath, {
+        localProjectId: props.project.id
+      });
       addCollabProject(created.project);
+      // 绑定与建项在同一个请求里完成了：这里只是把同一个值再告诉后台一次，失败不影响已经存在的绑定。
       try {
         await props.collab.bindLocalProject(created.project.id, props.project.id);
-        markCollabProjectBound(created.project.id, props.project.id);
       } catch (cause) {
-        // Ok either way: the next launch retries the binding, and reads still go through the same folder.
         console.warn(`Project binding failed: ${messageOf(cause)}`);
       }
+      // 云端已经有这个项目，本机记下它，界面不必等下一次列表刷新才变成「已共享」。
+      markCollabProjectBound(created.project.id, props.project.id);
       props.onShared();
       if (props.taskCount > 0) {
         // The project already has sessions: the person picks which of them members may read.

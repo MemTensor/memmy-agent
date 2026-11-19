@@ -427,28 +427,47 @@ export function AppFrame(props: AppFrameProps) {
   const collabBindAttempts = useRef<Set<string>>(new Set());
   /** A project joined from the join dialog: its board opens once its local project exists. */
   const openBoardWhenBound = useRef<string | null>(null);
+  // 本机项目清单用 ref 读：自愈要根据目录找已有项目，但不该因为侧边栏重画就重跑一遍。
+  const localProjectsRef = useRef(state.agent.projects);
+  localProjectsRef.current = state.agent.projects;
   useEffect(() => {
     if (!collabClient || !collabEnabled) return;
     const pending = (collabSnapshot.projects ?? []).filter((project) => (
       !project.localProjectId && !collabBindAttempts.current.has(project.id)
     ));
     if (!pending.length) return;
+    // 已经被别的在线项目占用的本机项目：那里的任务属于那个项目，不能再分给这个孤儿。
+    const boundLocalIds = new Set(
+      (collabSnapshot.projects ?? [])
+        .map((project) => project.localProjectId)
+        .filter((id): id is string => Boolean(id))
+    );
     void (async () => {
       for (const project of pending) {
         collabBindAttempts.current.add(project.id);
         try {
           const directory = await collabClient.ensureWorkingDirectory(project.id, project.name);
-          const outcome = await taskStateCoordinator.mutateProject({
-            kind: "create",
-            // A folder the person chose when joining may hold their own files and projects: the shared project
-            // gets a record of its own there, so it never adopts a local project and uploads its tasks.
-            input: directory.chosen
-              ? { mode: "existing", path: directory.localDirectory, name: project.name, allowShared: true }
-              : { mode: "blank", path: directory.localDirectory, name: project.name }
-          });
-          const localProjectId = outcome.status === "committed" ? outcome.project?.id : undefined;
+          // 这个目录已经有本机项目、且它还没被别的在线项目占用，就直接用它。
+          // 否则每打开一次就为同一个目录再建一个同名项目，最后清理时分不清哪个是哪个。
+          const reusable = localProjectsRef.current.find((localProject) => (
+            sameWorkspacePath(localProject.rootPath, directory.localDirectory)
+            && !boundLocalIds.has(localProject.id)
+          ));
+          let localProjectId = reusable?.id;
+          if (!localProjectId) {
+            const outcome = await taskStateCoordinator.mutateProject({
+              kind: "create",
+              // A folder the person chose when joining may hold their own files and projects: the shared project
+              // gets a record of its own there, so it never adopts a local project and uploads its tasks.
+              input: directory.chosen
+                ? { mode: "existing", path: directory.localDirectory, name: project.name, allowShared: true }
+                : { mode: "blank", path: directory.localDirectory, name: project.name }
+            });
+            localProjectId = outcome.status === "committed" ? outcome.project?.id : undefined;
+          }
           if (!localProjectId) continue;
           await collabClient.bindLocalProject(project.id, localProjectId);
+          boundLocalIds.add(localProjectId);
           markCollabProjectBound(project.id, localProjectId);
           if (openBoardWhenBound.current === project.id) {
             openBoardWhenBound.current = null;

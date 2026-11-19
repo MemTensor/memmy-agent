@@ -8,8 +8,8 @@ import {
 } from "../collab-add-session.js";
 
 const projects = [
-  { name: "Memmy 开发", memberCount: 5, sessionCount: 32 },
-  { name: "设计评审", memberCount: 3, sessionCount: 0 }
+  { id: "7f3a1c22-0000-4000-8000-000000000001", name: "Memmy 开发", memberCount: 5, sessionCount: 32 },
+  { id: "7f3a1c22-0000-4000-8000-000000000002", name: "设计评审", memberCount: 3, sessionCount: 0 }
 ];
 
 function session(workspace: string | null): AddableSession {
@@ -36,6 +36,20 @@ describe("adding the current task", () => {
     expect(matchProjectName(projects, "开").kind).toBe("none");
   });
 
+  it("takes an id or its leading characters so same-named projects can be told apart", () => {
+    // 同名的两个项目：名称选不出哪个，id 才能。
+    const sameName = [
+      { id: "a1b2c3d4-0000-4000-8000-000000000001", name: "灵动锦鲤01", memberCount: 1, sessionCount: 1 },
+      { id: "e5f6a7b8-0000-4000-8000-000000000002", name: "灵动锦鲤01", memberCount: 1, sessionCount: 0 }
+    ];
+    expect(matchProjectName(sameName, "灵动锦鲤01").kind).toBe("many");
+    expect(matchProjectName(sameName, "a1b2c3d4-0000-4000-8000-000000000001"))
+      .toMatchObject({ kind: "exact", project: { id: "a1b2c3d4-0000-4000-8000-000000000001" } });
+    // 只给开头几位也行；落在两个项目上时仍然让人选。
+    expect(matchProjectName(sameName, "e5f6a7b8")).toMatchObject({ kind: "exact", project: { name: "灵动锦鲤01" } });
+    expect(matchProjectName(sameName, "a1").kind).toBe("exact");
+  });
+
   it("recognises the working directory when it sits inside the task's directory, or the other way around", () => {
     expect(sessionInWorkspace(session("/repo"), "/repo")).toBe(true);
     expect(sessionInWorkspace(session("/repo"), "/repo/app")).toBe(true);
@@ -49,6 +63,6 @@ describe("adding the current task", () => {
     expect(addCommand({ project: "Memmy 开发", hint: "给分享接口加上限流" }))
       .toBe("memmy-project session add --project \"Memmy 开发\" --hint \"给分享接口加上限流\"");
     expect(addCommand({ project: "A \"B\"" })).toBe("memmy-project session add --project \"A \\\"B\\\"\"");
-    expect(addCommand({ projectPlaceholder: true })).toBe("memmy-project session add --project \"<完整名称>\"");
+    expect(addCommand({ projectPlaceholder: true })).toBe("memmy-project session add --project \"<名称或 id>\"");
   });
 });

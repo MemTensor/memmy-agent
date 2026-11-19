@@ -27,7 +27,12 @@ const CreateProjectSchema = z.object({
    * 新手引导的演示：只在桌面端认为「本人第一次创建共享项目」时带。是否真的演示由云端判断，
    * 不能演示时照常只建项目。
    */
-  demo: z.boolean().optional()
+  demo: z.boolean().optional(),
+  /**
+   * 发起这次共享的本机项目：同一个本机项目重复共享时复用它已有的在线项目，云端也按它去重。
+   * 旧客户端不带这个字段，行为不变。
+   */
+  localProjectId: z.string().trim().min(1).max(200).optional()
 }).strict();
 /** 演示的心跳与结束：步骤只用于排查，结束原因按约定取值。 */
 const DemoHeartbeatSchema = z.object({ step: z.enum(["1", "2", "3", "finish"]) }).strict();
@@ -189,7 +194,9 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
     return reply.send(await options.collab.createProject(
       input.name,
       input.directory,
-      input.demo === undefined ? undefined : { demo: input.demo }
+      input.demo === undefined && input.localProjectId === undefined
+        ? undefined
+        : { demo: input.demo, localProjectId: input.localProjectId }
     ));
   }));
 
@@ -448,9 +455,16 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
     const projects = input.sourceId && input.conversationId
       ? await options.collab.projectsForAgentSession(input.sourceId, input.conversationId)
       : (await options.collab.listProjects()).projects;
-    const matches = input.project ? projects.filter((project) => project.name === input.project) : projects;
+    const matches = input.project
+      ? matchProject(projects, input.project)
+      : projects;
     if (!matches.length) throw new CollabError("not_found", missingProjectMessage(input.project, Boolean(input.sourceId)));
-    if (matches.length > 1) throw new CollabError("conflict", `当前会话关联多个项目，请用 --project 指定：${matches.map((project) => project.name).join("、")}`);
+    if (matches.length > 1) {
+      throw new CollabError(
+        "conflict",
+        `当前会话关联多个项目，请用 --project 指定：${matches.map((project) => `${project.name} #${project.id.slice(0, 8)}`).join("、")}`
+      );
+    }
     const project = matches[0]!;
     const result = await options.recallProjectKnowledge(input.query, project.id);
     return reply.send({ project: { id: project.id, name: project.name }, ...result });
@@ -500,6 +514,20 @@ export function registerCollabRoutes(app: FastifyInstance, options: RegisterColl
 }
 
 /** Why a knowledge search found no project: no project was named, or the named one is not linked to this session. */
+/**
+ * 按 --project 的值找项目：先认 id（含短前缀），再认完整名称，最后才按前缀试一次。
+ * 同名项目只能靠 id 分开，所以 id 认得的排在名称前面。
+ */
+function matchProject<T extends { id: string; name: string }>(projects: readonly T[], want: string): T[] {
+  const value = want.trim();
+  if (!value) return [...projects];
+  const byId = projects.filter((project) => project.id === value);
+  if (byId.length) return byId;
+  const byName = projects.filter((project) => project.name === value);
+  if (byName.length) return byName;
+  return projects.filter((project) => project.id.startsWith(value));
+}
+
 function missingProjectMessage(project: string | undefined, sessionKnown: boolean): string {
   if (!sessionKnown) return "没有该项目，或你不是项目成员";
   if (project) return `当前会话未关联项目「${project}」`;

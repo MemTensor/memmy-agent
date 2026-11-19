@@ -16,6 +16,8 @@ export interface AddableSession {
 }
 
 export interface NamedProject {
+  /** 云端项目 id：同名项目只能靠它分开，所以列表与冲突提示都要带上。 */
+  id?: string;
   name: string;
   memberCount: number;
   sessionCount: number;
@@ -52,8 +54,17 @@ export function sessionInWorkspace(session: AddableSession, cwd: string): boolea
  * Exact name, including case-insensitive when only one project matches. A partial name is never exact: the person
  * confirms it before anything is added.
  */
-export function matchProjectName<T extends { name: string }>(projects: readonly T[], rawQuery: string): ProjectNameMatch<T> {
+export function matchProjectName<T extends { name: string; id?: string }>(projects: readonly T[], rawQuery: string): ProjectNameMatch<T> {
   const query = rawQuery.trim();
+  // 先认 id（完整或开头的几位）：同名项目只有这一条路能指定，所以它排在名称前面。
+  if (query) {
+    const byId = projects.filter((project) => project.id === query);
+    if (byId.length === 1) return { kind: "exact", project: byId[0]! };
+    if (byId.length > 1) return { kind: "many", projects: byId };
+    const byPrefix = projects.filter((project) => project.id?.startsWith(query));
+    if (byPrefix.length === 1) return { kind: "exact", project: byPrefix[0]! };
+    if (byPrefix.length > 1) return { kind: "many", projects: byPrefix };
+  }
   const exact = projects.filter((project) => project.name === query);
   if (exact.length === 1) return { kind: "exact", project: exact[0]! };
   if (exact.length > 1) return { kind: "many", projects: exact };
@@ -127,7 +138,7 @@ export function formatProjectProblem<T extends NamedProject>(
   }
   if (match.kind === "many") {
     return [
-      `「${query}」对应多个协作项目，请用户选一个完整名称：`,
+      `「${query}」对应多个协作项目，请用户选一个（同名时用后面的 id）：`,
       ...match.projects.map(projectLine),
       "",
       "确认后运行：",
@@ -209,14 +220,16 @@ export function formatAlready(session: AddableSession, projectName: string, viaG
 /** The next command, with values quoted so a name that contains spaces survives a copy. */
 export function addCommand(options: { project?: string; hint?: string; projectPlaceholder?: boolean }): string {
   const parts = ["memmy-project session add"];
-  if (options.projectPlaceholder) parts.push("--project \"<完整名称>\"");
+  if (options.projectPlaceholder) parts.push("--project \"<名称或 id>\"");
   else if (options.project?.trim()) parts.push(`--project ${shellArg(options.project)}`);
   if (options.hint?.trim()) parts.push(`--hint ${shellArg(options.hint)}`);
   return parts.join(" ");
 }
 
 function projectLine(project: NamedProject): string {
-  return `${project.name} · ${count(project.memberCount)} 位成员 · ${count(project.sessionCount)} 个任务`;
+  // 带上 id 前 8 位：几个项目同名时，列表里只能靠它区分，也才能拼出 --project 的值。
+  const tag = project.id ? ` #${project.id.slice(0, 8)}` : "";
+  return `${project.name}${tag} · ${count(project.memberCount)} 位成员 · ${count(project.sessionCount)} 个任务`;
 }
 
 function sessionLine(session: AddableSession): string {

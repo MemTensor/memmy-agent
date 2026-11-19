@@ -189,16 +189,19 @@ export function CreateProjectModal(props: {
       const created = await props.collab.createProject(trimmed, workingDirectory, {
         // 大卡入口已经明确要体验一次：这时不再要求「名下没有在线项目」，交云端按名单判断。
         // 本机已经退出过引导就不再请求演示：云端不会开始，项目照常建为普通协作项目。
-        demo: demoRequested && (firstSharedProject || demo)
+        demo: demoRequested && (firstSharedProject || demo),
+        // 新建的这条本机项目随请求一起给出：云端记下它，重试时拿回的是同一个项目，不会多出一个同名项目。
+        localProjectId: createdLocalProjectId
       });
       props.onShared(created.project);
       try {
         await props.collab.bindLocalProject(created.project.id, createdLocalProjectId);
-        props.onBound(created.project.id, createdLocalProjectId);
       } catch (cause) {
-        // Sharing works without the binding; the next launch retries it, so this is not worth blocking on.
+        // 绑定已经在建项那一步写好了，这里失败不妨碍任何事；报给上层只是为了把原因记下来。
         props.onBindFailed(messageOf(cause));
       }
+      // 绑定在服务端已完成，界面直接认这个项目，不必等下次启动的绑定重试才发现它。
+      props.onBound(created.project.id, createdLocalProjectId);
     } catch (cause) {
       // The project exists locally; only sharing did not start, and the board can retry it.
       // 数量上限不是服务故障：同样把项目留在本机，但提示要说清是额度用完，不是稍后重试。

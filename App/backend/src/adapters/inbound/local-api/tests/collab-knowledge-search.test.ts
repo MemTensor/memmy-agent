@@ -50,12 +50,18 @@ describe("collab knowledge search", () => {
 
     expect(ambiguous.statusCode).toBe(409);
     expect(ambiguous.json()).toMatchObject({ error: { code: "conflict" } });
-    expect(ambiguous.json().error.message).toContain("MemOS、产品");
+    // 同名项目只能靠短码区分，所以提示里两个都带上 id 前 8 位。
+    expect(ambiguous.json().error.message).toContain("MemOS #p-1、产品 #p-2");
     expect(recall).not.toHaveBeenCalled();
 
     const selected = await app!.inject({ method: "POST", url: "/api/collab/knowledge/search", payload: { ...payload, project: "MemOS" } });
     expect(selected.statusCode).toBe(200);
     expect(recall).toHaveBeenCalledWith("属性记忆模板", "p-1");
+
+    // --project 直接给 id 也认：这是同名项目唯一可靠的指定方式。
+    const byId = await app!.inject({ method: "POST", url: "/api/collab/knowledge/search", payload: { ...payload, project: "p-2" } });
+    expect(byId.statusCode).toBe(200);
+    expect(recall).toHaveBeenCalledWith("属性记忆模板", "p-2");
   });
 
   it("turns away a project the session is not linked to and an incomplete identity", async () => {
