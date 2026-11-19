@@ -62,9 +62,10 @@ describe("ToolsPageView", () => {
     expect(html).toContain("连接与工具");
     expect(html).toContain("GitHub");
     expect(html).toContain("应用工具");
-    expect(html).toContain("聊天渠道");
-    expect(html).toContain("任务插件");
-    expect(html).toMatch(/role="tablist"[^>]+data-window-drag-exclusion="tools-tabs"/);
+    expect(html).toContain("IM 助理");
+    expect(html).toContain("插件");
+    expect(html).toMatch(/class="tools-page-navigation" data-window-drag-exclusion="tools-tabs"/);
+    expect(html).toContain('role="tablist"');
     expect(html).toMatch(/id="tools-tab-connections"[^>]+aria-selected="true"/);
     expect(html.indexOf('id="tools-tab-connections"')).toBeLessThan(html.indexOf('id="tools-tab-channels"'));
     expect(html.indexOf('id="tools-tab-channels"')).toBeLessThan(html.indexOf('id="tools-tab-plugins"'));
@@ -95,14 +96,18 @@ describe("ToolsPageView", () => {
   it("保留页面骨架，三个分类共用紧凑目录的布局", () => {
     const html = renderView(initialToolsState);
 
-    expect(html).toContain('padding-top:calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px) + -8px)');
+    expect(html).toContain('padding-top:calc(var(--codex-toolbar-height) + var(--app-frame-topbar-offset, 0px) + -20px)');
     expect(html).toContain('class="app-frame-page-content h-full overflow-y-auto tools-page-content"');
     expect(html).toContain('style="padding-bottom:24px"');
     expect(html).toContain('data-tour-anchor="product-tour-tools-content"');
     expect(html).toContain("plugin-marketplace-grid");
     expect(html).toContain("extension-catalog-heading");
+    expect(html).toContain("Connect app tools, IM assistants, and plugins to help Memmy do more for you");
+    expect(html.indexOf('class="tools-page-heading')).toBeLessThan(html.indexOf('role="tablist"'));
+    expect(html.match(/alt="Memmy"/g)).toHaveLength(1);
     expect(html).toContain('alt="Memmy"');
-    expect(html).toContain("extension-catalog-toolbar");
+    expect(html).toContain("tools-page-navigation-actions");
+    expect(html).not.toContain("extension-catalog-toolbar");
     expect(html).not.toContain("w-full max-w-3xl space-y-4");
     expect(html).not.toContain("grid grid-cols-4 gap-3 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7");
     expect(html).not.toContain("rounded-2xl border border-border-stone/35 bg-background-paper p-3 shadow-sm ring-1 ring-black/5");
@@ -142,7 +147,8 @@ describe("ToolsPageView", () => {
     expect(html).toContain("Plugin catalog fixture");
     expect(html).not.toContain("GitHub");
     expect(html).not.toContain("Telegram");
-    expect(html).not.toContain("extension-catalog-heading");
+    expect(html).toContain("tools-page-heading extension-catalog-heading");
+    expect(html.match(/alt="Memmy"/g)).toHaveLength(1);
   });
 
   it("ready 后不按 Cloud 能力清单过滤本地静态工具", () => {

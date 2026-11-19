@@ -8,6 +8,12 @@ export const THREAD_DRAG_EXCLUSION_SELECTOR =
   '[data-window-drag-exclusion^="thread-"]';
 export const TOOLS_DRAG_EXCLUSION_SELECTOR =
   '[data-window-drag-exclusion="tools-tabs"]';
+/**
+ * 看板顶部那几枚按钮（邀请 / 收起配置 / 项目设置 / 收起配置面板）：它们的上半截落在 46px 的窗口拖拽条里，
+ * 没有这层排除时，鼠标停在薄荷块上半部分既没有悬停底色也点不动。
+ */
+export const COLLAB_DRAG_EXCLUSION_SELECTOR =
+  '[data-window-drag-exclusion^="collab-"]';
 export const WINDOWS_TITLEBAR_DRAG_EXCLUSION_SELECTOR =
   '[data-window-drag-exclusion="windows-titlebar"]';
 
@@ -50,6 +56,7 @@ export function resolveWindowDragExclusionSelector(path: string): string | undef
   if (path === "/knowledge") return KNOWLEDGE_DRAG_EXCLUSION_SELECTOR;
   if (path === "/main") return THREAD_DRAG_EXCLUSION_SELECTOR;
   if (path === "/tools") return TOOLS_DRAG_EXCLUSION_SELECTOR;
+  if (path === "/collab") return COLLAB_DRAG_EXCLUSION_SELECTOR;
   return undefined;
 }
 

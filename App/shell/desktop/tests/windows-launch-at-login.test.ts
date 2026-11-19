@@ -24,12 +24,19 @@ const packagedWindowsEnvironment = {
 } as const;
 
 describe("Windows launch at login", () => {
-  it("uses the installed launch proxy so login startup follows the normal Windows launch chain", () => {
-    const launcherPath = "C:\\Users\\Lee User\\AppData\\Local\\Memmy\\launcher\\MemmyLauncher.vbs";
+  const launcherPath = "C:\\Users\\Lee User\\AppData\\Local\\Memmy\\launcher\\MemmyLauncher.ps1";
+  const powerShellPath = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+  const launcherArguments = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", launcherPath];
 
-    expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, (path) => path === launcherPath)).toEqual({
-      path: "C:\\Windows\\System32\\wscript.exe",
-      args: [launcherPath]
+  it("uses the installed PowerShell proxy without optional VBScript", () => {
+    expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, () => true)).toEqual({
+      path: powerShellPath, args: launcherArguments
+    });
+  });
+
+  it("falls back to the executable if PowerShell is unavailable", () => {
+    expect(resolveWindowsLoginItemCommand(packagedWindowsEnvironment, path => path === launcherPath)).toEqual({
+      path: packagedWindowsEnvironment.executablePath, args: []
     });
   });
 
@@ -42,8 +49,8 @@ describe("Windows launch at login", () => {
 
   it.each(["Lee", "Lee User", "中文 用户"])("passes an unquoted launcher path for user %s", (user) => {
     const environment = { ...packagedWindowsEnvironment, localAppDataPath: `C:\\Users\\${user}\\AppData\\Local` };
-    const launcherPath = `${environment.localAppDataPath}\\Memmy\\launcher\\MemmyLauncher.vbs`;
-    expect(resolveWindowsLoginItemCommand(environment, () => true).args).toEqual([launcherPath]);
+    const launcherPath = `${environment.localAppDataPath}\\Memmy\\launcher\\MemmyLauncher.ps1`;
+    expect(resolveWindowsLoginItemCommand(environment, () => true).args.at(-1)).toBe(launcherPath);
   });
 
   it.each([true, false])("repairs only the legacy Memmy command and preserves enabled=%s", (enabled) => {
@@ -59,7 +66,7 @@ describe("Windows launch at login", () => {
     const application = { getLoginItemSettings, setLoginItemSettings };
     expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(true);
     expect(setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({
-      openAtLogin: true, enabled, path: "C:\\Windows\\System32\\wscript.exe", args: [launcherPath]
+      openAtLogin: true, enabled, path: powerShellPath, args: launcherArguments
     });
     expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(false);
     expect(setLoginItemSettings).toHaveBeenCalledTimes(1);
@@ -89,6 +96,40 @@ describe("Windows launch at login", () => {
     expect(application.setLoginItemSettings).not.toHaveBeenCalled();
   });
 
+  it.each([true, false])("migrates a removed raw VBS launcher while preserving enabled=%s", enabled => {
+    const legacyPath = launcherPath.replace(/\.ps1$/, ".vbs");
+    const legacyCommand = { path: "C:\\Windows\\System32\\wscript.exe", args: [legacyPath] };
+    const application: WindowsLoginItemApplication = {
+      getLoginItemSettings: vi.fn(command => ({
+        openAtLogin: command.path === legacyCommand.path && command.args[0] === legacyPath,
+        executableWillLaunchAtLogin: true,
+        launchItems: [{ name: "cn.memtensor.memmy", scope: "user", ...legacyCommand, enabled }]
+      })),
+      setLoginItemSettings: vi.fn()
+    };
+    // The installer removes the legacy script before the app migrates the Run entry.
+    expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, path => path !== legacyPath)).toBe(true);
+    expect(application.setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({
+      path: powerShellPath, args: launcherArguments, openAtLogin: true, enabled
+    });
+  });
+
+  it("normalizes a previously quoted PowerShell script argument", () => {
+    const quotedArguments = [...launcherArguments.slice(0, -1), `"${launcherPath}"`];
+    const application: WindowsLoginItemApplication = {
+      getLoginItemSettings: vi.fn(command => ({
+        openAtLogin: command.path === powerShellPath && command.args.at(-1) === quotedArguments.at(-1),
+        executableWillLaunchAtLogin: true,
+        launchItems: [{ name: "cn.memtensor.memmy", scope: "user", path: powerShellPath, args: quotedArguments, enabled: false }]
+      })),
+      setLoginItemSettings: vi.fn()
+    };
+    expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(true);
+    expect(application.setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({
+      path: powerShellPath, args: launcherArguments, openAtLogin: true, enabled: false
+    });
+  });
+
   it("reads the effective Windows startup state for the exact registered command", () => {
     const getLoginItemSettings = vi.fn(() => ({
       openAtLogin: true,
@@ -111,27 +152,53 @@ describe("Windows launch at login", () => {
     });
   });
 
-  it("does not mistake another wscript startup entry for an enabled Memmy launch item", () => {
-    const launcherPath = "C:\\Users\\Lee User\\AppData\\Local\\Memmy\\launcher\\MemmyLauncher.vbs";
-    const getLoginItemSettings = vi.fn(() => ({
-      openAtLogin: true,
-      executableWillLaunchAtLogin: true,
-      launchItems: [{
-        path: "C:\\Windows\\System32\\wscript.exe",
-        args: ["\"C:\\Other\\startup.vbs\""],
-        enabled: true
-      }, {
-        path: "C:\\Windows\\System32\\wscript.exe",
-        args: [launcherPath],
-        enabled: false
-      }]
-    }));
+  it("does not mistake another PowerShell startup entry for an enabled Memmy item", () => {
     const application: WindowsLoginItemApplication = {
-      getLoginItemSettings,
+      getLoginItemSettings: vi.fn(() => ({
+        openAtLogin: true, executableWillLaunchAtLogin: true,
+        launchItems: [
+          { path: powerShellPath, args: ["-File", "C:\\Other\\startup.ps1"], enabled: true },
+          { path: powerShellPath, args: launcherArguments, enabled: false }
+        ]
+      })),
       setLoginItemSettings: vi.fn()
     };
+    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(false);
+  });
 
-    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, (path) => path === launcherPath)).toBe(false);
+  it.each([
+    { openAtLogin: true, args: ["Bypass", "Hidden", launcherPath], expected: true },
+    { openAtLogin: false, args: ["Bypass", "Hidden", launcherPath], expected: false },
+    { openAtLogin: true, args: ["Restricted", "Hidden", launcherPath], expected: false },
+    { openAtLogin: true, args: ["Bypass", "Normal", launcherPath], expected: false },
+    { openAtLogin: true, args: ["Bypass", "Hidden", "C:\\Other\\startup.ps1"], expected: false },
+    { openAtLogin: true, args: [launcherPath], expected: false }
+  ])("reads Electron's positional argument representation without dropping the app gate: %j", ({ openAtLogin, args, expected }) => {
+    const application: WindowsLoginItemApplication = {
+      getLoginItemSettings: vi.fn(() => ({
+        openAtLogin, executableWillLaunchAtLogin: true,
+        launchItems: [{ name: "cn.memtensor.memmy", scope: "user", path: powerShellPath, args, enabled: true }]
+      })),
+      setLoginItemSettings: vi.fn()
+    };
+    expect(getWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(expected);
+  });
+
+  it("repairs a quoted PowerShell entry when Electron strips its switches", () => {
+    const quotedArguments = [...launcherArguments.slice(0, -1), `"${launcherPath}"`];
+    const application: WindowsLoginItemApplication = {
+      getLoginItemSettings: vi.fn(command => ({
+        openAtLogin: command.path === powerShellPath && command.args.at(-1) === quotedArguments.at(-1),
+        executableWillLaunchAtLogin: true,
+        launchItems: [{ name: "cn.memtensor.memmy", scope: "user", path: powerShellPath,
+          args: ["Bypass", "Hidden", `"${launcherPath}"`], enabled: false }]
+      })),
+      setLoginItemSettings: vi.fn()
+    };
+    expect(repairWindowsLaunchAtLogin(application, packagedWindowsEnvironment, () => true)).toBe(true);
+    expect(application.setLoginItemSettings).toHaveBeenCalledExactlyOnceWith({
+      path: powerShellPath, args: launcherArguments, openAtLogin: true, enabled: false
+    });
   });
 
   it.each([
@@ -139,14 +206,13 @@ describe("Windows launch at login", () => {
     { firstEnabled: true, ownEnabled: false, expected: true },
     { firstEnabled: false, ownEnabled: false, expected: false }
   ])("reads all exact-command entries independently of ordering: %j", ({ firstEnabled, ownEnabled, expected }) => {
-    const launcherPath = `${packagedWindowsEnvironment.localAppDataPath}\\Memmy\\launcher\\MemmyLauncher.vbs`;
     const application: WindowsLoginItemApplication = {
       getLoginItemSettings: vi.fn(() => ({
         openAtLogin: true,
         executableWillLaunchAtLogin: true,
         launchItems: [
-          { name: "aaa-alias", scope: "user", path: "c:/windows/system32/wscript.exe", args: [launcherPath], enabled: firstEnabled },
-          { name: "cn.memtensor.memmy", scope: "user", path: "C:\\Windows\\System32\\wscript.exe", args: [launcherPath], enabled: ownEnabled }
+          { name: "aaa-alias", scope: "user", path: "c:/windows/system32/windowspowershell/v1.0/powershell.exe", args: launcherArguments, enabled: firstEnabled },
+          { name: "cn.memtensor.memmy", scope: "user", path: powerShellPath, args: launcherArguments, enabled: ownEnabled }
         ]
       })),
       setLoginItemSettings: vi.fn()
@@ -155,12 +221,12 @@ describe("Windows launch at login", () => {
     expect(application.setLoginItemSettings).not.toHaveBeenCalled();
   });
 
-  it("does not use aggregate wscript state without a matching command", () => {
+  it("does not use aggregate PowerShell state without a matching command", () => {
     const application: WindowsLoginItemApplication = {
       getLoginItemSettings: vi.fn(() => ({
         openAtLogin: true,
         executableWillLaunchAtLogin: true,
-        launchItems: [{ name: "another-app", scope: "user", path: "C:\\Windows\\System32\\wscript.exe", args: ["C:\\Other\\startup.vbs"], enabled: true }]
+        launchItems: [{ name: "another-app", scope: "user", path: powerShellPath, args: ["-File", "C:\\Other\\startup.ps1"], enabled: true }]
       })),
       setLoginItemSettings: vi.fn()
     };
@@ -168,12 +234,11 @@ describe("Windows launch at login", () => {
   });
 
   it("keeps a missing own registration off even when an alias has the same command", () => {
-    const launcherPath = `${packagedWindowsEnvironment.localAppDataPath}\\Memmy\\launcher\\MemmyLauncher.vbs`;
     const application: WindowsLoginItemApplication = {
       getLoginItemSettings: vi.fn(() => ({
         openAtLogin: false,
         executableWillLaunchAtLogin: true,
-        launchItems: [{ name: "alias", scope: "user", path: "C:\\Windows\\System32\\wscript.exe", args: [launcherPath], enabled: true }]
+        launchItems: [{ name: "alias", scope: "user", path: powerShellPath, args: launcherArguments, enabled: true }]
       })),
       setLoginItemSettings: vi.fn()
     };

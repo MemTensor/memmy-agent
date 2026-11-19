@@ -28,6 +28,7 @@ artifacts/literature-review-*.json
 # not track empty directories, and `.*` above would otherwise drop the marker.
 !App/memmy-agent/src/tools/computer-history/win/.gitkeep
 App/backend/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs
+App/backend/src/adapters/outbound/skill-writer/project-hook/memmy-project-runtime.mjs
 Memory/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs
 
 # Office rendering executables and libraries are provisioned during packaging.

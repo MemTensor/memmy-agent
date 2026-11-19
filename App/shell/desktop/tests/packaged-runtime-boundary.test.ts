@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 
@@ -496,20 +497,39 @@ describe("desktop packaged runtime boundaries", () => {
 
   it("keeps the desktop main process on the shared Memmy identity and config path", () => {
     const source = readFileSync(mainSourcePath, "utf8");
-
-    expect(source).toContain('app.setName("Memmy");');
-    expect(source).toContain("windowsDataLayout = resolveWindowsDataLayout({");
-    expect(source).toContain("const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);");
-    expect(source).toContain("const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);");
-    expect(source).toContain('app.setPath("userData", userDataPath);');
-    expect(source).not.toContain('return join(dirname(process.execPath), "data");');
-    expect(source).toContain('windowsDataLayout?.updatesPath ?? join(app.getPath("userData"), "updates")');
-    expect(source).toContain("advanceWindowsDataMigrationAfterBoot(");
-    expect(source).toContain('[join(homedir(), ".memmy")]');
-    expect(source).toContain("process.env.MEMMY_MEMORY_DB = memoryDatabasePath;");
-    expect(source).toContain('const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");');
-    expect(source).toContain("accountChannel: resolveCurrentDesktopAccountChannel()");
-    expect(source).toContain("runtimeServices = await startManagedRuntimeServices({");
+    const includes = (fragment: string, expected = true) => {
+      // Keep failure diagnostics bounded to the missing contract, not the entire main module.
+      expect(source.includes(fragment), `Main identity contract: ${fragment}`).toBe(expected);
+    };
+    includes('app.setName("Memmy");');
+    includes("windowsDataLayout = resolveWindowsDataLayout({");
+    const devProfile = source.match(/^  const devProfile =[^;]+;/m)?.[0];
+    const userDataPath = source.match(/^  const userDataPath =[^;]+;/m)?.[0];
+    expect(devProfile).toBeDefined();
+    expect(userDataPath).toBeDefined();
+    if (!devProfile || !userDataPath) throw new Error("Missing desktop data-path declarations");
+    const evaluatePath = (isPackaged: boolean, profile: string | undefined, windowsPath: string | null): unknown =>
+      runInNewContext(`${devProfile}\n${userDataPath}\nuserDataPath`, {
+        app: { isPackaged }, process: { env: { MEMMY_DEV_PROFILE_DIR: profile } }, join,
+        windowsDataLayout: windowsPath ? { userDataPath: windowsPath } : null,
+        resolveDesktopUserDataPath: (edition: string) => `/canonical/${edition}`, edition: "cn"
+      });
+    // Packaged builds ignore the development override; development instances keep separate locks.
+    expect(evaluatePath(true, "/dev-profile", "/windows-data")).toBe("/windows-data");
+    expect(evaluatePath(true, "/dev-profile", null)).toBe("/canonical/cn");
+    expect(evaluatePath(false, "/dev-profile", "/windows-data")).toBe(join("/dev-profile", "userData"));
+    expect(evaluatePath(false, undefined, "/windows-data")).toBe("/windows-data");
+    expect(evaluatePath(false, undefined, null)).toBe("/canonical/cn");
+    includes("const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);");
+    includes('app.setPath("userData", userDataPath);');
+    includes('return join(dirname(process.execPath), "data");', false);
+    includes('windowsDataLayout?.updatesPath ?? join(app.getPath("userData"), "updates")');
+    includes("advanceWindowsDataMigrationAfterBoot(");
+    includes('[join(homedir(), ".memmy")]');
+    includes("process.env.MEMMY_MEMORY_DB = memoryDatabasePath;");
+    includes('const appDatabaseFile = join(app.getPath("userData"), "app.sqlite");');
+    includes("accountChannel: resolveCurrentDesktopAccountChannel()");
+    includes("runtimeServices = await startManagedRuntimeServices({");
     const runtimeServicesSource = readFileSync(runtimeServicesPath, "utf8");
     expect(runtimeServicesSource.indexOf("await runPackagedMigrationCommand({")).toBeLessThan(
       runtimeServicesSource.indexOf("await options.beforeStartServices?.({")
@@ -517,9 +537,9 @@ describe("desktop packaged runtime boundaries", () => {
     expect(runtimeServicesSource.indexOf("await options.beforeStartServices?.({")).toBeLessThan(
       runtimeServicesSource.indexOf("browserPreparation ??= startPackagedBrowserPreparation(")
     );
-    expect(source).toContain("resolveDevelopmentRuntimeEntryPaths(import.meta.dirname)");
-    expect(source).toContain("memmyConfigPath: process.env.MEMMY_CONFIG");
-    expect(source).not.toContain("startDesktopRuntimeServices");
+    includes("resolveDevelopmentRuntimeEntryPaths(import.meta.dirname)");
+    includes("memmyConfigPath: process.env.MEMMY_CONFIG");
+    includes("startDesktopRuntimeServices", false);
   });
 
   it("waits for an active renderer bootstrap handshake before verifying migrated data", () => {
@@ -537,6 +557,13 @@ describe("desktop packaged runtime boundaries", () => {
     expect(frontendSource).toContain("!state.bootstrap");
     expect(verificationSource).toContain("rendererReadyWaiters.set");
     expect(verificationSource).not.toContain("did-finish-load");
+    const finishStart = verificationSource.indexOf("const finish = ");
+    const finishEnd = verificationSource.indexOf("const handleFailed", finishStart);
+    const finishSource = verificationSource.slice(finishStart, finishEnd);
+    const destroyedCheck = finishSource.indexOf("if (!targetWindow.isDestroyed())");
+    const webContentsCleanup = finishSource.indexOf("targetWindow.webContents.removeListener");
+    expect(destroyedCheck).toBeGreaterThan(-1);
+    expect(webContentsCleanup).toBeGreaterThan(destroyedCheck);
   });
 
   it("journals each prepared Windows data copy before later migration steps can fail", () => {
@@ -934,24 +961,27 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).toContain('File /oname=Memmy.ico "${BUILD_RESOURCES_DIR}\\icon.ico"');
     expect(includeSource).toContain('File /oname=MemmyUpdatePrompt.ps1 "${BUILD_RESOURCES_DIR}\\MemmyUpdatePrompt.ps1"');
     expect(includeSource).toContain('File /oname=MemmyWindowsUpgradeRecovery.ps1 "${BUILD_RESOURCES_DIR}\\MemmyWindowsUpgradeRecovery.ps1"');
-    expect(includeSource).toContain('FileOpen $1 "$0\\MemmyLauncher.vbs" w');
-    expect(includeSource).toContain('promptPath = $\\"$0\\MemmyUpdatePrompt.ps1$\\"');
-    expect(includeSource).toContain('userDataRoot = shell.ExpandEnvironmentStrings($\\"%APPDATA%$\\") & $\\"\\Memmy$\\"');
-    expect(includeSource).toContain('legacyUserDataRoot = $\\"$INSTDIR\\data\\Memmy$\\"');
-    expect(includeSource).toContain('languagePath = userDataRoot & $\\"\\update-prompt-language.txt$\\"');
-    expect(includeSource).toContain('markerPath = userDataRoot & $\\"\\prepared-required-update.json$\\"');
-    expect(includeSource).toContain('relayLockPath = shell.ExpandEnvironmentStrings($\\"%LOCALAPPDATA%$\\") & $\\"\\Memmy\\upgrade-staging\\active.lock$\\"');
-    expect(includeSource).toContain('recoveryPath = $\\"$0\\MemmyWindowsUpgradeRecovery.ps1$\\"');
-    expect(includeSource).toContain("If fso.FolderExists(relayLockPath) And fso.FileExists(recoveryPath) Then");
-    expect(includeSource).toContain("If fso.FolderExists(relayLockPath) Then");
-    expect(includeSource).toContain("lockPath = relayLockPath");
-    expect(includeSource).toContain("If fso.FolderExists(lockPath) And LCase(lockPath) <> LCase(relayLockPath) And fso.FileExists(recoveryPath) Then");
+    expect(includeSource).toContain('FileOpen $1 "$0\\MemmyLauncher.ps1" w');
+    expect(includeSource).toContain('FileWriteByte $1 "255"');
+    expect(includeSource).toContain('FileWriteByte $1 "254"');
+    expect(includeSource).toContain("FileWriteUTF16LE $1");
+    expect(includeSource).toContain("$$promptPath = Join-Path $$PSScriptRoot 'MemmyUpdatePrompt.ps1'");
+    expect(includeSource).toContain("$$userDataRoot = Join-Path $$env:APPDATA 'Memmy'");
+    expect(includeSource).toContain("$$legacyUserDataRoot = Join-Path (Split-Path -Parent $$appExe) 'data\\Memmy'");
+    expect(includeSource).toContain("$$languagePath = Join-Path $$userDataRoot 'update-prompt-language.txt'");
+    expect(includeSource).toContain("$$markerPath = Join-Path $$userDataRoot 'prepared-required-update.json'");
+    expect(includeSource).toContain("$$relayLockPath = Join-Path $$env:LOCALAPPDATA 'Memmy\\upgrade-staging\\active.lock'");
+    expect(includeSource).toContain("$$recoveryPath = Join-Path $$PSScriptRoot 'MemmyWindowsUpgradeRecovery.ps1'");
+    expect(includeSource).toContain("if ((Test-Path -LiteralPath $$relayLockPath -PathType Container) -and (Test-Path -LiteralPath $$recoveryPath -PathType Leaf))");
+    expect(includeSource).toContain("if (Test-Path -LiteralPath $$relayLockPath -PathType Container) {");
+    expect(includeSource).toContain("$$lockPath = $$relayLockPath");
+    expect(includeSource).toContain("-and ($$lockPath.ToLowerInvariant() -ne $$relayLockPath.ToLowerInvariant())");
     expect(includeSource).toContain("WindowsPowerShell\\v1.0\\powershell.exe");
-    expect(includeSource).toContain('promptMarkerPath = markerPath & $\\".prompt$\\"');
-    expect(includeSource).toContain("If fso.FolderExists(lockPath) And fso.FileExists(promptMarkerPath) Then");
-    expect(includeSource).toContain("If fso.FileExists(powerShellPath) And fso.FileExists(promptPath) Then");
-    expect(includeSource).toContain("If fso.FolderExists(lockPath) Or Not fso.FileExists(appExe) Then");
-    expect(includeSource).toContain("WScript.Quit 0");
+    expect(includeSource).toContain("$$promptMarkerPath = $$markerPath + '.prompt'");
+    expect(includeSource).toContain("if ((Test-Path -LiteralPath $$lockPath -PathType Container) -and (Test-Path -LiteralPath $$promptMarkerPath -PathType Leaf))");
+    expect(includeSource).toContain("if ((Test-Path -LiteralPath $$powerShellPath -PathType Leaf) -and (Test-Path -LiteralPath $$promptPath -PathType Leaf))");
+    expect(includeSource).toContain("if ((Test-Path -LiteralPath $$lockPath -PathType Container) -or -not (Test-Path -LiteralPath $$appExe -PathType Leaf))");
+    expect(includeSource).toContain("exit 0");
     expect(includeSource).toContain("update-prompt-language.txt");
     expect(includeSource).toContain("prepared-required-update.json");
     expect(includeSource).toContain("-STA -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File");
@@ -961,9 +991,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(includeSource).not.toContain("shell.Popup");
     expect(includeSource).not.toContain("ChrW(&H6B63)");
     expect(includeSource).not.toContain("Please open Memmy again in a moment.");
-    expect(includeSource).toContain('appExe = $\\"$INSTDIR\\${PRODUCT_FILENAME}.exe$\\"');
+    expect(includeSource).toContain("$$appExe = [IO.File]::ReadAllText((Join-Path $$PSScriptRoot 'MemmyLauncher.path'), [Text.Encoding]::Unicode)");
+    expect(includeSource).not.toContain("WScript");
     expect(includeSource).toContain('StrCpy $3 "$newStartMenuLink"');
-    expect(includeSource).toContain('CreateShortCut "$3" "$SYSDIR\\wscript.exe"');
+    expect(includeSource).toContain('CreateShortCut "$3" "$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe"');
     expect(includeSource).toContain('Push "no-desktop-shortcut"');
     expect(includeSource).toContain('StrCmp $keepShortcuts "false" memmy_point_new_desktop_shortcut');
     expect(includeSource).toContain("StrCmp $oldDesktopLink $newDesktopLink memmy_point_existing_new_desktop_shortcut");
@@ -1127,6 +1158,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(mainSource).toContain('ipcMain.removeHandler("memmy:install-cli-tools")');
     expect(mainSource).toContain("async function installCliTools");
     expect(mainSource).toContain("installPackagedWindowsCliTools");
+    expect(mainSource).toContain("installPackagedWindowsCliOnBoot");
     expect(mainSource).toContain("resolveCliInstallStrategy(");
     expect(mainSource).toContain('Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)');
     expect(mainSource).toContain(') === "packaged-windows"');
@@ -1161,9 +1193,16 @@ describe("desktop packaged runtime boundaries", () => {
 
     expect(agentPackage.bin).toEqual({ memmy: "./dist/main.js" });
     expect(agentPackageLock.packages?.[""]?.bin).toEqual({ memmy: "dist/main.js" });
-    expect(mainSource).toContain('const memmyCli = join(cliDirectory, "memmy")');
-    expect(mainSource).toContain('await Promise.all([access(memoryCli), access(memmyCli)])');
-    expect(mainSource).toContain('installSymlink(memmyCli, join(binDirectory, "memmy"))');
+    expect(mainSource).toContain("await installPackagedMacCliLaunchers()");
+    expect(mainSource).toContain("renderMemmyCliLauncher");
+    expect(mainSource).toContain('["memmy", join(cliDirectory, "memmy")]');
+    expect(mainSource).toContain('["memmy-project", join(cliDirectory, "memmy-project")]');
+    expect(mainSource).toContain("bundledCliInstallDecision");
+    expect(mainSource).not.toContain("await Promise.all([access(memoryCli), access(memmyCli), access(sessionCli)])");
+    expect(packageSource).toContain('create_cli_launcher "$CLI_BIN_DIR/memmy-project" "dist/cli/memmy-project.js"');
+    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$UNPACKED_DIR/resources/cli/memmy-project.cmd"');
+    expect(mainSource).toContain("installSymlink(source, join(binDirectory, name))");
+    expect(mainSource).toContain("installSystemBinSymlink(source, name)");
     expect(mainSource).not.toContain(['join(cliDirectory, "', 'memmy-agent', '")'].join(""));
     expect(mainSource).not.toContain(['join(binDirectory, "', 'memmy-agent', '")'].join(""));
     expect(packageSource).toContain('create_cli_launcher "$CLI_BIN_DIR/memmy"');
@@ -1361,10 +1400,12 @@ describe("desktop packaged runtime boundaries", () => {
     expect(macUpdateSource).toContain("STAGED_APP_PATH");
     expect(mainSource).toContain("function shouldInstallWindowsUpdateInBackground");
     expect(mainSource).toContain("async function installWindowsUpdateInBackground");
-    expect(mainSource).toContain("launch-win-update-${Date.now()}.vbs");
+    expect(mainSource).toContain("launch-win-update-${Date.now()}.ps1");
     expect(mainSource).toContain("install-win-update-${Date.now()}.ps1");
-    expect(mainSource).toContain('const helper = spawn("wscript.exe"');
-    expect(mainSource).toContain('import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js"');
+    expect(mainSource).toContain("const helper = spawn(windowsUpdatePowerShellExecutable(), [");
+    expect(mainSource).not.toContain('spawn("wscript.exe"');
+    expect(mainSource).not.toContain(".vbs");
+    expect(mainSource).toContain('import { createWindowsUpdateLauncherFile, waitForWindowsUpdateLauncher } from "./windows-update-launcher.js"');
     expect(mainSource).toContain("await writeFile(launcherPath, createWindowsUpdateLauncherFile([");
     expect(mainSource).toContain("$arguments = @('/S', '--updated', '/currentuser', ('/D=' + $appDir))");
     expect(macUpdateSource).toContain("CURRENT_APP_PID");

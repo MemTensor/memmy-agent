@@ -61,7 +61,7 @@ import {
   formatClock,
   type RecordingPanelSession,
   type RecordingPanelTranscript
-} from "./interview-recording-panel.js";
+} from "./recording-transcript.js";
 import { materializePluginUploadFile } from "../lib/plugin-upload-file.js";
 import { startBrowserDownload } from "./agent-message-content.js";
 import { RecordingWaveform, WAVE_BARS } from "./recording-waveform.js";
@@ -278,8 +278,10 @@ export function PluginCapabilityHost(props: PluginCapabilityHostProps) {
     // Do not duplicate it as a persistent block beside the composer.
     if (call.origin === "agent" && call.events.some((event) => event.type === "error")) return false;
     if (props.dockInteractions && call.pluginId === REVIEW_PLUGIN_ID && isStatusOnlyPresentation(call)) return false;
-    // Agent-owned Office progress already has a tool row in the conversation.
-    if (region === "flow" && call.pluginId === "office" && call.origin === "agent" && isStatusOnlyPresentation(call)) return false;
+    // Office runtime preparation needs its own live status while the Agent tool waits.
+    if (region === "flow" && call.pluginId === "office" && call.origin === "agent" && isStatusOnlyPresentation(call)) {
+      return call.events.some((event) => event.type === "progress" && event.phase === "runtime-preparation");
+    }
     // Agent-owned legal progress appears on its tool row. User-started jobs
     // keep this standalone status because they have no Agent tool row.
     if (props.dockInteractions && region === "flow" && call.pluginId === "legal-labor"
@@ -678,6 +680,9 @@ function ProgressText(props: {
   const [cancelState, setCancelState] = useState<"idle" | "pending" | "done" | "error">("idle");
   const value = props.event.total ? Math.min(100, Math.round((props.event.current / props.event.total) * 100)) : undefined;
   const completed = value === 100;
+  const message = props.event.phase === "runtime-preparation" && props.event.runtimeStage
+    ? t(`plugin.ui.officeRuntime.${props.event.runtimeStage}`)
+    : props.event.message || t("plugin.ui.progress");
   const cancel = async () => {
     setCancelState("pending");
     try {
@@ -691,7 +696,7 @@ function ProgressText(props: {
     <div className="plugin-status-text" role="status" aria-live="polite">
       <div className="flex min-w-0 items-center gap-2">
         <span className={completed ? "text-status-success" : "text-action-sky"} aria-hidden="true">{completed ? "✓" : "·"}</span>
-        <span className="min-w-0 break-words">{props.event.message || t("plugin.ui.progress")}</span>
+        <span className="min-w-0 break-words">{message}</span>
         {value !== undefined ? <span className="shrink-0 text-xs text-text-ink/45">（{value}%）</span> : null}
         {props.canCancel && cancelState !== "done" ? (
           <button type="button" disabled={cancelState === "pending"} className="ml-auto shrink-0 text-xs text-text-ink/55 hover:text-status-error disabled:opacity-50" onClick={() => void cancel()}>
@@ -1128,10 +1133,10 @@ function AudioRecordCard(props: {
   const bar = (
     <div className={`recording-bar${props.interview ? " recording-bar--interview" : ""}${recorder.isRecording ? " recording-bar--live" : ""}`}>
       <span className="recording-bar__icon" aria-hidden="true"><Mic size={props.interview ? 18 : 14} /></span>
-      <p className="recording-bar__title">
+      <p className="recording-bar__title" role="status">
         {recorder.isRecording
           ? (recorder.status === "paused" ? t("plugin.ui.audio.paused") : t("plugin.ui.audio.recording"))
-          : props.title}
+          : recorder.isTranscribing ? t("recording.page.transcribingShort") : props.title}
       </p>
       <span className="recording-bar__clock" role="timer" aria-label={t("plugin.ui.audio.elapsed")}>
         {formatClock(elapsedMs)}
@@ -1187,7 +1192,6 @@ function AudioRecordCard(props: {
           {t("plugin.ui.audio.remaining", { time: formatClock(remainingMs) })}
         </span>
       ) : null}
-      {recorder.isTranscribing ? <span className="recording-bar__note" role="status">{t("plugin.ui.audio.transcribing")}</span> : null}
       {answered ? <span className="recording-bar__note recording-bar__note--done" role="status">{t("plugin.ui.answered")}</span> : null}
       {error ? <span className="recording-bar__note recording-bar__note--warning" role="alert">{error}</span> : null}
     </div>
