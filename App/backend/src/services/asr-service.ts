@@ -1,7 +1,9 @@
 /** Asr service module. */
+import { randomUUID } from "node:crypto";
 import {
   AsrTranscriptionResponseSchema,
   type ActualModelContext,
+  type AsrSession,
   type AppSettingsDto,
   type AsrTranscriptionInput,
   type AsrTranscriptionResponse,
@@ -12,7 +14,15 @@ import type { AccountSessionRepository } from "../infrastructure/app-state-store
 import type { BootstrapRepository } from "../infrastructure/app-state-store/repositories/bootstrap-repo.js";
 import type { MemmyConfigWriter } from "../infrastructure/memmy-config/index.js";
 
+export interface AsrSelectionSnapshot {
+  context: Readonly<ActualModelContext>;
+  cloudUuid: string | null;
+}
+
 export interface AsrService {
+  prepare(): Promise<AsrSession>;
+  getSession(sessionId: string): AsrSelectionSnapshot;
+  release(sessionId: string): void;
   transcribe(input: AsrTranscriptionInput): Promise<AsrTranscriptionResponse>;
 }
 
@@ -34,6 +44,8 @@ export interface CreateAsrServiceOptions {
 }
 
 const DEFAULT_ASR_TIMEOUT_MS = 30_000;
+const MAX_REALTIME_SESSIONS = 32;
+const REALTIME_SESSION_TTL_MS = 3 * 60 * 60 * 1_000;
 
 /** Creates create asr service. */
 export function createAsrService(options: CreateAsrServiceOptions): AsrService {
@@ -41,8 +53,45 @@ export function createAsrService(options: CreateAsrServiceOptions): AsrService {
   const timeoutMs = options.timeoutMs ?? DEFAULT_ASR_TIMEOUT_MS;
   const now = options.now ?? (() => new Date().toISOString());
 
+  // Credentials stay in the backend. A recording carries only this opaque ID.
+  const sessions = new Map<string, { snapshot: AsrSelectionSnapshot; expiresAt: number }>();
+  const getSession = (id: string): AsrSelectionSnapshot => {
+    const session = sessions.get(id);
+    if (!session || session.expiresAt <= Date.now()) {
+      sessions.delete(id);
+      throw Object.assign(new Error("ASR recording session expired; its model configuration cannot be recovered"), { code: "model_config_changed" });
+    }
+    if (!session.snapshot.cloudUuid || session.snapshot.cloudUuid !== options.accountSessionRepository?.getCloudUuid()) {
+      sessions.delete(id);
+      throw Object.assign(new Error("ASR account changed"), { code: "model_config_changed" });
+    }
+    return session.snapshot;
+  };
   return {
+    async prepare() {
+      for (const [id, session] of sessions) if (session.expiresAt <= Date.now()) sessions.delete(id);
+      const mode = options.bootstrapRepository.getAppSettings().userMode;
+      if (mode !== "account" && mode !== "byok") {
+        throw Object.assign(new Error("ASR requires account or BYOK mode"), { code: "invalid_argument" });
+      }
+      const cloudUuid = options.accountSessionRepository?.getCloudUuid() ?? null;
+      const resolved = await requireAsrSelection(options, mode);
+      if (resolved.context.source !== "account") return { transport: "http" };
+      if (!cloudUuid) throw Object.assign(new Error("Cloud account is not authenticated"), { code: "unauthorized" });
+      const snapshot = structuredClone({ context: resolved.context, cloudUuid });
+      if (sessions.size >= MAX_REALTIME_SESSIONS) throw Object.assign(new Error("Too many active ASR recordings"), { code: "rate_limited" });
+      const sessionId = randomUUID();
+      sessions.set(sessionId, { snapshot, expiresAt: Date.now() + REALTIME_SESSION_TTL_MS });
+      return { sessionId, transport: "websocket" };
+    },
+    getSession,
+    release(id) { sessions.delete(id); },
     async transcribe(input) {
+      // Only realtime fallback carries a session; all existing HTTP callers keep their original path.
+      if (input.sessionId) {
+        const snapshot = getSession(input.sessionId);
+        return transcribeWithAccount(input, options, snapshot.context, now);
+      }
       const userMode = options.bootstrapRepository.getAppSettings().userMode;
       if (userMode !== "account" && userMode !== "byok") {
         throw Object.assign(new Error("ASR requires account or BYOK mode"), { code: "invalid_argument" as const });
@@ -174,7 +223,7 @@ async function requireAsrSelection(
 
 function modelSelectionUnavailable(context?: Readonly<ActualModelContext>): Error {
   return Object.assign(new Error("Assigned ASR model is unavailable"), {
-    code: "model_selection_unavailable" as const,
+    code: "invalid_argument" as const,
     ...(context ? { actualModelContext: context } : {})
   });
 }

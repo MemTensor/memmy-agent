@@ -1,13 +1,109 @@
 /** Asr service tests. */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
 import { describe, expect, it } from "vitest";
 import { createMemmyConfigWriter } from "../../infrastructure/memmy-config/index.js";
 import { createAsrService } from "../asr-service.js";
+import { HTTP_STATUS_BY_CODE } from "../error-envelope.js";
 
 describe("asr service", () => {
+  it.each(["prepare", "transcribe"])("uses the existing error contract for an unavailable model during %s", async operation => {
+    const fixture = catalogFixture("byok");
+    try {
+      const config = YAML.parse(readFileSync(fixture.configPath, "utf8"));
+      config.modelAssignments.byok.asr = "missing-asr";
+      writeFileSync(fixture.configPath, YAML.stringify(config));
+      const service = createAsrService({
+        bootstrapRepository: { getAppSettings: () => ({ userMode: "byok" }) },
+        memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+        cloudClient: { transcribeAudio: async () => { throw new Error("must not upload audio"); } }
+      });
+      const error = await (operation === "prepare" ? service.prepare()
+        : service.transcribe({ audioBase64: "AQ==", mimeType: "audio/wav" })).catch(error => error);
+      expect(error).toMatchObject({ code: "invalid_argument", message: "Assigned ASR model is unavailable" });
+      expect(HTTP_STATUS_BY_CODE[error.code as keyof typeof HTTP_STATUS_BY_CODE]).toBe(400);
+    } finally { fixture.dispose(); }
+  });
+
+  it.each(["account", "byok"] as const)("prepares %s recordings without adding BYOK realtime support", async mode => {
+    const fixture = catalogFixture(mode);
+    try {
+      const service = createAsrService({
+        bootstrapRepository: { getAppSettings: () => ({ userMode: mode }) },
+        accountSessionRepository: {
+          get: () => ({ authenticated: true, profile: { userId: "owner-a" } }) as any,
+          getCloudUuid: () => "pinned-account-token"
+        },
+        memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+        cloudClient: { transcribeAudio: async () => { throw new Error("no HTTP call during preparation"); } }
+      });
+      const prepared = await service.prepare();
+      expect(prepared.transport).toBe(mode === "account" ? "websocket" : "http");
+      if (prepared.transport === "websocket") {
+        expect(service.getSession(prepared.sessionId).context.source).toBe("account");
+        service.release(prepared.sessionId);
+        expect(() => service.getSession(prepared.sessionId)).toThrow("expired");
+      } else expect(prepared).toEqual({ transport: "http" });
+    } finally { fixture.dispose(); }
+  });
+
+  it.each(["account-b", null])("rejects platform fallback after switching account to %s", async next => {
+    const fixture = catalogFixture("account"); let token: string | null = "account-a"; let uploaded = false;
+    try {
+      const service = createAsrService({
+        bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
+        accountSessionRepository: { get: () => ({ authenticated: true, profile: { userId: "owner-a" } }) as any, getCloudUuid: () => token },
+        memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+        cloudClient: { transcribeAudio: async () => { uploaded = true; return { text: "wrong account", modelId: "asr", provider: "memmy_account" }; } }
+      });
+      const prepared = await service.prepare(); token = next;
+      if (prepared.transport !== "websocket") throw new Error("expected platform model");
+      await expect(service.transcribe({ sessionId: prepared.sessionId, audioBase64: "AQ==", mimeType: "audio/wav" }))
+        .rejects.toMatchObject({ code: "model_config_changed" });
+      expect(uploaded).toBe(false);
+    } finally { fixture.dispose(); }
+  });
+  it("uses platform HTTP for fallback even if the assignment changes to BYOK", async () => {
+    const fixture = catalogFixture("account"); const uploads: string[] = [];
+    try {
+      const service = createAsrService({
+        bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
+        accountSessionRepository: { get: () => ({ authenticated: true, profile: { userId: "owner-a" } }) as any, getCloudUuid: () => "account-a" },
+        memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+        fetch: async () => { throw new Error("BYOK must not receive platform audio"); },
+        cloudClient: { transcribeAudio: async input => { uploads.push(input.uuid); return { text: "HTTP complete", modelId: "asr", provider: "memmy_account" }; } }
+      });
+      const prepared = await service.prepare();
+      if (prepared.transport !== "websocket") throw new Error("expected platform model");
+      const config = YAML.parse(readFileSync(fixture.configPath, "utf8")); config.modelAssignments.account.asr = "byok-asr";
+      writeFileSync(fixture.configPath, YAML.stringify(config));
+      await expect(service.transcribe({ sessionId: prepared.sessionId, audioBase64: "AQ==", mimeType: "audio/wav" }))
+        .resolves.toMatchObject({ text: "HTTP complete", source: "account" });
+      expect(uploads).toEqual(["account-a"]);
+    } finally { fixture.dispose(); }
+  });
+
+  it("keeps BYOK on HTTP when it is selected in account mode", async () => {
+    const fixture = catalogFixture("account");
+    try {
+      const config = YAML.parse(readFileSync(fixture.configPath, "utf8"));
+      config.modelAssignments.account.asr = "byok-asr";
+      writeFileSync(fixture.configPath, YAML.stringify(config));
+      const service = createAsrService({
+        bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
+        accountSessionRepository: {
+          get: () => ({ authenticated: true, profile: { userId: "owner-a" } }) as any,
+          getCloudUuid: () => "account-token"
+        },
+        memmyConfigWriter: createMemmyConfigWriter({ configPath: fixture.configPath }),
+        cloudClient: { transcribeAudio: async () => { throw new Error("no cloud HTTP call"); } }
+      });
+      expect((await service.prepare()).transport).toBe("http");
+    } finally { fixture.dispose(); }
+  });
+
   it("transcribes BYOK audio with qwen3-asr-flash through DashScope OpenAI-compatible API", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fixture = catalogFixture("byok");

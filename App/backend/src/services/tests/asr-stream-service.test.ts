@@ -1,10 +1,11 @@
 /** Asr stream relay tests. */
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import WebSocket, { WebSocketServer } from "ws";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAsrStreamService, toCloudStreamUrl } from "../asr-stream-service.js";
+import type { AsrSelectionSnapshot } from "../asr-service.js";
 
 /**
  * A stand-in for the Cloud's `/agentAsr/stream`: records what it was sent
@@ -87,12 +88,98 @@ describe("toCloudStreamUrl", () => {
 });
 
 describe("asr stream relay", () => {
+  it("uses the prepared platform account even if the model mode changes", async () => {
+    const cloud = await startCloudStub();
+    cleanups.push(() => cloud.close());
+    const relay = createAsrStreamService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "byok" }) },
+      accountSessionRepository: { getCloudUuid: () => "recording-account" },
+      getSession: sessionId => {
+        expect(sessionId).toBe("recording-snapshot");
+        return { context: { source: "account" }, cloudUuid: "recording-account" } as AsrSelectionSnapshot;
+      },
+      cloudBaseUrl: cloud.url
+    });
+    cleanups.push(() => relay.close());
+    const host = await startRelayHost(relay);
+    cleanups.push(() => new Promise<void>(resolve => host.server.close(() => resolve())));
+    const renderer = new WebSocket(`${host.url}?sessionId=recording-snapshot`);
+    cleanups.push(() => renderer.terminate());
+    expect(await nextMessage(renderer)).toEqual({ type: "ready" });
+    expect(cloud.connections[0]?.headers.authorization).toBe("Bearer recording-account");
+  });
+
+  it.each(["before open", "during capture"])("rejects a changed account %s without forwarding its audio", async when => {
+    const cloud = await startCloudStub(); cleanups.push(() => cloud.close());
+    let token: string | null = "account-a";
+    const relay = createAsrStreamService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
+      accountSessionRepository: { getCloudUuid: () => token },
+      getSession: () => ({ context: { source: "account" }, cloudUuid: "account-a" }) as AsrSelectionSnapshot,
+      cloudBaseUrl: cloud.url
+    });
+    cleanups.push(() => relay.close()); const host = await startRelayHost(relay);
+    cleanups.push(() => new Promise<void>(resolve => host.server.close(() => resolve())));
+    if (when === "before open") token = "account-b";
+    const renderer = new WebSocket(`${host.url}?sessionId=prepared`); cleanups.push(() => renderer.terminate());
+    const first = nextMessage(renderer);
+    if (when === "during capture") {
+      expect(await first).toEqual({ type: "ready" });
+      token = null;
+      const error = nextMessage(renderer); renderer.send(Buffer.from([1, 2]));
+      expect(await error).toMatchObject({ code: "model_config_changed" });
+      expect(cloud.connections[0]?.frames).toEqual([]);
+    } else {
+      expect(await first).toMatchObject({ code: "model_config_changed" });
+      expect(cloud.connections).toHaveLength(0);
+    }
+  });
+
+  it("drops queued audio after overflow even if the upstream handshake later completes", async () => {
+    const upstream = Object.assign(new EventEmitter(), { readyState: WebSocket.CONNECTING,
+      bufferedAmount: 0, send: vi.fn(), close: vi.fn() });
+    const relay = createAsrStreamService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
+      accountSessionRepository: { getCloudUuid: () => "account-a" }, cloudBaseUrl: "https://example.test",
+      connectUpstream: () => upstream as unknown as WebSocket
+    });
+    cleanups.push(() => relay.close()); const host = await startRelayHost(relay);
+    cleanups.push(() => new Promise<void>(resolve => host.server.close(() => resolve())));
+    const renderer = new WebSocket(host.url); cleanups.push(() => renderer.terminate());
+    const error = nextMessage(renderer); await once(renderer, "open");
+    for (let i = 0; i < 6; i++) renderer.send(Buffer.alloc(60 * 1024));
+    expect(await error).toMatchObject({ code: "rate_limited" });
+    upstream.emit("open");
+    expect(upstream.send).not.toHaveBeenCalled();
+    expect(upstream.close).toHaveBeenCalled();
+  });
+
+  it("refuses a BYOK snapshot without opening any upstream realtime connection", async () => {
+    const cloud = await startCloudStub();
+    cleanups.push(() => cloud.close());
+    const relay = createAsrStreamService({
+      bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
+      accountSessionRepository: { getCloudUuid: () => "account-token" },
+      getSession: () => ({ context: { source: "byok" } }) as AsrSelectionSnapshot,
+      cloudBaseUrl: cloud.url
+    });
+    cleanups.push(() => relay.close());
+    const host = await startRelayHost(relay);
+    cleanups.push(() => new Promise<void>(resolve => host.server.close(() => resolve())));
+    const renderer = new WebSocket(`${host.url}?sessionId=byok-recording`);
+    cleanups.push(() => renderer.terminate());
+    expect(await nextMessage(renderer)).toMatchObject({ type: "error", code: "invalid_argument" });
+    expect(cloud.connections).toHaveLength(0);
+  });
+
   it("bridges control, audio and events between the renderer and the Cloud with the account credential", async () => {
     const cloud = await startCloudStub();
     cleanups.push(() => cloud.close());
     const relay = createAsrStreamService({
       bootstrapRepository: { getAppSettings: () => ({ userMode: "account" }) },
       accountSessionRepository: { getCloudUuid: () => "cloud-uuid-1" },
+      // Existing recording previews do not create a voice-input snapshot.
+      getSession: () => { throw new Error("preview must not resolve a voice-input snapshot"); },
       cloudBaseUrl: cloud.url
     });
     cleanups.push(() => relay.close());

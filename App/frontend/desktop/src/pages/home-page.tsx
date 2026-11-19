@@ -48,6 +48,8 @@ import {
   type AgentAttachmentClassification,
 } from "../lib/agent-attachment.js";
 import { encodeAgentImage, type AgentImageMime } from "../lib/agent-image-encode.js";
+import type { AsrLiveLine } from "../lib/asr-live-transcription.js";
+import { mergeVoiceInputLines } from "../lib/asr-stream-transcription.js";
 import { formatConversationTitleForDisplay } from "../lib/format-conversation-title.js";
 import { ImChannelTitleIcon, imChannelTitleDisplay } from "../integrations/integration-meta.js";
 import { useTaskBus, type TaskBusAgentMessage } from "../lib/task-bus.js";
@@ -92,8 +94,8 @@ import { AgentWorkspaceContext } from "./agent-workspace-context.js";
 import { AppFrame } from "./app-frame.js";
 import {
   MicrophonePermissionError,
-  mergeVoiceTranscript,
   microphonePermissionDeniedMessageKey,
+  mergeVoiceTranscript,
   useAsrRecorder
 } from "./asr-recorder.js";
 import { FirstEncounterRelayChallenge, FirstEncounterRelayOptIn, firstEncounterFollowUpMode, hasDetectedRelayAgents, relayAgentOptions } from "./first-encounter-relay-challenge.js";
@@ -983,9 +985,39 @@ export function HomePage() {
   const queueSteerLocksRef = useRef<Set<string>>(new Set());
   const draftTargetRevisionRef = useRef(state.agent.draftTargetRevisionByScope);
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
-  const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+  const voiceInputRef = useRef<{
+    scopeKey: string;
+    lines: AsrLiveLine[];
+    range: VoiceTranscriptRange | null;
+    finishing?: boolean;
+  } | null>(null);
+  const asrRecorder = useAsrRecorder(clients?.asr, {
+    voiceInput: true,
+    emptyAudioMessage: t("home.asrEmptyAudio"),
+    live: {
+      onLine: (line) => {
+        const capture = voiceInputRef.current;
+        if (!capture) return;
+        const { scopeKey } = capture;
+        capture.lines = mergeVoiceInputLines(capture.lines, line);
+        const text = capture.lines.map((item) => item.text.trim()).filter(Boolean).join(" ");
+        setComposerDraftForScope(scopeKey, (current) => {
+          const updated = replaceVoiceTranscript(current, capture.range, text);
+          capture.range = updated.range;
+          return updated.value;
+        }, "voice");
+      }
+    }
+  });
   useEffect(() => { setTaskRecording(null); }, [chatScopeKey]);
+  const cancelVoiceInput = asrRecorder.cancel;
+  useLayoutEffect(() => {
+    if (voiceInputRef.current && voiceInputRef.current.scopeKey !== chatScopeKey) {
+      voiceInputRef.current = null;
+      cancelVoiceInput();
+    }
+  }, [chatScopeKey, cancelVoiceInput]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const pendingModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey];
@@ -2409,9 +2441,18 @@ export function HomePage() {
    * @param scopeKey The session or new-draft scope.
    * @param value The latest input content, or an updater function based on the previous value.
    */
-  function setComposerDraftForScope(scopeKey: string, value: SetStateAction<string>) {
+  function setComposerDraftForScope(scopeKey: string, value: SetStateAction<string>, source: "voice" | "manual" | "replace" = "replace") {
     const currentValue = composerDraftsRef.current[scopeKey] ?? "";
     const nextValue = typeof value === "function" ? value(currentValue) : value;
+    const capture = voiceInputRef.current;
+    if (capture?.scopeKey === scopeKey && source !== "voice") {
+      if (nextValue !== currentValue && (source === "replace" || !nextValue)) {
+        voiceInputRef.current = null;
+        cancelVoiceInput();
+      } else if (source === "manual") {
+        capture.range = trackVoiceTranscriptEdit(currentValue, nextValue, capture.range);
+      }
+    }
     const nextDrafts = updateComposerDraftForScope(composerDraftsRef.current, scopeKey, nextValue);
     if (nextDrafts === composerDraftsRef.current) {
       return;
@@ -2475,17 +2516,13 @@ export function HomePage() {
     })));
   }
 
-  function setCurrentComposerMediaError(message: string | null) {
-    setComposerMediaErrorForScope(chatScopeKey, message);
-  }
-
   /**
    * Updates the input box content and resets the slash command selection state.
    *
    * @param value The latest input box content.
    */
   function updateComposerInput(value: string) {
-    setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));
+    setComposerDraftForScope(chatScopeKey, buildComposerCommandDraft(selectedComposerCommand, value), "manual");
     setSlashMenuDismissed(false);
     if (
       slashQueryFromInput(value) != null &&
@@ -2811,8 +2848,11 @@ export function HomePage() {
    */
   function startVoiceInput() {
     inputRef.current?.focus();
+    const capture = voiceInputRef.current = { scopeKey: chatScopeKey, lines: [], range: null };
     void asrRecorder.start().catch((error: unknown) => {
-      setCurrentComposerMediaError(toReadableAsrError(error, t));
+      if (voiceInputRef.current !== capture) return;
+      voiceInputRef.current = null;
+      setComposerMediaErrorForScope(capture.scopeKey, toReadableAsrError(error, t));
     });
   }
 
@@ -2820,19 +2860,26 @@ export function HomePage() {
    * Ends voice input on the main interface and merges in the transcribed text.
    */
   async function finishVoiceInput() {
+    const capture = voiceInputRef.current;
+    if (!capture || capture.finishing) return;
+    capture.finishing = true;
+    const { scopeKey } = capture;
     try {
       const transcript = await asrRecorder.finishAndTranscribe();
-      setCurrentComposerDraft((current) => mergeVoiceTranscript(current, transcript.text));
+      if (voiceInputRef.current !== capture) return;
+      setComposerDraftForScope(scopeKey, (current) => replaceVoiceTranscript(
+        current,
+        capture.range,
+        transcript.text
+      ).value, "voice");
+      voiceInputRef.current = null;
       setSlashMenuDismissed(false);
       setSelectedCommandIndex(0);
-      window.requestAnimationFrame(() => {
-        if (inputRef.current) {
-          resizeComposerInput(inputRef.current);
-          inputRef.current.focus();
-        }
-      });
+      if (scopeKey === chatScopeKey) window.requestAnimationFrame(() => inputRef.current?.focus());
     } catch (error: unknown) {
-      setCurrentComposerMediaError(toReadableAsrError(error, t));
+      if (voiceInputRef.current !== capture) return;
+      voiceInputRef.current = null;
+      setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t));
     }
   }
 
@@ -3070,7 +3117,6 @@ export function HomePage() {
       }
       return current.filter((item) => item.id !== id);
     });
-    setCurrentComposerMediaError(null);
     inputRef.current?.focus();
   }
 
@@ -3558,6 +3604,100 @@ export function HomePage() {
       </div>
     </AppFrame>
   );
+}
+
+export interface VoiceTranscriptRange {
+  start: number;
+  text: string;
+  corrections?: Array<{ base: string; changes: VoiceTextChange[] }>;
+}
+
+/** Keeps manual corrections in the voice range while later recognition continues. */
+export function trackVoiceTranscriptEdit(before: string, after: string, range: VoiceTranscriptRange | null): VoiceTranscriptRange | null {
+  if (!range || before === after) return range;
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let oldEnd = before.length;
+  let newEnd = after.length;
+  while (oldEnd > start && newEnd > start && before[oldEnd - 1] === after[newEnd - 1]) { oldEnd--; newEnd--; }
+  if (oldEnd <= range.start) return { ...range, start: range.start + after.length - before.length };
+  if (start >= range.start + range.text.length) return range;
+  const newStart = Math.min(range.start, start);
+  const rangeEnd = Math.max(range.start + range.text.length + after.length - before.length, newEnd);
+  const text = after.slice(newStart, rangeEnd);
+  return { start: newStart, text, corrections: [...(range.corrections ?? []),
+    { base: range.text, changes: voiceTextChanges(range.text, text) }] };
+}
+
+/** Replaces only the exact provisional range previously inserted by voice input. */
+export function replaceVoiceTranscript(
+  current: string,
+  previous: VoiceTranscriptRange | null,
+  next: string
+): { value: string; range: VoiceTranscriptRange | null } {
+  const nextText = next.trim();
+  if (!nextText && !previous) return { value: current, range: previous };
+  if (previous && current.slice(previous.start, previous.start + previous.text.length) === previous.text) {
+    const text = previous.corrections?.reduce((recognized, correction) =>
+      mergeVoiceCorrection(correction.base, correction.changes, recognized), nextText) ?? nextText;
+    return {
+      value: `${current.slice(0, previous.start)}${text}${current.slice(previous.start + previous.text.length)}`,
+      range: { ...previous, text }
+    };
+  }
+  const value = mergeVoiceTranscript(current, nextText);
+  return { value, range: { start: value.length - nextText.length, text: nextText } };
+}
+
+interface VoiceTextChange { start: number; end: number; text: string }
+
+function mergeVoiceCorrection(base: string, corrections: VoiceTextChange[], recognized: string): string {
+  const updates = voiceTextChanges(base, recognized).filter(update => !corrections.some(edit =>
+    update.start < edit.end && update.end > edit.start
+    || update.start === edit.start && (update.start === update.end || edit.start === edit.end)));
+  return [...corrections, ...updates].sort((a, b) => b.start - a.start || b.end - a.end)
+    .reduce((text, edit) => text.slice(0, edit.start) + edit.text + text.slice(edit.end), base);
+}
+
+/** Character changes, with common edges removed before alignment to keep live updates small. */
+function voiceTextChanges(before: string, after: string, offset = 0): VoiceTextChange[] {
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let end = before.length; let nextEnd = after.length;
+  while (end > start && nextEnd > start && before[end - 1] === after[nextEnd - 1]) { end--; nextEnd--; }
+  if (start === end && start === nextEnd) return [];
+  const a = before.slice(start, end); const b = after.slice(start, nextEnd);
+  const at = offset + start;
+  if (!a || !b || a.length === 1) {
+    const found = a ? b.indexOf(a) : -1;
+    if (found >= 0) return [
+      ...(found ? [{ start: at, end: at, text: b.slice(0, found) }] : []),
+      ...(found + 1 < b.length ? [{ start: at + 1, end: at + 1, text: b.slice(found + 1) }] : [])
+    ];
+    return [{ start: at, end: at + a.length, text: b }];
+  }
+  // Split the alignment using two linear-space LCS rows rather than a quadratic matrix.
+  const row = (left: string, right: string): Uint32Array => {
+    const result = new Uint32Array(right.length + 1);
+    for (let i = 0; i < left.length; i++) {
+      let diagonal = 0;
+      for (let j = 0; j < right.length; j++) {
+        const above = result[j + 1]!;
+        result[j + 1] = left[i] === right[j] ? diagonal + 1 : Math.max(above, result[j]!);
+        diagonal = above;
+      }
+    }
+    return result;
+  };
+  const middle = Math.floor(a.length / 2);
+  const left = row(a.slice(0, middle), b);
+  const right = row(a.slice(middle).split('').reverse().join(''), b.split('').reverse().join(''));
+  let split = 0;
+  for (let j = 1; j <= b.length; j++) {
+    if (left[j]! + right[b.length - j]! > left[split]! + right[b.length - split]!) split = j;
+  }
+  return [...voiceTextChanges(a.slice(0, middle), b.slice(0, split), at),
+    ...voiceTextChanges(a.slice(middle), b.slice(split), at + middle)];
 }
 
 export function ChatModelSelector(props: {
