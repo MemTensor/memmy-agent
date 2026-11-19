@@ -1095,9 +1095,9 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
     if (!chatId) return null;
     const sessionKey = memmyAgentClient.chatIdToSessionKey(chatId);
     return {
-      resolveArtifact: (path: string) => memmyAgentClient.resolveArtifact(path, sessionKey),
-      revealArtifact: (path: string) => memmyAgentClient.revealArtifact(path, sessionKey),
-      openArtifact: (path: string) => memmyAgentClient.openArtifact(path, sessionKey)
+      resolveArtifact: (path: string) => memmyAgentClient.resolveArtifact(path, { sessionKey }),
+      revealArtifact: (path: string) => memmyAgentClient.revealArtifact(path, { sessionKey }),
+      openArtifact: (path: string) => memmyAgentClient.openArtifact(path, { sessionKey })
     };
   }, [focusedTask, memmyAgentClient]);
   const hasUndismissedAnswer = !!focusedTask && (focusedTask.status === "answering" || focusedTask.status === "done" || focusedTask.status === "error") && !focusedTask.dismissed;

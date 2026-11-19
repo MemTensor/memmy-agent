@@ -334,6 +334,8 @@ export type PluginHostServiceResponse = z.infer<typeof PluginHostServiceResponse
 export const CapabilityEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("progress"),
+    phase: z.literal("runtime-preparation").optional(),
+    runtimeStage: z.enum(["preparing", "downloading", "extracting", "verifying"]).optional(),
     current: z.number().nonnegative(),
     total: z.number().positive().optional(),
     message: z.string().optional(),

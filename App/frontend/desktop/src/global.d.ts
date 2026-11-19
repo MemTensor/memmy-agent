@@ -127,6 +127,10 @@ declare global {
       onRouteTargetRequest(
         callback: (target: { route?: string; hash?: string; agentChatId?: string }) => void
       ): () => void;
+      /** 浏览器邀请链接（memmy://invite/<code>）拉起桌面端后，界面从这里拿到邀请码。 */
+      onInviteLink?(callback: (code: string) => void): () => void;
+      /** 取走界面就绪前收到的邀请码。 */
+      takeInviteLinks?(): Promise<string[]>;
       setMenuBarIcon(enabled: boolean): Promise<{ enabled: boolean }>;
       setComputerHistoryTrayIndicator?(state: { enabled: boolean; recording: boolean }): void;
       onMainWindowActionRequest(

@@ -428,6 +428,68 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+describe("opencode project skill bootstrap", () => {
+  it("writes the project block next to the memory block and keeps user content", async () => {
+    const { rootDirectory, manifest } = createFixture();
+    const target = createOpencodeSkillTarget({ rootDirectory });
+    writeFileSync(join(rootDirectory, "AGENTS.md"), "自己写的一段说明\n", "utf8");
+
+    await target.install(manifest);
+    await target.writeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content).toContain("自己写的一段说明");
+    expect(content).toContain("<!-- memmy:start v=1 -->");
+    expect(content).toContain("<!-- memmy-project:start v=1 -->");
+    expect(content.indexOf("<!-- memmy:start v=1 -->")).toBeLessThan(content.indexOf("<!-- memmy-project:start v=1 -->"));
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(true);
+  });
+
+  it("replaces the project block instead of adding a second one", async () => {
+    const { rootDirectory } = createFixture();
+    const target = createOpencodeSkillTarget({ rootDirectory });
+    const filePath = join(rootDirectory, "AGENTS.md");
+    writeFileSync(
+      filePath,
+      ["说明", "<!-- memmy-project:start v=1 -->", "旧内容", "<!-- memmy-project:end v=1 -->", "结尾", ""].join("\n"),
+      "utf8"
+    );
+
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(false);
+    await target.writeProjectSkillBootstrap!();
+    await target.writeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content.match(/memmy-project:start/gu)).toHaveLength(1);
+    expect(content).not.toContain("旧内容");
+    expect(content).toContain("说明");
+    expect(content).toContain("结尾");
+    await expect(target.isProjectSkillBootstrapCurrent!()).resolves.toBe(true);
+  });
+
+  it("removes only the project block and creates the file when it is missing", async () => {
+    const { rootDirectory } = createFixture();
+    const target = createOpencodeSkillTarget({ rootDirectory });
+    rmSync(join(rootDirectory, "AGENTS.md"), { force: true });
+
+    await target.writeProjectSkillBootstrap!();
+    expect(readTargetFile(rootDirectory)).toContain("<!-- memmy-project:start v=1 -->");
+
+    writeFileSync(
+      join(rootDirectory, "AGENTS.md"),
+      ["说明", "<!-- memmy:start v=1 -->", "# Memmy Memory", "<!-- memmy:end v=1 -->", "", "<!-- memmy-project:start v=1 -->", "块", "<!-- memmy-project:end v=1 -->", "结尾", ""].join("\n"),
+      "utf8"
+    );
+    await target.removeProjectSkillBootstrap!();
+
+    const content = readTargetFile(rootDirectory);
+    expect(content).not.toContain("memmy-project:");
+    expect(content).toContain("# Memmy Memory");
+    expect(content).toContain("说明");
+    expect(content).toContain("结尾");
+  });
+});
+
 function createFixture(): { rootDirectory: string; manifest: SkillManifest } {
   tempDir = mkdtempSync(join(tmpdir(), "memmy-opencode-skill-"));
   return {

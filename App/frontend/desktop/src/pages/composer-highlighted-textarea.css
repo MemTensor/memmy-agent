@@ -34,11 +34,13 @@
 .composer-rich-input__field--highlighted {
   position: relative;
   z-index: 2;
+  resize: none;
   background: transparent !important;
   /* The backdrop paints the text; keep the native caret and selection above chips. */
   color: transparent !important;
   caret-color: var(--color-text-ink);
 }
 .composer-rich-input__field--highlighted::selection {
-  color: var(--color-text-ink);
+  background: var(--color-action-sky);
+  color: white;
 }

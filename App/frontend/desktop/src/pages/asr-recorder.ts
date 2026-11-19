@@ -9,6 +9,7 @@ import {
 } from "../lib/asr-live-transcription.js";
 import { createStreamLiveTranscriber } from "../lib/asr-stream-transcription.js";
 import { createPcmTap, PCM_TAP_SAMPLE_RATE, type PcmTap } from "../lib/audio-pcm-tap.js";
+import { repairWebmDuration } from "../lib/webm-duration.js";
 
 /**
  * Opus bitrate for recordings, mono.
@@ -397,7 +398,8 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
     stopStream(streamRef.current);
     streamRef.current = null;
     startedAtRef.current = null;
-    return { recording: blob, recordingMimeType: blob.type || "audio/webm", durationMs };
+    const recording = await repairWebmDuration(blob, durationMs ?? 0);
+    return { recording, recordingMimeType: blob.type || "audio/webm", durationMs };
   }
 
   return {

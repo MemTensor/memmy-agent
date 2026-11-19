@@ -59,7 +59,7 @@ if (@($result.sNames) -ccontains $env:MEMMY_LOGIN_CLEANUP_NAME) { throw 'Tempora
 }
 
 // The fixture writes only a unique temporary startup entry and removes it in finally.
-it.runIf(process.platform === 'win32')('repairs real Electron startup commands and executes the registered VBS path', async () => {
+it.runIf(process.platform === 'win32')('migrates legacy VBS Run entries and executes the PowerShell path through real Electron', async () => {
   let executable = process.env.MEMMY_ELECTRON_TEST_EXECUTABLE;
   if (!executable) executable = createRequire(import.meta.url)('electron') as string;
   expect(executable, 'Windows startup integration requires a staged Electron executable').toBeTruthy();
@@ -83,7 +83,10 @@ it.runIf(process.platform === 'win32')('repairs real Electron startup commands a
     if (!line) throw new Error('Windows startup fixture did not report its result');
     expect(JSON.parse(line.slice('MEMMY_ELECTRON_LOGIN_RESULT '.length))).toEqual({
       rawCommandExecuted: true,
-      migrations: [{ enabled: true, executed: true }, { enabled: false, executed: true }],
+      migrations: [
+        { quoted: false, enabled: true, executed: true }, { quoted: false, enabled: false, executed: true },
+        { quoted: true, enabled: true, executed: true }, { quoted: true, enabled: false, executed: true }
+      ],
       disabledPreservedWithUnrelatedEntry: true,
       exactCommandAliasStates: [true, true, false, true],
       idempotent: true,
