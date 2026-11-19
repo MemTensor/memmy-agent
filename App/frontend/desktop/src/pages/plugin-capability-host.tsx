@@ -61,7 +61,7 @@ import {
   formatClock,
   type RecordingPanelSession,
   type RecordingPanelTranscript
-} from "./interview-recording-panel.js";
+} from "./recording-transcript.js";
 import { materializePluginUploadFile } from "../lib/plugin-upload-file.js";
 import { startBrowserDownload } from "./agent-message-content.js";
 import { RecordingWaveform, WAVE_BARS } from "./recording-waveform.js";
@@ -1133,10 +1133,10 @@ function AudioRecordCard(props: {
   const bar = (
     <div className={`recording-bar${props.interview ? " recording-bar--interview" : ""}${recorder.isRecording ? " recording-bar--live" : ""}`}>
       <span className="recording-bar__icon" aria-hidden="true"><Mic size={props.interview ? 18 : 14} /></span>
-      <p className="recording-bar__title">
+      <p className="recording-bar__title" role="status">
         {recorder.isRecording
           ? (recorder.status === "paused" ? t("plugin.ui.audio.paused") : t("plugin.ui.audio.recording"))
-          : props.title}
+          : recorder.isTranscribing ? t("recording.page.transcribingShort") : props.title}
       </p>
       <span className="recording-bar__clock" role="timer" aria-label={t("plugin.ui.audio.elapsed")}>
         {formatClock(elapsedMs)}
@@ -1192,7 +1192,6 @@ function AudioRecordCard(props: {
           {t("plugin.ui.audio.remaining", { time: formatClock(remainingMs) })}
         </span>
       ) : null}
-      {recorder.isTranscribing ? <span className="recording-bar__note" role="status">{t("plugin.ui.audio.transcribing")}</span> : null}
       {answered ? <span className="recording-bar__note recording-bar__note--done" role="status">{t("plugin.ui.answered")}</span> : null}
       {error ? <span className="recording-bar__note recording-bar__note--warning" role="alert">{error}</span> : null}
     </div>

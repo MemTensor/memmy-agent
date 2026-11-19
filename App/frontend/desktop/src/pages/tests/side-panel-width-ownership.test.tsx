@@ -4,14 +4,13 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { WorkspaceArtifactPanel } from "../workspace-artifact-panel.js";
-import { InterviewRecordingPanel } from "../interview-recording-panel.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const scope = { kind: "session", key: "websocket:width-ownership" } as const;
 const loadDirectory = async () => ({ root: { kind: "session" as const, label: "诊断" }, path: "", entries: [], truncated: false });
 const loadFile = async () => new Blob();
 
-it("lets only the visible file or recording pane position the conversation controls", async () => {
+it("lets only the visible file pane report its width", async () => {
   const originalStorage = Object.getOwnPropertyDescriptor(window, "localStorage");
   const values = new Map<string, string>();
   Object.defineProperty(window, "localStorage", { configurable: true, value: {
@@ -36,8 +35,6 @@ it("lets only the visible file or recording pane position the conversation contr
       <output data-width>{reportedWidth}</output>
       <WorkspaceArtifactPanel hidden={pane !== "files"} scope={scope} rootLabel="诊断"
         loadDirectory={loadDirectory} loadFile={loadFile} onAddToChat={() => undefined}
-        sharedRowWidth={rowWidth} sharedRowReservedWidth={480} onWidthChange={onWidthChange} />
-      <InterviewRecordingPanel hidden={pane !== "recording"} session={null}
         sharedRowWidth={rowWidth} sharedRowReservedWidth={480} onWidthChange={onWidthChange} />
     </>;
   }
@@ -65,10 +62,11 @@ it("lets only the visible file or recording pane position the conversation contr
     expect(recordedWidths).not.toHaveBeenCalled();
     expect(width()).toBe(320);
     await click('[data-pane="recording"]');
-    expect(width()).toBe(504);
-    expect(recordedWidths).toHaveBeenCalledWith(504);
+    expect(width()).toBe(320);
+    expect(recordedWidths).not.toHaveBeenCalled();
     await click('[data-pane="files"]');
     expect(width()).toBe(504);
+    expect(recordedWidths).toHaveBeenCalledWith(504);
   } finally {
     act(() => root.unmount()); container.remove();
     if (originalStorage) Object.defineProperty(window, "localStorage", originalStorage);

@@ -4,7 +4,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
-import { formatClock, groupSpeakerTurns, InterviewRecordingPanel, RecordingPlayer, type RecordingPanelSession } from "../interview-recording-panel.js";
+import { PluginRecordingPage } from "../recording-entry.js";
+import { formatClock, groupSpeakerTurns, RecordingPlayer, type RecordingPanelSession } from "../recording-transcript.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -142,7 +143,7 @@ describe("RecordingPlayer", () => {
   });
 });
 
-describe("InterviewRecordingPanel", () => {
+describe("PluginRecordingPage", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -171,36 +172,24 @@ describe("InterviewRecordingPanel", () => {
     ...overrides
   });
 
-  const render = (props: Parameters<typeof InterviewRecordingPanel>[0]) => act(() => {
-    root.render(<I18nProvider language="zh-CN"><InterviewRecordingPanel {...props} /></I18nProvider>);
+  const render = (props: Parameters<typeof PluginRecordingPage>[0]) => act(() => {
+    root.render(<I18nProvider language="zh-CN"><PluginRecordingPage {...props} /></I18nProvider>);
   });
 
-  it("puts the recorder in the column, above the words it produces", () => {
-    render({ session: session({ lines: [{ offsetMs: 3_000, text: "测试测试。" }] }), bar: <div data-testid="recorder-bar">录音条</div> });
-
-    const pane = container.querySelector(".workspace-artifact-preview-pane");
-    expect(pane).not.toBeNull();
-    // The recorder is in the pane, not over the conversation, and it sits
-    // ahead of the transcript it is feeding.
-    const bar = pane!.querySelector(".recording-panel__bar-slot [data-testid='recorder-bar']");
-    expect(bar).not.toBeNull();
-    const body = pane!.querySelector(".recording-panel__body");
-    expect(body).not.toBeNull();
-    expect(bar!.compareDocumentPosition(body!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // The live lines are the transcript for a recording that is still running.
-    expect(body!.textContent).toContain("测试测试。");
+  it("uses the shared live layout and transcript section", () => {
+    render({ session: session({ lines: [{ startMs: 3_000, endMs: 4_000, text: "测试测试。" }] }) });
+    expect(container.querySelector(".recording-page .recording-live")).not.toBeNull();
+    expect(container.querySelector(".recording-page__transcript-heading")).not.toBeNull();
+    expect(container.querySelector(".recording-panel__lines")?.textContent).toContain("测试测试。");
+    expect(container.querySelector(".workspace-artifact-preview-pane")).toBeNull();
   });
 
-  it("opens the column with only the recorder in it before a recording starts", () => {
-    render({ session: null, bar: <div data-testid="recorder-bar">录音条</div>, title: "访谈录音" });
-
-    // The card alone is enough to bring the column up, so pressing the button
-    // opens the recorder where the design puts it rather than nowhere.
-    expect(container.querySelector(".recording-panel__bar-slot [data-testid='recorder-bar']")).not.toBeNull();
-    expect(container.textContent).toContain("访谈录音");
-    // With nothing recorded there is no status row and no player to show.
-    expect(container.querySelector(".recording-panel__status")).toBeNull();
-    expect(container.querySelector(".recording-panel__player")).toBeNull();
+  it("keeps the shared listening and transcription states", () => {
+    render({ session: session() });
+    expect(container.querySelector(".recording-panel__empty")).not.toBeNull();
+    render({ session: session({ status: "transcribing" }) });
+    expect(container.querySelector(".recording-live")?.textContent).toContain("转写");
+    expect(container.querySelector(".recording-live__actions")).toBeNull();
   });
 
   it("frames the finished transcript with its player and speaker turns", () => {
@@ -224,33 +213,23 @@ describe("InterviewRecordingPanel", () => {
     expect(container.querySelector(".recording-panel__status")).toBeNull();
   });
 
-  it("keeps recording text controls separate from preview icons and targets each action", () => {
-    const pause = vi.fn();
-    const resume = vi.fn();
-    const finish = vi.fn();
-    const toggle = vi.fn();
+  it("routes pause, resume, finish and close to the plugin recorder", () => {
+    const pause = vi.fn(); const resume = vi.fn(); const finish = vi.fn(); const close = vi.fn();
     const mount = (status: RecordingPanelSession["status"]) => render({
-      session: session({ status, onPause: pause, onResume: resume, onFinish: finish }),
-      toolbarEnd: <button aria-label="预览面板" onClick={toggle}>面板</button>
+      session: session({ status, onPause: pause, onResume: resume, onFinish: finish }), onClose: close
     });
     mount("recording");
-    const toolbar = container.querySelector(".recording-panel__toolbar")!;
-    // The preview's absolute icon strip constrains every direct button to 28px.
-    expect(toolbar.querySelector(".workspace-artifact-preview-toolbar__actions")).toBeNull();
-    act(() => toolbar.querySelectorAll<HTMLButtonElement>(".recording-panel__controls button")[0]!.click());
-    expect(pause).toHaveBeenCalledTimes(1);
-    expect(finish).not.toHaveBeenCalled();
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="暂停"]')!.click());
+    expect(pause).toHaveBeenCalledOnce();
     mount("paused");
-    act(() => toolbar.querySelectorAll<HTMLButtonElement>(".recording-panel__controls button")[0]!.click());
-    expect(resume).toHaveBeenCalledTimes(1);
-    act(() => toolbar.querySelector<HTMLButtonElement>('[aria-label="预览面板"]')!.click());
-    expect(toggle).toHaveBeenCalledTimes(1);
-    expect(finish).not.toHaveBeenCalled();
-    act(() => toolbar.querySelector<HTMLButtonElement>(".recording-panel__action--primary")!.click());
-    expect(finish).toHaveBeenCalledTimes(1);
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="继续"]')!.click());
+    expect(resume).toHaveBeenCalledOnce();
+    act(() => container.querySelector<HTMLButtonElement>(".recording-page__toolbar-action--start")!.click());
+    expect(finish).toHaveBeenCalledOnce();
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="关闭"]')!.click());
+    expect(close).toHaveBeenCalledOnce();
     mount("done");
-    expect(toolbar.querySelector(".recording-panel__controls")).toBeNull();
-    expect(toolbar.querySelector('[aria-label="预览面板"]')).not.toBeNull();
+    expect(container.querySelector(".recording-live__actions")).toBeNull();
   });
 });
 
@@ -259,7 +238,7 @@ it("seeks and plays the recorded audio when a transcript timestamp is clicked", 
   const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
   const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
   try {
-    await act(async () => root.render(<I18nProvider language="zh-CN"><InterviewRecordingPanel session={{
+    await act(async () => root.render(<I18nProvider language="zh-CN"><PluginRecordingPage session={{
       title: "访谈录音", status: "done", elapsedMs: 10_000, lines: [], audioUrl: "blob:recording",
       transcript: { text: "测试", segments: [{ speakerId: 0, startMs: 6_000, text: "测试" }] },
       onPause() {}, onResume() {}, onFinish() {}, onClose() {}
