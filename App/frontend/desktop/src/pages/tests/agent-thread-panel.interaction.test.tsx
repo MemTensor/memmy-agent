@@ -787,6 +787,19 @@ describe("AgentThreadPanel", () => {
     expect(document.querySelectorAll(".thread-preview .workspace-diff-view__line--addition")).toHaveLength(2);
   });
 
+  it("shows the project prompt without reading files when no project is selected", async () => {
+    const readWorkspaceDirectory = vi.fn();
+    Object.defineProperty(window, "memmy", { configurable: true, value: { readWorkspaceDirectory } });
+    render({ messages: [], workspaceRoot: null });
+
+    act(() => document.querySelector<HTMLButtonElement>(".thread-view-pill")!.click());
+    act(() => clickText(".thread-view-menu__item", "工作空间文件"));
+    await flush();
+
+    expect(document.querySelector(".thread-files-empty")?.textContent).toBe("选择项目后，这里会显示项目文件");
+    expect(readWorkspaceDirectory).not.toHaveBeenCalled();
+  });
+
   it("browses the workspace tree lazily through the desktop bridge", async () => {
     const readWorkspaceDirectory = vi.fn(async (rootPath: string, relativePath = "") => ({
       rootPath,

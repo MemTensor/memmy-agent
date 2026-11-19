@@ -1517,6 +1517,12 @@ export function HomePage() {
     environmentScope,
     environmentScope?.kind === "session" && isCurrentAgentRunning,
   );
+  const threadProjectId = state.agent.currentSessionKey
+    ? state.agent.sessions.find((session) => session.key === state.agent.currentSessionKey)?.projectId
+    : selectedDraftProject?.id;
+  const threadWorkspaceRoot = threadProjectId
+    ? state.agent.projects.find((project) => project.id === threadProjectId)?.rootPath ?? null
+    : null;
   const goalMutationPending = state.agent.currentChatId
     ? state.agent.goalMutationPendingByChatId[state.agent.currentChatId] ?? null
     : null;
@@ -3422,17 +3428,22 @@ export function HomePage() {
           onSearchNavigate={pauseAgentConversationAutoScroll}
           getSearchRoot={getAgentConversationSearchRoot}
         />
-      ) : null}
-      topBarEnd={!hasConversationShell && threadPanel.phase !== "open" ? <button type="button"
-        className="thread-toolbar__button" aria-label={t("home.threadPanel.open")}
-        title={t("home.threadPanel.open")}
-        onClick={() => {
-          setSidePanelMounted(true);
-          setBlankThreadPanelEnabled(true);
-          threadPanel.open();
-        }}>
-        <PanelRight size={16} aria-hidden="true" />
-      </button> : null}
+      ) : (
+        <div className="thread-toolbar">
+          <div className="thread-toolbar__actions" data-window-drag-exclusion="thread-toolbar-actions">
+            {threadPanel.phase !== "open" ? <button type="button"
+              className="thread-toolbar__button" aria-label={t("home.threadPanel.open")}
+              title={t("home.threadPanel.open")}
+              onClick={() => {
+                setSidePanelMounted(true);
+                setBlankThreadPanelEnabled(true);
+                threadPanel.open();
+              }}>
+              <PanelRight size={16} aria-hidden="true" />
+            </button> : null}
+          </div>
+        </div>
+      )}
       topBarBorder={hasConversationShell}
       topBarInset={hasConversationShell ? false : undefined}
       topBarClassName={`thread-topbar ${threadPanelMotionClass}`}
@@ -3454,7 +3465,7 @@ export function HomePage() {
           controller={threadPanel}
           messages={state.agent.messages}
           conversationId={state.agent.currentChatId}
-          workspaceRoot={activeTask?.cwd.trim() || workspaceEnvironment.data?.snapshot.cwd || null}
+          workspaceRoot={threadWorkspaceRoot}
           previewContext={{
             artifactClient: sessionArtifactClient,
             onPreviewFile: previewAttachmentInApp,

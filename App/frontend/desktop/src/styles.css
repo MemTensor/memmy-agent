@@ -2804,8 +2804,8 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  border-left: 1px solid color-mix(in srgb, var(--color-border-stone) 40%, transparent);
-  background: var(--color-background-paper);
+  border-left: 1px solid var(--border-content-panel);
+  background: var(--color-content-base);
   color: var(--color-text-ink);
   font-family: var(--font-sans);
 }
@@ -2888,7 +2888,7 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   justify-content: space-between;
   gap: 8px;
   padding: 0 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 36%, transparent);
+  border-bottom: 1px solid var(--border-content-panel);
 }
 
 .thread-panel--fullscreen .thread-panel__header {
@@ -3050,7 +3050,7 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   position: relative;
   width: 1px;
   flex: 0 0 1px;
-  background: color-mix(in srgb, var(--color-border-stone) 36%, transparent);
+  background: var(--border-content-panel);
   cursor: col-resize;
   touch-action: none;
   transition: background-color 120ms ease;
@@ -3219,6 +3219,32 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
 
 .thread-panel-empty--popover {
   padding: 16px;
+}
+
+.thread-files-empty {
+  display: flex;
+  box-sizing: border-box;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  color: color-mix(in srgb, var(--color-text-ink) 42%, transparent);
+  text-align: center;
+}
+
+.thread-files-empty--panel {
+  min-height: 100%;
+}
+
+.thread-files-empty--popover {
+  min-height: 160px;
+}
+
+.thread-files-empty p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .thread-overview {
