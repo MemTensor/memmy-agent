@@ -119,7 +119,7 @@ describe("ApiKeyPage source", () => {
       ["zhipu", "https://open.bigmodel.cn/api/paas/v4", "glm-4"],
       ["qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-max"],
       ["kimi", "https://api.moonshot.ai/v1", "moonshot-v1-128k"],
-      ["minimax", "https://api.minimax.chat/v1", "MiniMax-Text-01"],
+      ["minimax", "https://api.minimax.io/v1", "MiniMax-M3.1-Flash"],
       ["baidu", "https://qianfan.baidubce.com/v2", "ernie-x1.1"],
       ["doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-256k"]
     ];
@@ -132,7 +132,7 @@ describe("ApiKeyPage source", () => {
 
     expect(source).toContain("useState(initialModelForm.modelId)");
     expect(source).toContain("setEndpoint(next.endpoint)");
-    expect(source).toContain('setModel("")');
+    expect(source).toContain('setModel(next.value === "minimax" ? next.defaultModelId : "")');
     expect(source).toContain('setApiKey("");');
     expect(source).toContain('placeholder={`${t("apiKey.examplePrefix")} ${selectedProvider.defaultModelId}`}');
     expect(source).not.toContain("modelPlaceholder");
