@@ -11,14 +11,11 @@ export type PluginArtifactDescriptor = {
 export interface PluginRelease {
   manifest: PluginManifest;
   artifact?: PluginArtifactDescriptor;
-  /** Set by a configured trusted registry, never read from plugin.json. */
-  nativeExecutionAllowed?: boolean;
-  registryOrigin?: string;
 }
 
 export interface PluginRegistry {
-  list?(signal?: AbortSignal): Promise<PluginManifest[]>;
-  resolve(pluginId: string, version?: string, signal?: AbortSignal): Promise<PluginRelease>;
+  list?(): Promise<PluginManifest[]>;
+  resolve(pluginId: string, version?: string): Promise<PluginRelease>;
 }
 
 export { createHttpPluginRegistry, type CreateHttpPluginRegistryOptions } from "./http-plugin-registry.js";
@@ -34,16 +31,16 @@ export function createCompositePluginRegistry(
   fallback?: PluginRegistry
 ): PluginRegistry {
   return {
-    async list(signal) {
-      const entries = [...await primary.list?.(signal) ?? [], ...await fallback?.list?.(signal) ?? []];
+    async list() {
+      const entries = [...await primary.list?.() ?? [], ...await fallback?.list?.() ?? []];
       return [...new Map(entries.map((manifest) => [manifest.id, manifest])).values()];
     },
-    async resolve(pluginId, version, signal) {
+    async resolve(pluginId, version) {
       try {
-        return await primary.resolve(pluginId, version, signal);
+        return await primary.resolve(pluginId, version);
       } catch (error) {
         if (!fallback || (error as { code?: unknown })?.code !== "not_found") throw error;
-        return fallback.resolve(pluginId, version, signal);
+        return fallback.resolve(pluginId, version);
       }
     }
   };

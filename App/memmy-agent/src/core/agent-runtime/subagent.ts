@@ -373,7 +373,7 @@ export class SubagentManager {
   }
 
   async runSubagent(...args: Parameters<SubagentManager["runSubagentTask"]>): Promise<void> {
-    return agentTaskActivity.run(() => this.runSubagentTask(...args), args[7]?.signal);
+    return agentTaskActivity.run(() => this.runSubagentTask(...args));
   }
 
   private async runSubagentTask(

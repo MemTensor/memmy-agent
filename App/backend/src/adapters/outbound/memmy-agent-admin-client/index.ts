@@ -8,8 +8,6 @@ import type {
 export interface MemmyAgentAdminClient {
   /** True for the entire Agent turn, including model thinking and interaction waits. */
   hasActiveTasks?(signal?: AbortSignal): Promise<boolean>;
-  /** Atomically reserves idle runtime task admission until the returned release is called. */
-  tryAcquirePluginUpdateLease?(signal?: AbortSignal): Promise<(() => Promise<void>) | null>;
   getChannelDefinitions(): Promise<ChannelDefinitionsResponse>;
   getChannelConnections(): Promise<ChannelConnectionsResponse>;
   /** Returns the canonical workspace currently bound to a WebUI conversation. */
@@ -27,6 +25,5 @@ export interface MemmyAgentAdminClient {
     appSecret?: string;
     domain?: "feishu" | "lark";
   }>;
-  invokePluginHostService?(pluginId: string, service: string, input: unknown, context?: { dataRoot: string }): Promise<unknown>;
   reloadMcpConfig(): Promise<{ ok: boolean; message: string; requires_restart: boolean }>;
 }

@@ -10,8 +10,7 @@ const PluginReleaseSchema = z.object({
     // Local registries return an origin-relative authenticated download path.
     url: z.string().url().or(z.string().regex(/^\/(?!\/)/)),
     sha256: z.string().regex(/^[a-f0-9]{64}$/i)
-  }).optional(),
-  nativeExecutionAllowed: z.boolean().optional()
+  }).optional()
 });
 
 export interface CreateHttpPluginRegistryOptions {
@@ -19,8 +18,6 @@ export interface CreateHttpPluginRegistryOptions {
   fetchFn?: typeof fetch;
   /** Supplies account credentials so the registry can gate entitlement-restricted releases. */
   authHeaders?: () => Record<string, string>;
-  /** Native execution is accepted only from an explicitly trusted registry origin. */
-  trustedNativeOrigin?: string;
 }
 
 export function createHttpPluginRegistry(options: CreateHttpPluginRegistryOptions): PluginRegistry {
@@ -29,21 +26,21 @@ export function createHttpPluginRegistry(options: CreateHttpPluginRegistryOption
   const fetchFn = options.fetchFn ?? fetch.bind(globalThis);
 
   return {
-    async list(signal) {
+    async list() {
       const response = await fetchFn(new URL("/api/v1/plugins", baseUrl), {
         headers: { accept: "application/json", ...options.authHeaders?.() },
-        redirect: "error", signal: registryRequestSignal(signal)
+        redirect: "error", signal: AbortSignal.timeout(15_000)
       });
       if (!response.ok) throw new Error(`Plugin catalog request failed with ${response.status}`);
       return z.array(PluginManifestSchema).parse(JSON.parse(await readLimitedText(response)));
     },
-    async resolve(pluginId, version, signal) {
+    async resolve(pluginId, version) {
       const url = new URL(`/api/v1/plugins/${encodeURIComponent(pluginId)}`, baseUrl);
       if (version) url.searchParams.set("version", version);
       const response = await fetchFn(url, {
         headers: { accept: "application/json", ...options.authHeaders?.() },
         redirect: "error",
-        signal: registryRequestSignal(signal)
+        signal: AbortSignal.timeout(15_000)
       });
       if (response.status === 401 || response.status === 403) {
         throw Object.assign(new Error(`Plugin release is not available for this account: ${pluginId}`), {
@@ -64,20 +61,14 @@ export function createHttpPluginRegistry(options: CreateHttpPluginRegistryOption
       if (release.manifest.id !== pluginId || (version && release.manifest.version !== version)) {
         throw Object.assign(new Error("Plugin registry returned a different release"), { code: "plugin_invalid" });
       }
-      if (release.nativeExecutionAllowed === undefined) return release;
-      return { ...release,
-        nativeExecutionAllowed: release.nativeExecutionAllowed
-          && options.trustedNativeOrigin !== undefined
-          && new URL(options.trustedNativeOrigin).origin === baseUrl.origin,
-        registryOrigin: baseUrl.origin
-      };
+      if (release.artifact) {
+        const artifactUrl = new URL(release.artifact.url, baseUrl);
+        assertAllowedProtocol(artifactUrl);
+        release.artifact.url = artifactUrl.toString();
+      }
+      return release;
     }
   };
-}
-
-function registryRequestSignal(signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(15_000);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 function assertAllowedProtocol(url: URL): void {

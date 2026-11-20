@@ -88,11 +88,6 @@ export function recorderHealthReporter(
     }, delay);
     timer.unref();
   };
-  const flush = () => {
-    if (timer) clearTimeout(timer);
-    timer = null;
-    for (const signal of pending.values()) send(signal);
-  };
   return {
     report(code: RecorderHealthCode, input: { timestamp?: string; count?: number } = {}) {
       if (closed || !codes.has(code)) return;
@@ -108,12 +103,12 @@ export function recorderHealthReporter(
       if (!lastSent.has(code) || now() - lastSent.get(code)! >= intervalMs) send(signal);
       schedule();
     },
-    /** A checkpoint must publish pending coverage faults before its acknowledgement. */
-    flush() { if (!closed) flush(); },
     close() {
       if (closed) return;
       closed = true;
-      flush();
+      if (timer) clearTimeout(timer);
+      timer = null;
+      for (const signal of pending.values()) send(signal);
     },
   };
 }

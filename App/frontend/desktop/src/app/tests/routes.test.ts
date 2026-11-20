@@ -96,7 +96,6 @@ describe("desktop route table", () => {
       "/onboarding",
       "/main",
       "/pet",
-      "/plugins",
       "/tools",
       "/memory",
       "/knowledge",
