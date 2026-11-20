@@ -26,42 +26,27 @@ interface ActiveCall {
 
 export function createPluginRuntimeHost(registry: PluginAdapterRegistry): PluginRuntimeHost {
   const active = new Map<string, ActivePlugin>();
-  const activating = new Map<string, { promise: Promise<void>; controller: AbortController }>();
 
   return {
-    isBusy(pluginId) { return (active.get(pluginId)?.calls.size ?? 0) > 0; },
     supports(adapterId) {
       return registry.has(adapterId);
     },
 
     async activate(plugin, secrets) {
       if (active.has(plugin.id)) return;
-      const previous = activating.get(plugin.id); if (previous) return previous.promise;
-      const controller = new AbortController();
-      const promise = Promise.resolve().then(async () => {
-        controller.signal.throwIfAborted();
-        const adapter = registry.get(plugin.manifest.runtime.adapter);
-        adapter.validate(plugin.manifest.runtime, plugin.rootPath);
-        const session = await adapter.activate({
-          plugin,
-          config: plugin.config,
-          secrets,
-          rootPath: plugin.rootPath,
-          signal: controller.signal
-        });
-        if (session.pluginId !== plugin.id) {
-          await adapter.deactivate(session).catch(() => undefined);
-          throw new Error(`Plugin adapter activated a session for ${session.pluginId}`);
-        }
-        if (controller.signal.aborted) {
-          await adapter.deactivate(session).catch(() => undefined);
-          controller.signal.throwIfAborted();
-        }
-        active.set(plugin.id, { plugin, adapter, session, calls: new Map() });
+      const adapter = registry.get(plugin.manifest.runtime.adapter);
+      adapter.validate(plugin.manifest.runtime, plugin.rootPath);
+      const session = await adapter.activate({
+        plugin,
+        config: plugin.config,
+        secrets,
+        rootPath: plugin.rootPath
       });
-      activating.set(plugin.id, { promise, controller });
-      try { await promise; }
-      finally { if (activating.get(plugin.id)?.controller === controller) activating.delete(plugin.id); }
+      if (session.pluginId !== plugin.id) {
+        await adapter.deactivate(session).catch(() => undefined);
+        throw new Error(`Plugin adapter activated a session for ${session.pluginId}`);
+      }
+      active.set(plugin.id, { plugin, adapter, session, calls: new Map() });
     },
 
     async *invoke(rawCall) {
@@ -168,8 +153,6 @@ export function createPluginRuntimeHost(registry: PluginAdapterRegistry): Plugin
     },
 
     async deactivate(pluginId) {
-      const starting = activating.get(pluginId);
-      if (starting) { starting.controller.abort(); await starting.promise.catch(() => undefined); }
       const current = active.get(pluginId);
       if (!current) return;
       active.delete(pluginId);

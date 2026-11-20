@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import which from "which";
 import YAML from "yaml";
 import { isComputerHistorySupported } from "../../tools/computer-history/platform.js";
-import { listPluginSkills, loadPluginSkill } from "./plugin-skills.js";
 
 export const BUILTIN_SKILLS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
 export const SKILL_FRONTMATTER_RE = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
@@ -25,14 +24,11 @@ export class SkillsLoader {
   builtinSkills: string | null;
   disabledSkills: Set<string>;
   roots: string[];
-  availableTools: (() => string[]) | null = null;
-  private pluginRoots: { skills?: string; data?: string } | null;
 
   constructor(
     workspaceOrRoots: string | string[],
     builtinSkillsDir: string | null = null,
     disabledSkills: Set<string> | string[] | null = null,
-    options: { pluginSkillsRoot?: string; pluginDataRoot?: string; includePlugins?: boolean } = {},
   ) {
     if (Array.isArray(workspaceOrRoots)) {
       this.workspace = "";
@@ -46,8 +42,6 @@ export class SkillsLoader {
       this.roots = [this.workspaceSkills, this.builtinSkills].filter(Boolean) as string[];
     }
     this.disabledSkills = new Set(disabledSkills ?? []);
-    this.pluginRoots = (options.includePlugins ?? !Array.isArray(workspaceOrRoots))
-      ? { skills: options.pluginSkillsRoot, data: options.pluginDataRoot } : null;
   }
 
   private skillEntriesFromDir(base: string, source: string, skipNames: Set<string> | null = null): SkillEntry[] {
@@ -69,8 +63,6 @@ export class SkillsLoader {
     if (this.builtinSkills && fs.existsSync(this.builtinSkills)) {
       skills.push(...this.skillEntriesFromDir(this.builtinSkills, "builtin", workspaceNames));
     }
-    const knownNames = new Set(skills.map(entry => entry.name));
-    if (this.pluginRoots) skills.push(...listPluginSkills(this.pluginRoots.skills, this.pluginRoots.data).filter(entry => !knownNames.has(entry.name)));
     let filtered = skills.filter((skill) => {
       if (skill.source === "builtin" && DEFAULT_DISABLED_BUILTIN_SKILLS.has(skill.name)) return false;
       if (skill.source === "builtin" && isBuiltinComputerHistoryUnavailable(skill.name)) return false;
@@ -87,7 +79,7 @@ export class SkillsLoader {
       const skillFile = path.join(root, name, "SKILL.md");
       if (fs.existsSync(skillFile)) return fs.readFileSync(skillFile, "utf8");
     }
-    return this.disabledSkills.has(name) || !this.pluginRoots ? null : loadPluginSkill(name, this.pluginRoots.skills, this.pluginRoots.data);
+    return null;
   }
 
   loadSkillsForContext(skillNames: string[]): string {
@@ -121,12 +113,9 @@ export class SkillsLoader {
     const requires = skillMeta.requires ?? {};
     const bins = Array.isArray(requires.bins) ? requires.bins : [];
     const env = Array.isArray(requires.env) ? requires.env : [];
-    const tools = Array.isArray(requires.tools) ? requires.tools : [];
-    const available = this.availableTools?.();
     return [
       ...bins.filter((cmd: string) => !commandExists(cmd)).map((cmd: string) => `CLI: ${cmd}`),
       ...env.filter((name: string) => !process.env[name]).map((name: string) => `ENV: ${name}`),
-      ...(available ? tools.filter((name: string) => !available.includes(name)).map((name: string) => `Tool: ${name}`) : []),
     ].join(", ");
   }
 

@@ -7,10 +7,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const eslint = new ESLint({ cwd: root, fix: false });
 const fixtures = [
   "src/tools/computer-history/win/native/tests/integration/browser-smoke.mjs",
-  "src/tools/computer-history/win/native/tests/integration/electron-text-smoke.mjs",
-  "tests/fixtures/external-browser-actions-live.mjs",
-  "tests/fixtures/teaching-browser-basics-live.mjs",
-  "tests/fixtures/teaching-browser-integrity-live.mjs"
+  "src/tools/computer-history/win/native/tests/integration/electron-text-smoke.mjs"
 ];
 
 it.each(fixtures)("recognizes the executable context of %s", async file => {

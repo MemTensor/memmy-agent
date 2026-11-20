@@ -1,9 +1,5 @@
-import type { AccountChannel, InstalledPlugin } from "@memmy/local-api-contracts";
-import { MEMMY_VERSION } from "../project-version.js";
-import { createGeneratedPluginSkills } from "./plugin-generated-skills.js";
-import { createPluginNativeHostServices } from "./plugin-native-host-services.js";
-import { createPluginUpdateService } from "./plugin-update-service.js";
 import { createPluginSkillContentService, type PluginSkillContentService } from "./plugin-skill-content-service.js";
+import type { AccountChannel } from "@memmy/local-api-contracts";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { resolveCloudClientConfig, resolvePluginRegistryBaseUrl } from "../config/service-urls.js";
@@ -118,7 +114,6 @@ export interface BackendServices {
   tokenQuota: TokenQuotaService;
   /** Third-party plugins. */
   plugins: PluginService;
-  pluginLifecycle?: { start(): Promise<void>; startUpdates(): void; close(): Promise<void> };
   pluginSkillContent?: PluginSkillContentService;
 }
 
@@ -137,9 +132,6 @@ export interface CreateBackendServicesOptions {
   skillTargetRegistry?: SkillTargetRegistry;
   progressBus?: ProgressBus;
   pluginRegistry?: PluginRegistry;
-  /** Platform injection for embedders and the artifact conformance harness. */
-  pluginPlatform?: NodeJS.Platform;
-  trustedNativeRegistryOrigins?: readonly string[];
   pluginArtifactManager?: PluginArtifactManager;
   /** Canonical resource roots trusted to provide immutable bundled plugin archives. */
   trustedBundledPluginRoots?: readonly string[];
@@ -154,7 +146,6 @@ export interface CreateBackendServicesOptions {
   memmyConfigPath?: string;
   /** Memmy agent admin client. */
   memmyAgentAdminClient?: MemmyAgentAdminClient;
-  agentGatewayReady?: Promise<void>;
   /** Memmy agent admin bootstrap secret. */
   memmyAgentAdminBootstrapSecret?: string | null;
   /** Verification channel supported by the current desktop package. */
@@ -220,39 +211,24 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       ? (input, inferenceOptions) => options.memoryClient.embeddingInference!(input, inferenceOptions)
       : undefined
   });
-  const memmyAgentAdminClient = options.memmyAgentAdminClient
-    ?? createHttpMemmyAgentAdminClient({ bootstrapSecret: options.memmyAgentAdminBootstrapSecret });
-  const pluginDataRoot = join(dirname(options.appStateStore.databasePath), "plugin-data");
-  const generated = createGeneratedPluginSkills(pluginDataRoot,
-    join(dirname(options.appStateStore.databasePath), "plugin-skills", "active.json"), join(agentWorkspace, "skills"));
-  const native = createPluginNativeHostServices({ repository: pluginRepository, admin: memmyAgentAdminClient,
-    dataRoot: pluginDataRoot, legacyDataRoot: join(resolveAgentDataRoot(process.env), "plugin-data"), generated, language: () => options.appStateStore.repositories.bootstrap.getAppSettings().language });
   const pluginHostServices = options.pluginHostServices ?? createPluginHostServiceRouter([
     { services: ["model-inference", "embedding-inference"], invoker: pluginModelInference },
     { services: ["asset-key"], invoker: createPluginAssetKeyService({
       baseUrl: resolveCloudClientConfig(process.env).baseUrl,
-      getPlugin: (id) => pluginRepository.get(id), authHeaders: pluginRegistryAuthHeaders, isEntitlementGranted
+      getPlugin: (id) => pluginRepository.get(id),
+      authHeaders: pluginRegistryAuthHeaders,
+      isEntitlementGranted
     }) },
-    { services: ["asr"], invoker: createPluginAsrService({ asr: asrService, audioRoots: pluginAudioRoots }) },
-    { services: ["plugin-context", "skills", "event-sessions"], invoker: native.hostServices }
+    {
+      services: ["asr"],
+      invoker: createPluginAsrService({ asr: asrService, audioRoots: pluginAudioRoots })
+    }
   ]);
-  const staticPluginSkills = createPluginSkillManager({ skillsRoot: join(agentWorkspace, "skills") });
-  const pluginSkills = {
-    async activate(plugin: import("../adapters/outbound/plugin-runtime/types.js").PluginRuntimeRecord) {
-      await generated.assertStaticNames(plugin.id, (plugin.manifest.skills ?? []).map(skill => skill.id));
-      await staticPluginSkills.activate(plugin);
-    },
-    deactivate: (id: string) => staticPluginSkills.deactivate(id)
-  };
+  const memmyAgentAdminClient =
+    options.memmyAgentAdminClient ??
+    createHttpMemmyAgentAdminClient({ bootstrapSecret: options.memmyAgentAdminBootstrapSecret });
   const pluginRuntimeHost = options.pluginRuntimeHost ?? createPluginRuntimeHost(new PluginAdapterRegistry([
-    createMcpPluginAdapter({ platform: options.pluginPlatform, pluginDataRoot,
-      trustedNativeOrigins: options.trustedNativeRegistryOrigins ?? [new URL(resolveCloudClientConfig(process.env).baseUrl).origin], hostServices: pluginHostServices, onExit(id, expected) {
-      if (expected) return;
-      void pluginRuntimeHost.deactivate(id).catch(() => undefined);
-      const record = pluginRepository.get(id);
-      if (record && ["active", "enabling"].includes(record.state)) pluginRepository.setState(id, "failed", "Plugin process exited");
-      void Promise.allSettled([native.release(id), pluginSkills.deactivate(id)]);
-    } }),
+    createMcpPluginAdapter(),
     createHttpPluginAdapter(),
     createCommandPluginAdapter({
       allowedNetworkHosts: options.commandPluginNetworkAllowlist ?? resolveCommandPluginNetworkAllowlist(process.env),
@@ -265,12 +241,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   const plugins = createPluginService({
     repository: pluginRepository,
     hasActiveAgentTasks: async signal => {
-      if (!memmyAgentAdminClient.hasActiveTasks) throw new Error("Agent task activity is unavailable; update deferred until the runtime is updated and retry");
+      if (!memmyAgentAdminClient.hasActiveTasks) throw new Error("Agent task activity is unavailable; update the runtime and retry");
       return memmyAgentAdminClient.hasActiveTasks(signal);
-    },
-    tryAcquireAgentUpdateLease: async signal => {
-      if (!memmyAgentAdminClient.tryAcquirePluginUpdateLease) throw new Error("Agent update coordination is unavailable; update deferred");
-      return memmyAgentAdminClient.tryAcquirePluginUpdateLease(signal);
     },
     secretStore: options.appStateStore.secretStore,
     registry: options.pluginRegistry ?? unavailablePluginRegistry,
@@ -281,12 +253,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       authOrigin: resolvePluginRegistryBaseUrl(process.env),
       authHeaders: pluginRegistryAuthHeaders
     }),
-    skillManager: pluginSkills,
-    hostVersion: MEMMY_VERSION, platform: options.pluginPlatform, hasResourceLease: native.isBusy,
-    releaseResources: native.release, activateGeneratedSkills: id => generated.activate(id),
-    gatewayReady: options.agentGatewayReady,
-    onRestored: () => memmyAgentAdminClient.reloadMcpConfig(),
     onSkillContentInvalidated: (id) => pluginSkillContent.clear(id),
+    skillManager: createPluginSkillManager({ skillsRoot: join(resolveAgentWorkspace(process.env), "skills") }),
     localArtifactService: createPluginLocalArtifactService({
       pluginDataRoot: join(dirname(options.appStateStore.databasePath), "plugin-data"),
       resolveWorkspace: async (conversationId) => {
@@ -302,25 +270,6 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     isEntitlementGranted,
     catalogPluginIds: () => entitledPluginIds(accountSessionRepository.getEntitlements())
   });
-  const pluginUpdates = createPluginUpdateService(plugins, () => memmyAgentAdminClient.reloadMcpConfig());
-  const pluginLifecycle = {
-    async start() {
-      await generated.reset();
-      for (const plugin of pluginRepository.list()) await pluginSkills.deactivate(plugin.id);
-      native.start();
-    },
-    startUpdates() { pluginUpdates.start(); },
-    async close() {
-      // Stop scheduling first, then cancel idle/download waits before draining
-      // the update loop. Awaiting that loop first can block shutdown forever.
-      const updatesClosing = pluginUpdates.close();
-      try { await plugins.shutdown(); }
-      finally {
-        await updatesClosing;
-        await native.close();
-      }
-    }
-  };
   const pluginToolSignature = () => JSON.stringify(plugins.list()
     .filter((plugin) => plugin.state === "active" && plugin.eligibility?.canUse !== false)
     .map((plugin) => [plugin.id, plugin.version, plugin.manifest.capabilities])
@@ -500,7 +449,8 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession
     }),
-    plugins, pluginLifecycle, pluginSkillContent
+    plugins,
+    pluginSkillContent
   };
 }
 

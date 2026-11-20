@@ -15,12 +15,6 @@ import { createMockCloudClient } from "./support/mock-cloud-client.js";
 import { createMockMemoryClient } from "./support/mock-memory-client.js";
 import { readModelCapabilityCatalog, writeModelCapabilityCatalog } from "../infrastructure/model-capability-catalog/index.js";
 
-// Local API fixtures own their Cloud and Memory clients; keep plugin discovery local too.
-vi.mock("../adapters/outbound/plugin-registry/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../adapters/outbound/plugin-registry/index.js")>();
-  return { ...actual, createHttpPluginRegistry: () => actual.createInMemoryPluginRegistry([]) };
-});
-
 let tempDir: string | undefined;
 let backend: LocalBackend | undefined;
 let integrationServer: ReturnType<typeof createServer> | undefined;
@@ -915,7 +909,6 @@ describe("local api", () => {
     backend = await createTempBackend({
       memoryClient: createMockMemoryClient({
         health: {
-          ...await createMockMemoryClient().health(),
           ok: false,
           version: "test-0.0.0",
           uptimeMs: 0,
@@ -1623,7 +1616,7 @@ function createRecordingCloudClient() {
 
     async deleteIntegrationConnection(input: { machineComposioToken?: string; id: string }) {
       calls.push(`deleteIntegrationConnection:${input.machineComposioToken ?? "no-machine-token"}:${input.id}`);
-      return { ok: true as const };
+      return { ok: true };
     }
   };
 }
