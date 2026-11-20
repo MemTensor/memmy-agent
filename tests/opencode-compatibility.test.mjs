@@ -93,7 +93,7 @@ describe.each([["Backend", backend], ["Memory", memory]])("%s OpenCode upgrade",
       tool: { async transform(fn) { fn({ add(t) { tools.set(t.name, t); } }); return registration(); } },
       command: { async transform(fn) { fn({ add(c) { command = c; } }); return registration(); } },
       session: {
-        async get() { return { agent: "build" }; },
+        async get() { return { agent: "build", location: { directory: join(root, "repo", "src") } }; },
         async hook(name, fn) { expect(["prompt", "context"]).toContain(name); if (name === "prompt") promptHook = fn; return registration(); },
         async prompt(input) { const event = { sessionID: input.sessionID, messageID: "resume", prompt: { text: input.text } }; await promptHook(event); return event; }
       },
@@ -120,6 +120,7 @@ describe.each([["Backend", backend], ["Memory", memory]])("%s OpenCode upgrade",
       await expect(tools.get("memmy_memory_add").execute({ content: "" }, context)).rejects.toThrow("Missing required");
       const event = { sessionID: "session-1", messageID: "user-1", prompt: { text: "Inspect README", files: [{ uri: "file:///fixture" }] } };
       await promptHook(event);
+      expect(requests.find(row => row.path === "/api/v1/sessions/open").body.meta.launchFolder).toBe(join(root, "repo", "src"));
       expect(event.prompt.text).toContain("Remembered preference");
       expect(event.prompt.files).toHaveLength(1);
       deliver({ type: "session.execution.succeeded", data: { sessionID: "session-1" } });

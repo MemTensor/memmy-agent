@@ -42,22 +42,41 @@ const searchShape = {
 export const MEMOS_MEMORY_TOOL_SPECS: ToolSpec[] = [
   {
     name: "memmy_memory_search",
-    description: "Search relevant Memmy memory traces, policies, world models, and skills for the current task.",
+    description: "Search local memory and the projects bound to this session for the current task.",
     parameters: objectSchema(searchShape, ["query"]),
     readOnly: true,
     execute: async (client, params, runtime, sessionKey) => {
       const body = withSearchRuntimeDefaults(params, runtime, sessionKey);
+      if (body.sessionId !== runtime.currentSessionId(sessionKey)) delete body.turnId;
       return client.search(body);
     },
   },
   {
     name: "memmy_memory_get",
-    description: "Read one Memmy memory detail by id. Use the same tool for trace_, policy_, world_, skill_, and episode_ ids; episode_ ids expand the task timeline.",
+    description: "Read one Memmy memory detail by id. Use the same tool for trace_, policy_, world_, skill_,, episode_, and project:… ids returned by search; episode_ ids expand the task timeline.",
     parameters: objectSchema({
       id: { type: "string" },
     }, ["id"]),
     readOnly: true,
-    execute: async (client, params) => client.getMemory(String(params.id)),
+    execute: async (client, params, runtime, key) => {
+      const id = String(params.id);
+      if (!id.startsWith("project:")) return client.getMemory(id);
+      const parts = id.split(":");
+      if (parts.length !== 3) throw new Error("Invalid project memory ID");
+      return client.post("/api/v1/project-memory/item", {
+        ...runtime.requestEnvelope(key), sessionId: runtime.currentSessionId(key), turnId: runtime.currentTurnId(key),
+        project_id: decodeURIComponent(parts[1]!), memory_id: decodeURIComponent(parts[2]!)
+      });
+    },
+  },
+  {
+    name: "search_team_trajectory",
+    description: "Find original messages shared with the projects bound to the current session.",
+    parameters: objectSchema({ query: { type: "string" } }, ["query"]),
+    readOnly: true,
+    execute: (client, params, runtime, key) => client.post("/api/v1/project-memory/trajectory", {
+      ...runtime.requestEnvelope(key), sessionId: runtime.currentSessionId(key), turnId: runtime.currentTurnId(key), query: params.query
+    }),
   },
 ];
 
@@ -243,8 +262,14 @@ function formatMemmyToolResult(
   if (toolName === "memmy_memory_search") {
     return renderMemmyContextPacket(markdownFromSearchResult(result), "tool_search", currentUserRequest, turnId);
   }
+  if (toolName === "search_team_trajectory") {
+    const lines = (result?.trajectories ?? []).map((row: JsonRecord) =>
+      [row.project_id, row.source_task_id, row.turn_id, String(row.content ?? "").slice(0, 600)].join(" / "));
+    return renderMemmyContextPacket(lines.join("\n"), "tool_search", currentUserRequest, turnId);
+  }
   if (toolName === "memmy_memory_get") {
-    return renderMemmyContextPacket(markdownFromMemoryDetail(result), "tool_get", currentUserRequest, turnId);
+    const text = result?.memory_id ? JSON.stringify(result.content) : markdownFromMemoryDetail(result);
+    return renderMemmyContextPacket(text, "tool_get", currentUserRequest, turnId);
   }
   return extractCurrentUserRequestText(JSON.stringify(result, null, 2));
 }

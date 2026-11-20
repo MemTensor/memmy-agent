@@ -1,3 +1,4 @@
+import { DesktopProjectMemory, awaitLocalRecall, limitTrajectories, mixProjectRecall } from "./project-memory.js";
 import {localPanelRequest} from "../service/panel/local-read.js";
 import { assertLocalAgentSourceRequest, isAgentSourceScanPath, routeAgentSourceScan } from "./agent-source-api.js";
 import {PanelLogsInputSchema} from "../contracts/memory-runtime.js";
@@ -85,6 +86,9 @@ export const API_ROUTES = [
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/source-turns/complete",
   "POST /api/v1/memory/search",
+  "POST /api/v1/project-memory/item",
+  "POST /api/v1/project-memory/compacted",
+  "POST /api/v1/project-memory/trajectory",
   "POST /api/v1/models/embedding/infer",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
@@ -120,6 +124,7 @@ export const API_ROUTES = [
 
 export interface MemoryHttpServerOptions {
   service: MemoryService;
+  projectMemory?: DesktopProjectMemory;
   /** Configured agent timezone. Request headers are used only when this is absent. */
   timeZone?: string;
   apiKey?: string;
@@ -179,6 +184,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS,
     idlePollMs: Math.max(10, options.workerIdlePollMs ?? DEFAULT_WORKER_IDLE_POLL_MS)
   });
+  const projectMemory = options.projectMemory ?? new DesktopProjectMemory();
   const desktopIdentity = () => readDesktopAnalyticsIdentity(options.configPath);
   const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics({
     getUserId: () => desktopIdentity().userId,
@@ -286,7 +292,8 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         pluginRuntimeAnalytics,
         agentSources,
         requestId,
-        controller.signal
+        controller.signal,
+        principal.kind === "local" ? projectMemory : undefined
       );
       if (request.method === "POST" && url.pathname === "/api/v1/admin/shutdown") {
         response.once("finish", () => options.onShutdownRequested?.());
@@ -598,7 +605,8 @@ async function routeRequest(
   pluginRuntimeAnalytics: PluginRuntimeAnalytics,
   agentSources: AgentSourceExecutor,
   requestId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  projects?: DesktopProjectMemory
 ): Promise<unknown> {
   const localPanel=principal.kind==="local"||principal.kind==="anonymous"||principal.kind==="viewer";
   const panelEnvelope=localPanelRequest({namespace:principal.namespace,timeZone:principal.timeZone},localPanel);
@@ -667,6 +675,7 @@ async function routeRequest(
       () => service.openSession(publicRequest)
     );
     if (request.l3WorldModelProtocolVersion === 2 && result.projectId) autoWorker.schedule();
+    await projects?.open(request, result.sessionId);
     return publicOpenSessionResponse(result);
   }
 
@@ -710,7 +719,10 @@ async function routeRequest(
       () => service.l3WorldModelBoundary(sessionId, request)
     );
     scheduleAutoWorkerForEvolution(result, autoWorker);
-    if (request.trigger === "token_compaction") autoWorker.schedule();
+    if (request.trigger === "token_compaction") {
+      autoWorker.schedule();
+      await projects?.call("sessions/compacted", projects.session(request, sessionId));
+    }
     return result;
   }
 
@@ -744,13 +756,25 @@ async function routeRequest(
       contextHints: request.contextHints,
       contextBudget: request.contextBudget
     };
-    const result = await trackExternalHookRecall(pluginRuntimeAnalytics, request, () =>
+    const recall = (turnId: string) => projects?.searchTurn(request, turnId);
+    const cloud = request.turnId ? recall(request.turnId) : undefined;
+    const local = trackExternalHookRecall(pluginRuntimeAnalytics, request, () =>
       service.idempotent("turn.start", publicRequest, { request: publicRequest }, () =>
         service.startTurn(publicRequest as TurnStartRequest & Record<string, unknown>)
       )
     );
+    const { local: result, found: parallel } = await awaitLocalRecall(local, cloud);
+    if (!result) {
+      const fallback = { injectedContext: { markdown: "", sections: [] }, sourceMemoryIds: [], hits: [] };
+      return { ...fallback, turnId: request.turnId, sessionId: request.sessionId, status: ["local_unavailable"],
+        contextPacketId: "project:" + request.turnId, searchEventId: "project:" + request.turnId, serverTime: new Date().toISOString(),
+        ...mixProjectRecall(fallback, parallel!, request.query, request.contextBudget) };
+    }
     scheduleAutoWorkerForEvolution(result, autoWorker);
-    return publicStartTurnResponse(result);
+    const found = parallel ?? await recall(result.turnId);
+    const response = publicStartTurnResponse(result);
+    if (!found || !Object.keys(found).length) return response;
+    return { ...response, ...mixProjectRecall(result, found, request.query, request.contextBudget) };
   }
 
   if (method === "POST" && path === "/api/v1/source-turns/complete") {
@@ -800,6 +824,12 @@ async function routeRequest(
       )
       : await completeSourceTurn();
     if (result.result) scheduleAutoWorkerForEvolution(result.result, autoWorker);
+    if (projects && service.memoryAddEnabled() && request.channel === "hook" && request.sessionId && request.status !== "cancelled"
+        && (result.status === "stored" || result.status === "existing")) {
+      const startId = typeof input.recallTurnId === "string" ? input.recallTurnId : request.sourceTurn.turnId;
+      const project = await projects.capture({ ...request, sessionId: request.sessionId }, startId, request.sourceTurn);
+      if (project.submissions || project.degraded) return { ...result, projectMemory: project };
+    }
     return result;
   }
 
@@ -843,7 +873,12 @@ async function routeRequest(
         )
     );
     scheduleAutoWorkerForEvolution(result, autoWorker);
-    return publicCompleteTurnResponse(result);
+    const response = publicCompleteTurnResponse(result);
+    if (projects && request.status !== "cancelled" && service.memoryAddEnabled()) {
+      const added = await projects.capture(request, turnId);
+      if (added.submissions || added.degraded) return { ...response, projectMemory: added };
+    }
+    return response;
   }
 
   if (method === "POST" && path === "/api/v1/memory/search") {
@@ -870,7 +905,10 @@ async function routeRequest(
       includeInjectedContext: typeof request.includeInjectedContext === "boolean" ? request.includeInjectedContext : undefined,
       verbose: request.verbose === true
     };
-    return publicSearchResponse(await trackExternalToolCall(
+    const cloud = projects && request.sessionId && request.turnId ? projects.call("search", {
+      ...projects.session(request, request.sessionId), query: request.query, turn_id: request.turnId
+    }) : undefined;
+    const localSearch = trackExternalToolCall(
       pluginRuntimeAnalytics,
       { ...request, toolName: "memmy_memory_search" },
       () =>
@@ -878,7 +916,33 @@ async function routeRequest(
           service.search(publicRequest)
         ),
       (result) => ({ hit_count: hitCountFromSearchResponse(result) }),
-    ));
+    );
+    const { local: retrieved, found } = await awaitLocalRecall(localSearch, cloud);
+    const local = retrieved ?? { searchEventId: "project:" + request.turnId, serverTime: new Date().toISOString(), hits: [], sourceMemoryIds: [], injectedContext: { markdown: "", sections: [] }, verbose: publicRequest.verbose, status: ["local_unavailable"] };
+    const mixed = found ? { ...local, ...mixProjectRecall(local, found, request.query, request.contextBudget) } : local;
+    return publicSearchResponse(mixed);
+  }
+
+  if (method === "POST" && path === "/api/v1/project-memory/compacted") {
+    requireMemoryWrite(principal);
+    if (!projects) throw new MemoryServiceError("forbidden", "Local session required");
+    const req = requestWithPrincipal<TurnStartRequest>(body, "compacted", principal);
+    requireStringField(req, "sessionId", "compacted");
+    return projects.call("sessions/compacted", projects.session(req, req.sessionId));
+  }
+  if (method === "POST" && (path === "/api/v1/project-memory/item" || path === "/api/v1/project-memory/trajectory")) {
+    requireMemoryRead(principal);
+    if (!projects) throw new MemoryServiceError("forbidden", "Local session required");
+    const req = requestWithPrincipal<MemorySearchRequest>(body, "project-memory", principal);
+    requireStringField(req, "sessionId", "project-memory");
+    requireStringField(req, "turnId", "project-memory");
+    const session = { ...projects.session(req, req.sessionId!), turn_id: req.turnId };
+    if (path.endsWith("/item")) {
+      const input = asObject(body, "project-memory.item");
+      return projects.call("read", { ...session, project_id: input.project_id, memory_id: input.memory_id }, true);
+    }
+    requireStringField(req, "query", "project-memory.trajectory");
+    return limitTrajectories(await projects.call("search", { ...session, view: "trajectory", query: req.query, limit: 5 }, true));
   }
 
   if (method === "POST" && path === "/api/v1/models/embedding/infer") {
@@ -1331,6 +1395,8 @@ function publicSearchResponse(result: unknown): Record<string, unknown> {
       searchEventId: record.searchEventId,
       hits: record.hits,
       sourceMemoryIds: record.sourceMemoryIds,
+      ...(record.projectMemory ? { projectMemory: record.projectMemory } : {}),
+      ...(Array.isArray(record.degraded) && record.degraded.length ? { degraded: record.degraded } : {}),
       status: record.status,
       sections: Array.isArray(injectedContext.sections) ? injectedContext.sections : [],
       tokenEstimate: typeof injectedContext.tokenEstimate === "number" ? injectedContext.tokenEstimate : undefined,

@@ -91,6 +91,44 @@ afterEach(async () => {
 });
 
 describe("memory follows its owning user turn", () => {
+  it("references an authorized project block only while it remains in the model request", async () => {
+    const f = setup();
+    const mixed = { injectedContext: { markdown: "shared answer 409" }, sourceMemoryIds: [],
+      projectMemory: { selectedIds: ["project:A:topic"], blocks: ["shared answer 409"] } };
+    f.client.startTurn.mockResolvedValue(mixed as never);
+    await f.send("first"); await f.send("second");
+    const request = f.requests[1].slice(1).map(messageText).join("\n");
+    expect(request.match(/shared answer 409/g)).toHaveLength(1);
+    expect(request).toContain('<memmy_memory_ref turn_id="second" from_turn="first"');
+    const saved = JSON.stringify(f.loop.sessions.getOrCreate("cli:replay").messages);
+    expect(saved).not.toContain("shared answer 409");
+
+    f.client.startTurn.mockResolvedValue({ injectedContext: "", sourceMemoryIds: [] });
+    await f.send("revoked");
+    expect(f.requests[2].slice(1).map(messageText).join("\n")).not.toContain("shared answer 409");
+  });
+
+  it("puts recalled text back after tool compression removes the only visible copy", () => {
+    const replay = { fingerprint: "f", owner: "first", generation: "g" };
+    const messages = [{ role: "user", content: [{ type: "text", text: "", memmyRecall: replay }] },
+      ...Array.from({ length: 11 }, (_,i) => [
+        { role: "assistant", tool_calls: [{ id: String(i), function: { name: "read_file" } }] },
+        { role: "tool", name: "read_file", tool_call_id: String(i), content: "x".repeat(500) }
+      ]).flat()];
+    const ctx = { turnId: "second", recall: { generation: "g", blocks: [{ fingerprint: "f", text: "shared answer 409" }],
+      refresh: async () => {}, invalidate: vi.fn() } };
+    const projected = (input: any[]) => withMemmyMemoryTurnContext(input, ctx).map(messageText).join("\n");
+    expect(projected(messages)).toContain('from_turn="first"');
+    const runner = new AgentRunner();
+    const spec = new AgentRunSpec({ toolResultCompressionEnabled: true, initialMessages: messages });
+    spec.memoryTurnContext = ctx;
+    const compressed = (runner as any).prepareMessagesBeforeSnip(spec, messages);
+    expect(projected(compressed)).toContain("result omitted from context");
+    expect(projected(compressed)).not.toContain("<memmy_memory_ref");
+    expect(projected(compressed).match(/shared answer 409/g)).toHaveLength(1);
+    expect(ctx.recall.invalidate).toHaveBeenCalledOnce();
+  });
+
   it("replays retained memory unchanged on the next turn and after disk reload", async () => {
     const f = setup();
     await f.send("T1");

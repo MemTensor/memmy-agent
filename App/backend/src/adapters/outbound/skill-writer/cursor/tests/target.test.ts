@@ -372,7 +372,7 @@ describe("cursor skill target", () => {
     const eventBase = {
       conversation_id: "cursor-conversation-1",
       generation_id: "cursor-generation-1",
-      workspace_roots: ["/tmp/cursor-project"]
+      workspace_roots: ["/tmp/cursor-project", "/tmp/second-project"]
     };
     const cursorHome = join(rootDirectory, "cursor-home");
     // The completed turn is the one Cursor already wrote to its own database. The cancelled
@@ -441,7 +441,8 @@ describe("cursor skill target", () => {
       expect(requests[1]?.body).toMatchObject({
         sessionId: "cursor-memory-cursor-conversation-1",
         source: "cursor",
-        workspacePath: "/tmp/cursor-project"
+        workspacePath: "/tmp/cursor-project",
+        meta: { launchFolder: null, workspaceRoots: eventBase.workspace_roots }
       });
       expect(requests[2]?.body).toMatchObject({
         adapterId: "memmy-cursor-hook",

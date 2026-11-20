@@ -108,6 +108,17 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
   const deviceId = options.deviceId;
 
   return {
+    projectMemory(credential, method, path, body) {
+      const projectBase = normalizeBaseUrl(process.env.MEMMY_PROJECT_MEMORY_GATEWAY_URL?.trim() || baseUrl);
+      return requestCloudData(fetchImpl, projectBase, Math.min(timeoutMs, 2000), "/api/memmy/project-memory/" + path, {
+        method, body, bearerCredential: credential, lang: "zh",
+        toError(status, envelope) {
+          const code = ({ 400: "invalid_argument", 401: "unauthorized", 403: "forbidden", 404: "not_found", 409: "conflict", 429: "rate_limited" } as Record<number, string>)[status] ?? "memory_layer_unavailable";
+          return Object.assign(new Error(envelope.message || "Project memory gateway unavailable"), { code });
+        }
+      });
+    },
+
     async health(): Promise<CloudHealth> {
       return {
         status: "ok",

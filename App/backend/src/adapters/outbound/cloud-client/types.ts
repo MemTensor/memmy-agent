@@ -254,6 +254,7 @@ export interface CloudAsrTranscriptionResult {
 }
 
 export interface CloudClient {
+  projectMemory?(credential: string, method: "GET" | "POST", path: string, body?: Record<string, unknown>): Promise<unknown>;
   health(): Promise<CloudHealth>;
   sendEmailCode(input: SendEmailCodeInput): Promise<void>;
   sendPhoneCode(input: SendPhoneCodeInput): Promise<void>;

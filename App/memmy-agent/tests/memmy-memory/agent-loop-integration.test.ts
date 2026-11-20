@@ -195,6 +195,7 @@ describe("AgentLoop memmy memory integration", () => {
 
     const opened = requests.find((request) => request.path === "/api/v1/sessions/open")!;
     expect(opened.body).toMatchObject({
+      meta: { launchFolder: binding.cwd },
       l3WorldModelProtocolVersion: 2,
       workspaceUri: expect.stringMatching(/^file:\/\//u),
       workspaceHostId: expect.stringMatching(/^[a-f0-9]{64}$/u),

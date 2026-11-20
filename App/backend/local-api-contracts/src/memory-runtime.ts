@@ -361,7 +361,8 @@ export type MemoryReloadConfigOutput = z.infer<typeof MemoryReloadConfigOutputSc
 
 const LegacyOpenSessionInputSchema = RuntimeRequestFieldsSchema.extend({
   sessionId: NonEmptyStringSchema.optional(),
-  workspacePath: z.string().optional()
+  workspacePath: z.string().optional(),
+  meta: UnknownRecordSchema.optional()
 }).strict();
 
 const V2OpenSessionInputSchema = L3WorldModelRequestEnvelopeSchema.safeExtend({
@@ -431,8 +432,24 @@ export const StartTurnInputSchema = RuntimeRequestFieldsSchema.extend({
 });
 export type StartTurnInput = z.infer<typeof StartTurnInputSchema>;
 
+export const ProjectRecallSchema = z.object({
+  selectedIds: z.array(NonEmptyStringSchema),
+  blocks: z.array(z.string()),
+  tokenEstimate: z.number().int().nonnegative()
+});
+const ProjectDegradationSchema = z.array(z.union([z.string(), UnknownRecordSchema]));
+export const ProjectCaptureSchema = z.object({
+  submissions: z.array(z.object({
+    project_id: NonEmptyStringSchema, submission_id: NonEmptyStringSchema, status: NonEmptyStringSchema,
+    task_id: NonEmptyStringSchema.optional(), error: z.string().optional()
+  })).optional(),
+  degraded: ProjectDegradationSchema.optional()
+});
+
 /** Schema for start turn output. */
 export const StartTurnOutputSchema = z.object({
+  projectMemory: ProjectRecallSchema.optional(),
+  degraded: ProjectDegradationSchema.optional(),
   turnId: NonEmptyStringSchema,
   contextPacketId: NonEmptyStringSchema,
   sessionId: NonEmptyStringSchema,
@@ -468,6 +485,7 @@ export type CompleteTurnInput = z.infer<typeof CompleteTurnInputSchema>;
 
 /** Schema for complete turn output. */
 export const CompleteTurnOutputSchema = z.object({
+  projectMemory: ProjectCaptureSchema.optional(),
   turnId: NonEmptyStringSchema,
   sessionId: NonEmptyStringSchema,
   episodeId: NonEmptyStringSchema.optional(),
@@ -488,6 +506,7 @@ export type CompleteTurnOutput = z.infer<typeof CompleteTurnOutputSchema>;
 
 /** Completed native Agent turn shared by Hook and automatic scanning. */
 export const SourceTurnCompleteInputSchema = CompleteTurnInputSchema.omit({ sessionId: true }).extend({
+  recallTurnId: NonEmptyStringSchema.optional(),
   sessionId: NonEmptyStringSchema.optional(),
   sourceTurn: z.object({
     source: NonEmptyStringSchema,
@@ -507,6 +526,7 @@ export const SourceTurnCompleteInputSchema = CompleteTurnInputSchema.omit({ sess
 export type SourceTurnCompleteInput = z.infer<typeof SourceTurnCompleteInputSchema>;
 
 export const SourceTurnCompleteOutputSchema = z.object({
+  projectMemory: ProjectCaptureSchema.optional(),
   status: z.enum(["stored", "existing", "rejected", "pending", "conflict"]),
   reason: z.string().optional(),
   result: CompleteTurnOutputSchema.partial({ changeSeq: true }).optional()
@@ -557,6 +577,8 @@ export const DefaultSearchOutputSchema = z.object({
 }).strict();
 
 export const VerboseSearchDebugSchema = z.object({
+  projectMemory: ProjectRecallSchema.optional(),
+  degraded: ProjectDegradationSchema.optional(),
   searchEventId: NonEmptyStringSchema,
   hits: z.array(RecallHitSchema),
   sourceMemoryIds: z.array(NonEmptyStringSchema),

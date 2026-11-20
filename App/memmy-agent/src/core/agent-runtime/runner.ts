@@ -875,6 +875,7 @@ export class AgentRunner {
       ? this.toolDefinitions(spec)
       : options.toolsOverride;
     const previousRefs = JSON.stringify(spec.privateSkillRefs);
+    await spec.memoryTurnContext?.recall?.refresh();
     const publicMessages = messages;
     try {
       messages = await projectPrivateSkillInstructions(publicMessages, spec.privateSkillRefs, spec.tools, spec.abortSignal, spec.sessionKey, !spec.privateSkillRequestStarted,
@@ -1507,7 +1508,23 @@ export class AgentRunner {
     let prepared = this.applyToolResultBudget(spec, messages);
     prepared = AgentRunner.dropOrphanToolResults(prepared);
     prepared = AgentRunner.backfillMissingToolResults(prepared);
-    if (spec.toolResultCompressionEnabled) prepared = AgentRunner.microcompact(prepared);
+    if (spec.toolResultCompressionEnabled) {
+      const compacted = AgentRunner.microcompact(prepared);
+      if (compacted !== prepared) {
+        const recall = spec.memoryTurnContext?.recall;
+        if (recall && !recall.compacted) {
+          recall.invalidate();
+          recall.compacted = true;
+        }
+        prepared = compacted.map(message => {
+          if (message.role !== "user" || !Array.isArray(message.content)) return message;
+          const content = message.content.filter(block => !block?.memmyRecall &&
+            !(block?.type === "text" && /^<memmy_memory_context source="turn_start"/.test(block.text)
+              && !block.text.startsWith(`<memmy_memory_context source="turn_start" turn_id="${spec.memoryTurnContext?.turnId}">`)));
+          return content.length === message.content.length ? message : { ...message, content };
+        });
+      }
+    }
     return prepared;
   }
 

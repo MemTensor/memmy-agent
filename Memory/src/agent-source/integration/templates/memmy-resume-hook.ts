@@ -171,12 +171,17 @@ function isL3LifecycleEvent(payload) {
 }
 
 async function openHookRuntimeSession(payload, transition) {
+  const launchFolder = normalizeText(payload.cwd) || normalizeText(payload.workspace_path || payload.workspacePath);
+  const roots = payload.workspace_roots || payload.workspaceRoots;
+  const workspaceRoots = Array.isArray(roots) ? roots : undefined;
   return openRuntimeSession({
     configUrl: CONFIG_URL,
     source: SOURCE,
     adapterId: "memmy-" + SOURCE + "-hook",
     sessionKey: memoryExternalSessionId(payload),
-    workspaceRoot: workspacePath(payload) || null,
+    workspaceRoot: launchFolder || workspaceRoots?.find(root => typeof root === "string" && root) || null,
+    launchFolder: launchFolder || null,
+    workspaceRoots,
     transition,
     pinnedOwner: true
   });
@@ -377,6 +382,7 @@ async function submitSourceTurn(turn, pending, payload) {
   const result = await completeSourceTurn({
     configUrl: CONFIG_URL,
     turn,
+    recallTurnId: normalizeText(pending && pending.turnId) || undefined,
     sessionId: normalizeText(pending && pending.sessionId) || undefined,
     sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined,
     adapterId: "memmy-" + SOURCE + "-hook"
@@ -627,18 +633,6 @@ function platformTurnId(payload) {
     normalizeText(payload.generationId) ||
     normalizeText(payload.prompt_id) ||
     normalizeText(payload.promptId);
-}
-
-function workspacePath(payload) {
-  const direct = normalizeText(payload.cwd) || normalizeText(payload.workspace_path || payload.workspacePath);
-  if (direct) {
-    return direct;
-  }
-  const roots = Array.isArray(payload.workspace_roots) ? payload.workspace_roots : payload.workspaceRoots;
-  if (!Array.isArray(roots)) {
-    return "";
-  }
-  return roots.map(item => normalizeText(item)).find(Boolean) || "";
 }
 
 function completedTurnStatus(payload) {

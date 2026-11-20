@@ -1,3 +1,4 @@
+import { registerProjectMemoryRoutes } from "./routes/project-memory.js";
 /** Memmy local API contract. */
 import { SseEventSchema, type SseEvent } from "@memmy/local-api-contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -171,6 +172,7 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
     authenticateRuntimeToken,
     refreshAgentTools: options.pluginCapabilitiesChanged
   });
+  registerProjectMemoryRoutes(app, { services: options.services, authenticateRuntimeToken });
   registerAgentRuntimeRoutes(app, {
     services: options.services,
     timeZone: options.timeZone,

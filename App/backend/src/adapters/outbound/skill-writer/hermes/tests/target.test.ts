@@ -507,6 +507,56 @@ print(json.dumps({"missing": missing, "nullOutput": null_output}))
     expect(parsed.nullOutput.toolResults[0]).not.toHaveProperty("output");
   }, 15_000);
 
+  it("reports the Hermes session's launch directory even when L3 uses the repository root", async () => {
+    const { rootDirectory } = createFixture();
+    await createHermesSkillTarget({ rootDirectory }).installPlugin?.("hermes");
+    const script = `
+import importlib.util, json, sys, types
+from pathlib import Path
+root = Path(sys.argv[2]).resolve()
+cwd = root / "tools"
+sys.modules["agent"] = types.ModuleType("agent")
+provider = types.ModuleType("agent.memory_provider")
+provider.MemoryProvider = object
+sys.modules["agent.memory_provider"] = provider
+state = types.ModuleType("hermes_state")
+locations = {"nested": str(cwd)}
+class SessionDB:
+    def __init__(self, read_only): assert read_only
+    def get_session(self, key):
+        return {"cwd": locations.get(key), "git_repo_root": str(root)}
+    def close(self): pass
+state.SessionDB = SessionDB
+sys.modules["hermes_state"] = state
+spec = importlib.util.spec_from_file_location("memmy_memory", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module._load_runtime = lambda: {"workspaceHostId": "a" * 64, "userId": "test"}
+module._memmy_get = lambda *args, **kwargs: {"features": {"l3WorldModelProtocolVersions": [2]}}
+requests = []
+def post(path, body):
+    requests.append(body)
+    return {"sessionId": "opened"}
+module._memmy_post = post
+host = module.MemmyMemoryProvider()
+host.initialize("nested")
+host.initialize("unknown")
+locations["unknown"] = str(cwd)
+host.prefetch("check this workspace", session_id="unknown")
+print(json.dumps({"requests": requests, "rootUri": root.as_uri(), "cwd": str(cwd)}))
+`;
+    const result = spawnSync("python3", ["-", join(rootDirectory, "plugins", "memmy-memory", "__init__.py"), rootDirectory], {
+      input: script, encoding: "utf8"
+    });
+    if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+    const { requests, rootUri, cwd } = JSON.parse(result.stdout);
+    expect(requests).toMatchObject([
+      { workspaceUri: rootUri, meta: { launchFolder: cwd } },
+      { workspaceUri: rootUri, meta: { launchFolder: null } },
+      { contextHints: { workspaceDir: cwd } }
+    ]);
+  });
+
   it("reads legacy Hermes turns without cwd without modifying the source database", async () => {
     const { rootDirectory } = createFixture();
     const target = createHermesSkillTarget({ rootDirectory, memmyConfigPath: join(rootDirectory, "memmy-config.yaml") });

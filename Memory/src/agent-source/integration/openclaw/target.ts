@@ -735,6 +735,7 @@ export default {
         sessionKey: normalizeOptionalText(ctx && ctx.sessionKey),
         agentId: normalizeOptionalText(ctx && ctx.agentId),
         sessionId: normalizeOptionalText(pending && pending.sessionId) || undefined,
+        recallTurnId: normalizeOptionalText(pending && pending.turnId) || undefined,
         workspacePath: normalizeOptionalText(ctx && ctx.workspaceDir),
         profileId: normalizeOptionalText(ctx && ctx.agentId) || "main",
         sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined
@@ -910,7 +911,7 @@ const SYNC_COMPLETE_SCRIPT = [
   "if (!parsed.turn) {",
   "  console.log(JSON.stringify({ ok: false, error: parsed.reason || 'identity_unresolved' }));",
   "} else {",
-  "  const result = await bridge.completeSourceTurn({ configUrl: new URL(payload.configUrl), turn: parsed.turn, sessionId: payload.sessionId || undefined, sourceMemoryIds: Array.isArray(payload.sourceMemoryIds) ? payload.sourceMemoryIds : undefined, profileId: payload.profileId || 'main', adapterId: 'memmy-openclaw-plugin' });",
+  "  const result = await bridge.completeSourceTurn({ configUrl: new URL(payload.configUrl), turn: parsed.turn, sessionId: payload.sessionId || undefined, recallTurnId: payload.recallTurnId, sourceMemoryIds: Array.isArray(payload.sourceMemoryIds) ? payload.sourceMemoryIds : undefined, profileId: payload.profileId || 'main', adapterId: 'memmy-openclaw-plugin' });",
   "  const status = result && typeof result.status === 'string' ? result.status : '';",
   "  const accepted = status === 'stored' || status === 'existing' || status === 'rejected';",
   "  console.log(JSON.stringify(accepted ? { ok: true, mode: 'source_turn_complete', status } : { ok: false, error: (result && result.reason) || status || 'unexpected_response' }));",

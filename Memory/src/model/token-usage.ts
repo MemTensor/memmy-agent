@@ -597,7 +597,7 @@ export async function fetchAppMemoryBudget(
   }
 }
 
-function readRuntimeConfig(filePath: string): RuntimeConfig | null {
+export function readRuntimeConfig(filePath: string): RuntimeConfig | null {
   if (!existsSync(filePath)) {
     return null;
   }

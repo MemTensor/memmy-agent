@@ -1,3 +1,5 @@
+import { ProjectMemoryService } from "./project-memory/service.js";
+import { getActiveAccountUuid } from "../infrastructure/app-state-store/account-context.js";
 import { createPluginSkillContentService, type PluginSkillContentService } from "./plugin-skill-content-service.js";
 import type { AccountChannel } from "@memmy/local-api-contracts";
 import { homedir } from "node:os";
@@ -83,6 +85,7 @@ import { createPluginHostServiceRouter } from "./plugin-host-service-router.js";
 import { resolvePluginModelSelection } from "./plugin-model-policy.js";
 
 export interface BackendServices {
+  projectMemory: ProjectMemoryService;
   memoryClient: MemoryClient;
   agentAdapterRegistry: AgentAdapterRegistry;
   bootstrap: BootstrapService;
@@ -328,6 +331,11 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   });
 
   return {
+    projectMemory: new ProjectMemoryService(options.appStateStore.db, () => {
+      const id = getActiveAccountUuid(options.appStateStore.db);
+      const credential = options.appStateStore.repositories.accountSession.getCloudUuid();
+      return id && credential ? { id, credential } : null;
+    }, options.cloudClient, () => options.appStateStore.repositories.bootstrap.getPrivacySettings().localOnlyMode),
     memoryClient: options.memoryClient,
     agentAdapterRegistry: options.agentAdapterRegistry,
     bootstrap: createBootstrapService({
