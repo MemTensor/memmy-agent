@@ -58,7 +58,7 @@ export class ToolRegistry {
       ];
     }
     const tool = this.get(name);
-    if (!tool) return [null, params, `Error: Tool '${name}' not found. Available: ${this.toolNames.join(", ")}`];
+    if (!tool) return [null, params, `Error: Tool '${name}' not found. Use tool_search to find its current name and parameters.`];
     const cast = tool.castParams(params ?? {});
     const errors = tool.validateParams(cast);
     if (errors.length) return [tool, cast, `Error: Invalid parameters for tool '${name}': ${errors.join("; ")}`];

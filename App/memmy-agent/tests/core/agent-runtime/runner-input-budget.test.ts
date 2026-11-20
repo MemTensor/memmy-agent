@@ -80,10 +80,10 @@ describe("AgentRunner model input budget", () => {
     expect(instructions).toContain("omitted to fit the model input budget");
   });
 
-  it.each(["user", "system", "tools"])("rejects an irreducible oversized %s input before calling the provider", async (largePart) => {
+  it.each(["user", "system"])("rejects an irreducible oversized %s input before calling the provider", async (largePart) => {
     const large = "Required input content ".repeat(2000);
     const llm = provider();
-    const tools = { getDefinitions: () => largePart === "tools" ? [{ type: "function", function: { name: "inspect", description: large } }] : [] };
+    const tools = { getDefinitions: () => [] };
     const messages = [
       { role: "system", content: largePart === "system" ? large : "system" },
       { role: "user", content: largePart === "user" ? large : "Inspect this" },
@@ -96,6 +96,22 @@ describe("AgentRunner model input budget", () => {
     expect(result.content).toContain("too large to send safely");
     expect(result.response).toMatchObject({ errorCode: "context_length_exceeded", errorShouldRetry: false });
     expect(llm.chatWithRetry).not.toHaveBeenCalled();
+  });
+
+  it("defers oversized tool schemas instead of rejecting the initial request", async () => {
+    const llm = provider();
+    const tools = { getDefinitions: () => [{ type: "function", function: {
+      name: "inspect", description: "Required input content ".repeat(2000),
+      parameters: { type: "object", properties: {} },
+    } }] };
+    const result = await new AgentRunner(llm as any).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "Inspect this" }], tools,
+      contextWindowTokens: 10_000, maxTokens: 100, contextBlockLimit: 1_000,
+    }));
+    expect(result.stopReason).toBe("completed");
+    const request = (llm.chatWithRetry.mock.calls[0] as unknown as [any])[0];
+    expect(request.tools.map((tool: any) => tool.function.name)).toEqual(["tool_search"]);
+    expect(estimatePromptTokens(request.messages, request.tools)).toBeLessThanOrEqual(1_000);
   });
 
   it("keeps the latest screenshot and blocks a request when that required image alone cannot fit", async () => {

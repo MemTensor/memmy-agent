@@ -368,6 +368,7 @@ describe("runner delivery check", () => {
   it("feeds a missing file back to the model, then confirms once every declared file exists", async () => {
     const metadata: Record<string, any> = {};
     const { result, provider } = await run([
+      call("tool_search", { query: "write_file", limit: 1 }),
       call("write_file", { path: "a.md", content: "A", output_paths: ["a.md", "b.md"] }),
       reply("Done: a.md and b.md"),
       call("apply_patch", { input: "*** Begin Patch\n*** Add File: b.md\n+B\n*** End Patch", output_paths: ["b.md"] }),
@@ -379,11 +380,11 @@ describe("runner delivery check", () => {
     expect(hasOutputObligations(metadata)).toBe(false);
     // Tools never see output_paths; the model sees the parameter and the output instruction.
     expect(await fs.readFile(path.join(workspace, "b.md"), "utf8")).toBe("B\n");
-    const writeFile = provider.requests[0].tools.find((tool: any) => tool.function.name === "write_file");
+    const writeFile = provider.requests[1].tools.find((tool: any) => tool.function.name === "write_file");
     expect(writeFile.function.parameters.properties.output_paths).toBeTruthy();
     expect(provider.requests[0].messages[0].content).toContain("Output directory for final files");
     // Feedback goes in as a user message, never a mid-conversation system message.
-    const retry = provider.requests[2].messages;
+    const retry = provider.requests[3].messages;
     expect(retry.filter((message: any) => message.role === "system")).toHaveLength(1);
     expect(retry.at(-1)).toMatchObject({ role: "user" });
     expect(retry.at(-1).content).toContain(path.join(workspace, "b.md"));
@@ -450,7 +451,7 @@ describe("AgentLoop parent and subagent delivery", () => {
       getDefaultModel() { return "test-model"; }
       async chat(args: any) { return this.chatWithRetry(args); }
       async chatWithRetry(args: any) {
-        const isParent = args.tools?.some((tool: any) => tool.function?.name === "spawn");
+        const isParent = !args.messages.some((message: any) => message.role === "system" && String(message.content).includes("# Subagent"));
         if (!isParent) {
           const wrote = args.messages.some((message: any) => message.role === "tool");
           return wrote ? reply(`child done ${childFile}`)
@@ -559,7 +560,7 @@ describe("review regressions", () => {
       getDefaultModel() { return "test-model"; }
       async chat(args: any) { return this.chatWithRetry(args); }
       async chatWithRetry(args: any) {
-        if (!args.tools?.some((tool: any) => tool.function?.name === "spawn")) {
+        if (args.messages.some((message: any) => message.role === "system" && String(message.content).includes("# Subagent"))) {
           childCalls += 1;
           if (childCalls === 1) { await gate; return call("exec", { command: "true", output_paths: [missing] }); }
           return reply("child finished");

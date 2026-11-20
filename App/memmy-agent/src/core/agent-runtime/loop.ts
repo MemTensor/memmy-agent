@@ -131,6 +131,7 @@ import {
 import { AgentHook, AgentHookContext, CompositeAgentHook } from "./hook.js";
 import { loadExternalAgentHooks } from "./external-hook-loader.js";
 import { SubagentManager } from "./subagent.js";
+import { sessionToolDiscovery } from "./tool-discovery.js";
 import { AutoCompact } from "./autocompact.js";
 import { configuredModelPresets, defaultSelectionSignature, makePresetSnapshotLoader, normalizePresetName } from "./model-presets.js";
 import { installMemmyMemory, type MemmyMemoryIntegration } from "../../memmy-memory/index.js";
@@ -981,7 +982,7 @@ export class AgentLoop {
       sessions: this.sessions,
       contextWindowTokens: this.contextWindowTokens,
       buildMessages: (args: any) => this.context.buildMessages({ ...(args ?? {}), hook: args?.hook ?? this.lifecycleHook() }),
-      getToolDefinitions: () => this.tools.getDefinitions(),
+      getToolDefinitions: (session) => sessionToolDiscovery(session).definitions(this.tools.getDefinitions()),
       maxCompletionTokens: this.provider?.generation?.maxTokens ?? defaults.maxTokens,
       consolidationRatio: init.consolidationRatio ?? defaults.consolidationRatio,
       unifiedSession: this.unifiedSession,
@@ -3920,6 +3921,7 @@ export class AgentLoop {
         } : undefined,
         provider: activeProvider,
         tools: activeTools,
+        toolDiscovery: session ? sessionToolDiscovery(session) : undefined,
         model: activeModel,
         maxIterations: this.maxIterations,
         maxIterationsFinalPrompt: renderTemplate("agent/max-iterations-final-response.md", { strip: true }),

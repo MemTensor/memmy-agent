@@ -633,7 +633,7 @@ type ConsolidatorInit = {
   sessions: any;
   contextWindowTokens?: number;
   buildMessages?: (...args: any[]) => Record<string, any>[];
-  getToolDefinitions?: () => Record<string, any>[];
+  getToolDefinitions?: (session: Session) => Record<string, any>[];
   maxCompletionTokens?: number;
   consolidationRatio?: number;
   unifiedSession?: boolean;
@@ -659,7 +659,7 @@ export class Consolidator {
   safetyBuffer = Consolidator.SAFETY_BUFFER;
   maxConsolidationRounds = Consolidator.MAX_CONSOLIDATION_ROUNDS;
   buildMessages: (...args: any[]) => Record<string, any>[];
-  getToolDefinitions: () => Record<string, any>[];
+  getToolDefinitions: (session: Session) => Record<string, any>[];
   private lifecycleHook: (() => AgentHook | null) | null;
   summaryMode: "text" | "dag";
   dagQueue: SessionDagQueueManager | null;
@@ -675,7 +675,7 @@ export class Consolidator {
     sessions: any,
     contextWindowTokens: number,
     buildMessages: (...args: any[]) => Record<string, any>[],
-    getToolDefinitions: () => Record<string, any>[],
+    getToolDefinitions: (session: Session) => Record<string, any>[],
     maxCompletionTokens?: number,
     consolidationRatio?: number,
   );
@@ -686,7 +686,7 @@ export class Consolidator {
     sessions?: any,
     contextWindowTokens?: number,
     buildMessages?: (...args: any[]) => Record<string, any>[],
-    getToolDefinitions?: () => Record<string, any>[],
+    getToolDefinitions?: (session: Session) => Record<string, any>[],
     maxCompletionTokens?: number,
     consolidationRatio?: number,
   ) {
@@ -982,7 +982,7 @@ export class Consolidator {
       sessionKey: session.key ?? null,
       unifiedSession: this.unifiedSession,
     });
-    const tools = this.getToolDefinitions();
+    const tools = this.getToolDefinitions(session);
     if (typeof this.provider?.estimatePromptTokens === "function") {
       return this.provider.estimatePromptTokens(this.model, messages, tools);
     }
