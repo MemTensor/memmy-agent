@@ -153,6 +153,11 @@ export interface CatalogEndpointRequestOptions {
   extraHeaders?: Record<string, string>;
 }
 
+export type McpServerConfigWriteOptions = {
+  /** Recheck the writer lifecycle after acquiring the config lock and before publishing the MCP config. */
+  beforeCommit?: (configPath: string) => void | Promise<void>;
+};
+
 export interface MemmyConfigWriter {
   readModelConfig?(): Promise<ModelConfigView>;
 
@@ -212,7 +217,7 @@ export interface MemmyConfigWriter {
    * @param serverName the MCP server name, e.g. composio.
    * @param serverConfig the full config for this MCP server (fully replaced), e.g. { type, url, headers }.
    */
-  patchMcpServerConfig(serverName: string, serverConfig: Record<string, unknown>): Promise<void>;
+  patchMcpServerConfig(serverName: string, serverConfig: Record<string, unknown>, options?: McpServerConfigWriteOptions): Promise<void>;
 }
 
 export interface CreateMemmyConfigWriterOptions {
@@ -301,8 +306,8 @@ export function createMemmyConfigWriter(options: CreateMemmyConfigWriterOptions 
       await patchChannelConfigInMemmyConfig(channelName, patch, configPath);
     },
 
-    async patchMcpServerConfig(serverName, serverConfig) {
-      await patchMcpServerConfigInMemmyConfig(serverName, serverConfig, configPath);
+    async patchMcpServerConfig(serverName, serverConfig, writeOptions) {
+      await patchMcpServerConfigInMemmyConfig(serverName, serverConfig, configPath, writeOptions);
     }
   };
 }
@@ -933,7 +938,8 @@ export async function patchChannelConfigInMemmyConfig(
 export async function patchMcpServerConfigInMemmyConfig(
   serverName: string,
   serverConfig: Record<string, unknown>,
-  configPath = resolveDefaultMemmyConfigPath()
+  configPath = resolveDefaultMemmyConfigPath(),
+  options: McpServerConfigWriteOptions = {}
 ): Promise<void> {
   const normalizedName = normalizeChannelNameForConfig(serverName);
   await mutateRuntimeConfig(configPath, (config) => {
@@ -942,7 +948,7 @@ export async function patchMcpServerConfigInMemmyConfig(
     mcpServers[normalizedName] = { ...omitUndefined(serverConfig) };
     tools.mcpServers = mcpServers;
     config.tools = tools;
-  });
+  }, { beforeCommit: options.beforeCommit });
 }
 
 function accountPresetIds(ownerAccountId: string): AccountPresetIds {

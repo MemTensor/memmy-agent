@@ -11,6 +11,79 @@
   margin-top: 8px;
 }
 
+.tools-page-heading {
+  margin-top: 12px;
+  margin-bottom: 20px;
+}
+
+.tools-page-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 20px;
+  margin-bottom: 24px;
+}
+
+.tools-page-navigation .plugin-marketplace-tabs {
+  margin-bottom: 0;
+}
+
+.tools-page-navigation .plugin-marketplace-tabs [role="tab"] {
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--color-text-ink) 66%, transparent);
+  font-weight: 500;
+}
+
+.tools-page-navigation .plugin-marketplace-tabs [aria-selected="true"] {
+  background: color-mix(in srgb, var(--color-action-sky) 7%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-action-sky-hover) 52%, var(--color-text-ink));
+  font-weight: 600;
+}
+
+.tools-page-navigation-actions {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tools-page-navigation-actions .extension-catalog-search {
+  flex: 0 1 240px;
+  margin-left: 0;
+}
+
+.tools-page-navigation-actions .extension-catalog-category {
+  position: relative;
+  margin-left: 0;
+}
+
+.tools-page-navigation-actions .extension-catalog-category select {
+  appearance: none;
+  padding-right: 31px;
+}
+
+.tools-page-category-chevron {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.tools-page-navigation-actions .memory-log-filter--active {
+  background: color-mix(in srgb, var(--color-action-sky) 8%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-action-sky-hover) 52%, var(--color-text-ink));
+}
+
+.tools-page-status-filter:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .tools-icon-grid {
   display: grid;
   align-items: stretch;

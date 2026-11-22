@@ -1,8 +1,9 @@
 /** Onboarding page module. */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { PenLine, Search, type LucideIcon } from "lucide-react";
+import { Blocks, PenLine, Search, type LucideIcon } from "lucide-react";
 import type { AgentSourceMemoryPluginConflict, AgentSourceView, ScanPermission } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
+import { createHttpCollabClient } from "../api/collab-client.js";
 import {
   productTourIncludesLogs,
   productTourStartMemorySubPage,
@@ -252,6 +253,12 @@ export function OnboardingPage() {
           dispatch(appActions.onboardingUpdated(persistedPatch));
           dispatch(appActions.scanPreferencesUpdated(await clients.config.updateScanPreferences(preferences)));
           if (permission === "scan_and_write_skill") {
+            // 选「全部允许」同时算授权在常用 Agent 中使用协作项目：组件在后台装，不拖慢扫描。
+            if (clients) {
+              void createHttpCollabClient(clients.runtimeConfig).setAgentAccess(true).catch((error: unknown) => {
+                console.warn("granting collab agent access failed", error);
+              });
+            }
             void startFirstScanInBackground().catch((error) => {
               console.warn("start first agent source scan failed", error);
             });
@@ -839,9 +846,22 @@ export function OnboardingPage() {
                 title={t("onboarding.permission.writeTitle")}
                 description={t("onboarding.permission.writeBody")}
               />
+              {/* API Key 模式没有协作项目，因此不列这一项；账号模式下它与上面两项一起由「全部允许」覆盖。 */}
+              {state.bootstrap?.app.userMode === "account" ? (
+                <PermissionCard
+                  icon={Blocks}
+                  title={t("onboarding.permission.collabTitle")}
+                  description={t("onboarding.permission.collabBody")}
+                />
+              ) : null}
             </div>
 
-            <p className="text-xs text-text-ink/50 text-center mt-5 px-7">{t("onboarding.permission.notice")}</p>
+            {/* 账号模式下多了一项协作项目，底部说明要把设置里的两个入口都写出来。 */}
+            <p className="text-xs text-text-ink/50 text-center mt-5 px-7">
+              {t(state.bootstrap?.app.userMode === "account"
+                ? "onboarding.permission.noticeAccount"
+                : "onboarding.permission.notice")}
+            </p>
 
             <div className="flex gap-3 px-7 py-6 mt-2">
               <button

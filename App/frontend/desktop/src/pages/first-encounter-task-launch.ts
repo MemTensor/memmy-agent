@@ -19,6 +19,8 @@ export interface PendingFirstEncounterTaskLaunch {
   sessionKey?: string;
   /** Empty-history greetings have no imported task to verify in another Agent. */
   showRelayFollowUp?: boolean;
+  /** When set, the launched task belongs to this local Memmy project and is not shared. */
+  projectId?: string;
   createdAt: number;
 }
 
@@ -27,6 +29,7 @@ export interface WritePendingFirstEncounterTaskLaunchOptions {
   chatId?: string;
   sessionKey?: string;
   showRelayFollowUp?: boolean;
+  projectId?: string;
   now?: number;
 }
 
@@ -43,11 +46,13 @@ export function writePendingFirstEncounterTaskLaunch(
   const assistantContent = options.assistantContent?.trim();
   const chatId = options.chatId?.trim();
   const sessionKey = options.sessionKey?.trim();
+  const projectId = options.projectId?.trim();
   storage.setItem(PENDING_FIRST_ENCOUNTER_TASK_LAUNCH_KEY, JSON.stringify({
     prompt: trimmedPrompt,
     ...(assistantContent ? { assistantContent } : {}),
     ...(chatId ? { chatId } : {}),
     ...(sessionKey ? { sessionKey } : {}),
+    ...(projectId ? { projectId } : {}),
     ...(typeof options.showRelayFollowUp === "boolean" ? { showRelayFollowUp: options.showRelayFollowUp } : {}),
     createdAt: options.now ?? Date.now()
   } satisfies PendingFirstEncounterTaskLaunch));
@@ -80,11 +85,13 @@ export function consumePendingFirstEncounterTaskLaunch(
     const assistantContent = typeof parsed.assistantContent === "string" ? parsed.assistantContent.trim() : "";
     const chatId = typeof parsed.chatId === "string" ? parsed.chatId.trim() : "";
     const sessionKey = typeof parsed.sessionKey === "string" ? parsed.sessionKey.trim() : "";
+    const projectId = typeof parsed.projectId === "string" ? parsed.projectId.trim() : "";
     return {
       prompt,
       ...(assistantContent ? { assistantContent } : {}),
       ...(chatId ? { chatId } : {}),
       ...(sessionKey ? { sessionKey } : {}),
+      ...(projectId ? { projectId } : {}),
       ...(parsed.showRelayFollowUp === false ? { showRelayFollowUp: false } : {}),
       createdAt: typeof parsed.createdAt === "number" ? parsed.createdAt : Date.now()
     };

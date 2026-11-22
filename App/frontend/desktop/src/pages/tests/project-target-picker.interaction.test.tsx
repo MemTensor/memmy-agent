@@ -5,11 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WebuiSessionTarget } from "../../api/memmy-agent-client.js";
 import { AppProviders } from "../../app/providers.js";
-import {
-  ProjectTargetPicker,
-  runProjectTargetFolderSelection,
-  type RunProjectTargetFolderSelectionInput
-} from "../home-page.js";
+import { ProjectTargetPicker } from "../home-page.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -37,9 +33,21 @@ describe("ProjectTargetPicker interactions", () => {
     document.body.replaceChildren();
   });
 
+  it("shows the project name in the trigger and list instead of the folder path", () => {
+    renderPicker(root, { initialTarget: { kind: "project", projectId: "two" } });
+
+    expect(getTrigger().textContent).toContain("Playground");
+    expect(getTrigger().textContent).not.toContain("sandbox");
+    act(() => getTrigger().click());
+    const option = document.querySelector('[data-project-id="two"]');
+    expect(option?.querySelector(".home-project-picker__name")?.textContent).toBe("Playground");
+    expect(option?.textContent).not.toContain("sandbox");
+    expect(option?.getAttribute("title")).toContain("sandbox");
+  });
+
   it("filters by path and keeps new-project available to the keyboard", () => {
-    const onChooseOther = vi.fn();
-    renderPicker(root, { initialTarget: { kind: "standalone" }, onChooseOther });
+    const onCreateProject = vi.fn();
+    renderPicker(root, { initialTarget: { kind: "standalone" }, onCreateProject });
 
     act(() => getTrigger().click());
     const search = getSearch();
@@ -54,8 +62,25 @@ describe("ProjectTargetPicker interactions", () => {
     expect(scrollIntoView).toHaveBeenCalledOnce();
     pressKey(search, "Enter");
 
-    expect(onChooseOther).toHaveBeenCalledOnce();
+    expect(onCreateProject).toHaveBeenCalledOnce();
     expect(document.querySelector(".home-project-picker__menu")).not.toBeNull();
+  });
+
+  it("does not cancel the pointer press on New project", () => {
+    const onCreateProject = vi.fn();
+    renderPicker(root, { initialTarget: { kind: "standalone" }, onCreateProject });
+
+    act(() => getTrigger().click());
+    const button = getNewProjectButton();
+    expect(button).not.toBeNull();
+    const pointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+    act(() => {
+      button!.dispatchEvent(pointerDown);
+      button!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(pointerDown.defaultPrevented).toBe(false);
+    expect(onCreateProject).toHaveBeenCalledOnce();
   });
 
   it("hides standalone when no project is selected", () => {
@@ -80,6 +105,8 @@ describe("ProjectTargetPicker interactions", () => {
     expect(document.getElementById("home-project-picker-option-0")?.classList.contains("home-project-picker__option--keyboard-active")).toBe(true);
     pressKey(search, "ArrowDown");
     expect(search.getAttribute("aria-activedescendant")).toBe("home-project-picker-option-1");
+    pressKey(search, "ArrowDown");
+    expect(search.getAttribute("aria-activedescendant")).toBe("home-project-picker-option-2");
     pressKey(search, "ArrowDown");
     expect(search.getAttribute("aria-activedescendant")).toBe("home-project-picker-option-2");
     pressKey(search, "ArrowDown");
@@ -116,7 +143,7 @@ describe("ProjectTargetPicker interactions", () => {
     expect(getStandaloneButton()).not.toBeNull();
 
     const search = getSearch();
-    for (let index = 0; index < 3; index += 1) pressKey(search, "ArrowDown");
+    for (let index = 0; index < 4; index += 1) pressKey(search, "ArrowDown");
     pressKey(search, "Enter");
 
     expect(document.querySelector('[data-testid="picker-target"]')?.textContent).toBe("standalone");
@@ -138,53 +165,6 @@ describe("ProjectTargetPicker interactions", () => {
     expect(document.querySelector('[data-testid="picker-target"]')?.textContent).toBe("project:one");
   });
 
-  it("keeps the picker open and usable when folder selection is canceled", async () => {
-    const mutateProject = vi.fn();
-    const onError = vi.fn();
-    const onRefresh = vi.fn();
-    renderPicker(root, {
-      initialTarget: { kind: "standalone" },
-      folderSelection: {
-        selectDirectory: vi.fn(async () => ({ canceled: true as const })),
-        mutateProject,
-        onError,
-        onRefresh
-      }
-    });
-
-    act(() => getTrigger().click());
-    await clickNewProject();
-
-    expect(mutateProject).not.toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
-    expect(onRefresh).not.toHaveBeenCalled();
-    expectPickerOpenAndDismissible();
-  });
-
-  it.each([
-    ["rejected", vi.fn(async () => ({ status: "rejected" as const, code: "project_limit" }))],
-    ["thrown", vi.fn(async () => { throw new Error("offline"); })]
-  ])("keeps the picker open and usable when registration is %s", async (_label, mutateProject) => {
-    const onError = vi.fn();
-    const onRefresh = vi.fn();
-    renderPicker(root, {
-      initialTarget: { kind: "standalone" },
-      folderSelection: {
-        selectDirectory: vi.fn(async () => ({ canceled: false as const, path: "C:\\work\\new-project" })),
-        mutateProject,
-        onError,
-        onRefresh
-      }
-    });
-
-    act(() => getTrigger().click());
-    await clickNewProject();
-
-    expect(onError).toHaveBeenCalledOnce();
-    expect(onRefresh).toHaveBeenCalledOnce();
-    expectPickerOpenAndDismissible();
-  });
-
   it("keeps standalone recovery when the project registry is corrupt", () => {
     renderPicker(root, {
       initialTarget: { kind: "project", projectId: "one" },
@@ -201,14 +181,11 @@ describe("ProjectTargetPicker interactions", () => {
   });
 });
 
-type FolderSelectionInput = Omit<RunProjectTargetFolderSelectionInput, "onCommitted">;
-
 function renderPicker(
   root: Root,
   options: {
     initialTarget: WebuiSessionTarget;
-    onChooseOther?: () => void;
-    folderSelection?: FolderSelectionInput;
+    onCreateProject?: () => void;
     registryState?: "ready" | "corrupt";
   }
 ) {
@@ -223,8 +200,7 @@ function renderPicker(
 
 function PickerHarness(props: {
   initialTarget: WebuiSessionTarget;
-  onChooseOther?: () => void;
-  folderSelection?: FolderSelectionInput;
+  onCreateProject?: () => void;
   registryState?: "ready" | "corrupt";
 }) {
   const [open, setOpen] = useState(false);
@@ -248,16 +224,7 @@ function PickerHarness(props: {
           setTarget(nextTarget);
           setOpen(false);
         }}
-        onChooseOther={() => {
-          if (props.folderSelection) {
-            void runProjectTargetFolderSelection({
-              ...props.folderSelection,
-              onCommitted: () => setOpen(false)
-            });
-            return;
-          }
-          props.onChooseOther?.();
-        }}
+        onCreateProject={() => props.onCreateProject?.()}
       />
       <output data-testid="picker-target">
         {target.kind === "project" ? `project:${target.projectId}` : "standalone"}
@@ -288,28 +255,6 @@ function setInputValue(input: HTMLInputElement, value: string) {
 
 function pressKey(input: HTMLInputElement, key: string) {
   act(() => input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })));
-}
-
-async function clickNewProject() {
-  const button = getNewProjectButton();
-  if (!button) throw new Error("Missing New project button");
-  await act(async () => {
-    const pointerDown = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
-    button.dispatchEvent(pointerDown);
-    if (!pointerDown.defaultPrevented) button.focus();
-    button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-}
-
-function expectPickerOpenAndDismissible() {
-  expect(document.querySelector(".home-project-picker__menu")).not.toBeNull();
-  expect(document.activeElement).toBe(getSearch());
-  const activeElement = document.activeElement;
-  if (!(activeElement instanceof HTMLInputElement)) throw new Error("Project search lost focus");
-  pressKey(activeElement, "Escape");
-  expect(document.querySelector(".home-project-picker__menu")).toBeNull();
 }
 
 function getNewProjectButton(): HTMLButtonElement | null {

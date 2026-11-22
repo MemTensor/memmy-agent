@@ -6,7 +6,6 @@ import { expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { PluginUiProvider, usePluginUi, type PluginUiCall } from "../../app/plugin-ui-context.js";
 import { FileInputCard, PluginCapabilityHost, selectVisiblePluginCalls, selectRegionPluginCalls } from "../plugin-capability-host.js";
-import { InterviewRecordingPanel } from "../interview-recording-panel.js";
 import { pressPinnedPluginCommand } from "../home-page.js";
 
 const recorder = vi.hoisted(() => ({ cancel: vi.fn(), unmount: vi.fn(), start: vi.fn(), pause: vi.fn(), resume: vi.fn(), finishAndTranscribe: vi.fn() }));
@@ -78,11 +77,11 @@ it.each(["user", "agent"] as const)("keeps templates out of the %s recorder and 
     const toggle = () => void pressPinnedPluginCommand({ calls: [call], pluginId: plugin.id, capabilityId: call.capabilityId,
       pinnedCapabilities: new Set([`${plugin.id}:${call.capabilityId}`]), open,
       toggleVisibility: (id) => setHidden((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; }) });
-    return <><button data-testid="toggle" onClick={toggle}>Toggle</button><InterviewRecordingPanel session={null} hidden={hidden.has(call.callId)} bar={
+    return <><button data-testid="toggle" onClick={toggle}>Toggle</button><aside style={{ display: hidden.has(call.callId) ? "none" : undefined }}>
       <PluginCapabilityHost region="panel" calls={[call]} plugins={[plugin]} client={client} hiddenCallIds={hidden}
         answeredInteractions={new Set([`${plugin.id}:recording:guide`])}
         onCallHidden={(id) => setHidden((current) => new Set(current).add(id))} />
-    } /></>;
+    </aside></>;
   }
   try {
     await act(async () => root.render(<PluginUiProvider><I18nProvider language="en-US"><Page /></I18nProvider></PluginUiProvider>));
@@ -99,7 +98,7 @@ it.each(["user", "agent"] as const)("keeps templates out of the %s recorder and 
     expect(container.querySelector(".recording-bar")).toBe(bar);
     expect(container.textContent).not.toContain(".xlsx");
     expect(container.querySelector<HTMLElement>("aside")!.hidden).toBe(false);
-    expect(container.querySelector(".sidebar-resize-handle")).not.toBeNull();
+    expect(container.querySelector(".sidebar-resize-handle")).toBeNull();
     if (origin === "user") {
       await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Close card"]')!.click());
     } else {
@@ -502,7 +501,7 @@ it("keeps the microphone owner mounted while its composer bar is occluded", asyn
     events: [{ type: "interaction", request: { interactionId: "audio", type: "audio-record", payload: {} } }] };
   const client = { getUi: vi.fn(), cancel: vi.fn(), respond: vi.fn(async () => undefined) };
   const render = (hidden: boolean) => <I18nProvider language="en-US"><RecordingBarPortalContext.Provider value={{ target: dock, hidden }}>
-    <InterviewRecordingPanel hidden session={null} bar={<PluginCapabilityHost region="panel" calls={[call]} plugins={[plugin]} client={client} />} />
+    <PluginCapabilityHost region="panel" calls={[call]} plugins={[plugin]} client={client} />
   </RecordingBarPortalContext.Provider></I18nProvider>;
   try {
     await act(async () => root.render(render(false)));

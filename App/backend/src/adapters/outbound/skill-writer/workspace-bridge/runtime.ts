@@ -70,9 +70,13 @@ export interface OpenRuntimeSessionInput {
   workspaceRoot?: string | null;
   transition: "allow_legacy_rollover" | "resume_only";
   pinnedOwner?: boolean;
-  signal?: AbortSignal;
   adapterId?: string;
   profileId?: string;
+}
+
+interface RuntimeRequestOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface LoadedRuntimeSession extends RuntimeSession {
@@ -81,10 +85,13 @@ export interface LoadedRuntimeSession extends RuntimeSession {
   memoryVersion: number | null;
 }
 
-export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Promise<RuntimeConfig> {
-  const snapshot = objectValue(await readJson(configUrl));
+export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false, signal?: AbortSignal): Promise<RuntimeConfig> {
+  const snapshot = objectValue(await readJson(configUrl, signal));
+  signal?.throwIfAborted();
   const configPath = text(snapshot.memmy_config_path) || resolve(homedir(), ".memmy", "config.yaml");
-  const yaml = objectValue(YAML.parse(await readFile(configPath, "utf8").catch(() => "{}")));
+  const config = await readFile(configPath, { encoding: "utf8", signal }).catch(() => "{}");
+  signal?.throwIfAborted();
+  const yaml = objectValue(YAML.parse(config));
   const memory = objectValue(yaml.memmyMemory);
   const storage = objectValue(memory.storage);
   const legacyStorage = objectValue(yaml.storage);
@@ -97,11 +104,16 @@ export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Pr
   };
 }
 
-export async function openRuntimeSession(input: OpenRuntimeSessionInput): Promise<RuntimeSession | null> {
-  const config = await readRuntimeConfig(input.configUrl, input.pinnedOwner === true);
-  const client = new RuntimeHttpClient(config, input.signal);
+export async function openRuntimeSession(
+  input: OpenRuntimeSessionInput,
+  options: RuntimeRequestOptions = {},
+): Promise<RuntimeSession | null> {
+  const { signal } = options;
+  signal?.throwIfAborted();
+  const config = await readRuntimeConfig(input.configUrl, input.pinnedOwner === true, signal);
+  const client = new RuntimeHttpClient(config, options);
   const health = await client.get("/api/v1/health").catch(() => null);
-  input.signal?.throwIfAborted();
+  signal?.throwIfAborted();
   if (!health && input.pinnedOwner === true) return null;
   const features = objectValue(objectValue(health).features);
   const supportsV2 = numberArray(features.l3WorldModelProtocolVersions).includes(2);
@@ -110,6 +122,7 @@ export async function openRuntimeSession(input: OpenRuntimeSessionInput): Promis
   if (!supportsV2) return openLegacyRuntimeSession(client, config, input, adapterId, profileId);
 
   const resolvedWorkspaceRoot = input.workspaceRoot ? await canonicalWorkspaceRoot(input.workspaceRoot) : null;
+  signal?.throwIfAborted();
   const workspaceRoot = resolvedWorkspaceRoot && config.workspaceHostId ? resolvedWorkspaceRoot : null;
   const envelope = runtimeEnvelope(input.source, input.sessionKey, config.userId, null, adapterId, profileId);
   const workspaceUri = workspaceRoot ? normalizeWorkspaceUri(pathToFileURL(workspaceRoot).href) : null;
@@ -168,9 +181,12 @@ async function openLegacyRuntimeSession(
   };
 }
 
-export async function loadRuntimeL3(session: RuntimeSession, signal?: AbortSignal): Promise<LoadedRuntimeSession> {
+export async function loadRuntimeL3(
+  session: RuntimeSession,
+  options: RuntimeRequestOptions = {},
+): Promise<LoadedRuntimeSession> {
   if (session.protocol !== "v2") return { ...session, additionalContext: "", renderedContext: "", memoryVersion: null };
-  const client = new RuntimeHttpClient(session.config, signal);
+  const client = new RuntimeHttpClient(session.config, options);
   const envelope = runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId);
   const result = objectValue(await client.get(
     `/api/v1/l3-world-model/sessions/${encodeURIComponent(session.sessionId)}/context`,
@@ -218,9 +234,9 @@ export async function startRuntimeTurn(
   session: RuntimeSession,
   turnId: string,
   query: string,
-  signal?: AbortSignal,
+  options: RuntimeRequestOptions = {},
 ): Promise<Record<string, unknown>> {
-  const client = new RuntimeHttpClient(session.config, signal);
+  const client = new RuntimeHttpClient(session.config, options);
   const body = session.protocol === "v2"
     ? { ...runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId), sessionId: session.sessionId, turnId, query }
     : { source: session.source, adapterId: session.adapterId, requestId: `${session.source}-start:${turnId}`, sessionId: session.sessionId, turnId, query };
@@ -379,6 +395,7 @@ export async function readCursorHookSourceTurn(input: {
   }
   try {
     const diskValue = db.prepare("SELECT value FROM cursorDiskKV WHERE key = ?");
+    const diskChunks = db.prepare("SELECT value FROM cursorDiskKV WHERE key >= ? AND key < ? ORDER BY key");
     const parse = (key: string): unknown => {
       const row = diskValue.get(key) as { value?: unknown } | undefined;
       if (typeof row?.value !== "string") return undefined;
@@ -388,9 +405,26 @@ export async function readCursorHookSourceTurn(input: {
         return undefined;
       }
     };
+    /** Chunked rows of one key prefix, in order: Cursor 3.x splits a chat's header list this way. */
+    const parseChunks = (prefix: string): readonly unknown[] | undefined => {
+      const chunks = diskChunks.all(prefix, `${prefix.slice(0, -1)};`) as Array<{ value?: unknown }>;
+      const values: unknown[] = [];
+      for (const chunk of chunks) {
+        if (typeof chunk.value !== "string") continue;
+        try {
+          const parsed: unknown = JSON.parse(chunk.value);
+          if (Array.isArray(parsed)) values.push(...parsed);
+        } catch {
+          // A chunk this version cannot read is skipped; the rest still order the chat.
+        }
+      }
+      return values.length > 0 ? values : undefined;
+    };
     const source: CursorVscdbSource = {
       mainComposerIds: () => [input.conversationId],
       composerData: (composerId) => parse(`composerData:${composerId}`),
+      // Newer Cursor versions keep the header list in its own rows and leave `composerData` empty.
+      conversationHeaders: (composerId) => parseChunks(`composerConvHeaders:${composerId}:`),
       conversationHeaderChunk: (composerId, index) => parse(`composerConvHeaders:${composerId}:${String(index).padStart(6, "0")}`),
       bubble: (composerId, bubbleId) => parse(`bubbleId:${composerId}:${bubbleId}`)
     };
@@ -512,8 +546,25 @@ async function resolveDeepseekHarnessSessionFile(input: {
   return discovered.find((file) => file.sessionFilePath.includes(`${encoded}`))?.sessionFilePath;
 }
 
+export function createRuntimeDeadline(timeoutMs: number, parentSignal?: AbortSignal) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(parentSignal?.reason);
+  parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  if (parentSignal?.aborted) abortFromParent();
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException("The operation timed out", "TimeoutError"));
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+    },
+  };
+}
+
 class RuntimeHttpClient {
-  constructor(private readonly config: RuntimeConfig, private readonly signal?: AbortSignal) {}
+  constructor(private readonly config: RuntimeConfig, private readonly options: RuntimeRequestOptions = {}) {}
 
   async get(path: string, transport: { query?: Record<string, string>; headers?: Record<string, string> } = {}): Promise<unknown> {
     const url = new URL(path, `${this.config.endpoint.replace(/\/+$/u, "")}/`);
@@ -534,16 +585,19 @@ class RuntimeHttpClient {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
     if (this.config.token) headers.set("authorization", `Bearer ${this.config.token}`);
+    const { signal: callerSignal, timeoutMs = 45_000 } = this.options;
+    const deadline = createRuntimeDeadline(timeoutMs, callerSignal);
     let response: Response;
+    let textValue: string;
     try {
-      const timeout = AbortSignal.timeout(45_000);
-      const signal = this.signal ? AbortSignal.any([this.signal, timeout]) : timeout;
-      signal.throwIfAborted();
-      response = await fetch(url, { ...init, headers, signal });
+      response = await fetch(url, { ...init, headers, signal: deadline.signal });
+      textValue = await response.text();
     } catch (error) {
+      callerSignal?.throwIfAborted();
       throw new Error(`Memmy request to ${url} failed: ${formatErrorWithCause(error)}`, { cause: error });
+    } finally {
+      deadline.dispose();
     }
-    const textValue = await response.text();
     const parsed = textValue.trim() ? JSON.parse(textValue) : null;
     if (!response.ok) {
       const body = objectValue(parsed);
@@ -648,8 +702,8 @@ function hashText(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 24);
 }
 
-async function readJson(url: URL): Promise<unknown> {
-  const content = await readFile(url, "utf8").catch(() => "{}");
+async function readJson(url: URL, signal?: AbortSignal): Promise<unknown> {
+  const content = await readFile(url, { encoding: "utf8", signal }).catch(() => "{}");
   try {
     return JSON.parse(content);
   } catch {

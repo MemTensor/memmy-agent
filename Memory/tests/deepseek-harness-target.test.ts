@@ -1,8 +1,9 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeepseekHarnessSkillTarget } from "../src/agent-source/integration/deepseek-harness/target.js";
+import * as runtimeLoader from "../src/agent-source/integration/workspace-bridge/runtime-loader.js";
 
 let rootDirectory: string | undefined;
 
@@ -12,6 +13,27 @@ afterEach(async () => {
 });
 
 describe("DeepSeek Harness target configuration", () => {
+  it("keeps the installed entry point when loading the replacement bridge fails", async () => {
+    rootDirectory = await mkdtemp(join(tmpdir(), "memmy-dsh-target-"));
+    const pluginDirectory = join(rootDirectory, "profiles/node_modules/@memmy/memmy-memory");
+    await mkdir(pluginDirectory, { recursive: true });
+    const entryPath = join(pluginDirectory, "index.mjs");
+    const previousEntry = "export const name = 'previous-plugin';";
+    await writeFile(entryPath, previousEntry);
+    const unavailableBridge = vi.spyOn(runtimeLoader, "loadMemmyWorkspaceBridgeRuntimeAsset")
+      .mockRejectedValueOnce(new Error("bridge unavailable"));
+    try {
+      const target = createDeepseekHarnessSkillTarget({
+        rootDirectory,
+        memmyConfigPath: join(rootDirectory, "config.yaml")
+      });
+      await expect(target.installPlugin!("deepseek_harness")).rejects.toThrow("bridge unavailable");
+      await expect(readFile(entryPath, "utf8")).resolves.toBe(previousEntry);
+    } finally {
+      unavailableBridge.mockRestore();
+    }
+  });
+
   it("rejects malformed plugin config and accepts a structurally valid legacy config", async () => {
     rootDirectory = await mkdtemp(join(tmpdir(), "memmy-dsh-target-"));
     await mkdir(join(rootDirectory, "profiles"), { recursive: true });

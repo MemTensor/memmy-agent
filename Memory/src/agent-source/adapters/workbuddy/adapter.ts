@@ -94,7 +94,7 @@ export function createWorkbuddySourceAdapter(deps: CreateWorkbuddySourceAdapterD
             current: emittedMessages,
             total: emittedMessages
           });
-          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot);
+          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot, rawMessage.sessionTitle ?? null);
         }
       }
 
@@ -112,7 +112,8 @@ function toConversationMessage(
   sourceId: string,
   rawMessage: RawWorkbuddyMessage,
   discoveredWorkspacePath: string | null,
-  gitRoot: string | null
+  gitRoot: string | null,
+  sessionTitle: string | null
 ): ConversationMessage {
   return {
     messageId: rawMessage.messageId,
@@ -123,6 +124,7 @@ function toConversationMessage(
     createdAt: rawMessage.createdAt,
     workspacePath: rawMessage.workspacePath ?? discoveredWorkspacePath,
     gitRoot,
+    ...(sessionTitle ? { sessionTitle } : {}),
     rawMeta: Object.freeze({ eventType: rawMessage.eventType, ...(rawMessage.toolName ? { toolName: rawMessage.toolName } : {}) })
   };
 }

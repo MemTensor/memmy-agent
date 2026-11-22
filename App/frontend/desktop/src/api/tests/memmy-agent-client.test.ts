@@ -411,7 +411,7 @@ describe("memmy-agent client", () => {
       fetchFn: fetchMock as typeof fetch
     });
 
-    await expect(client.openArtifact("/Users/yuan/result.png", "websocket:chat-1")).resolves.toBeUndefined();
+    await expect(client.openArtifact("/Users/yuan/result.png", { sessionKey: "websocket:chat-1" })).resolves.toBeUndefined();
     expect(calls).toEqual([
       { path: "/webui/bootstrap", auth: undefined },
       { path: "/api/webui/artifacts/open", auth: "Bearer token-old" },
@@ -439,7 +439,7 @@ describe("memmy-agent client", () => {
       fetchFn: fetchMock as typeof fetch
     });
 
-    await expect(client.resolveArtifact("/Users/yuan/missing.png", "websocket:chat-1")).rejects.toMatchObject({ status: 404 });
+    await expect(client.resolveArtifact("/Users/yuan/missing.png", { sessionKey: "websocket:chat-1" })).rejects.toMatchObject({ status: 404 });
     expect(paths).toEqual([
       "/webui/bootstrap",
       "/api/webui/artifacts/resolve"
@@ -728,21 +728,21 @@ describe("memmy-agent client", () => {
     });
     const client = createMemmyAgentClient({ baseUrl: "http://127.0.0.1:18980", clientId: "frontend-test", fetchFn: fetchMock as typeof fetch });
 
-    await expect(client.resolveArtifact("/Users/yuan/result.png", "websocket:chat-1")).resolves.toEqual({
+    await expect(client.resolveArtifact("/Users/yuan/result.png", { sessionKey: "websocket:chat-1" })).resolves.toEqual({
       ok: true,
       path: "/Users/yuan/result.png",
       name: "result.png",
       kind: "image",
       media_url: "http://127.0.0.1:18980/api/media/signed"
     });
-    await expect(client.resolveArtifact("/Users/yuan/.memmy/workspace", "websocket:chat-1")).resolves.toEqual({
+    await expect(client.resolveArtifact("/Users/yuan/.memmy/workspace", { sessionKey: "websocket:chat-1" })).resolves.toEqual({
       ok: true,
       path: "/Users/yuan/.memmy/workspace",
       name: "workspace",
       kind: "directory"
     });
-    await expect(client.revealArtifact("/Users/yuan/result.png", "websocket:chat-1")).resolves.toBeUndefined();
-    await expect(client.openArtifact("/Users/yuan/result.png", "websocket:chat-1")).resolves.toBeUndefined();
+    await expect(client.revealArtifact("/Users/yuan/result.png", { sessionKey: "websocket:chat-1" })).resolves.toBeUndefined();
+    await expect(client.openArtifact("/Users/yuan/result.png", { sessionKey: "websocket:chat-1" })).resolves.toBeUndefined();
     expect(calls.map((call) => call.path)).toEqual([
       "/webui/bootstrap",
       "/api/webui/artifacts/resolve",

@@ -23,7 +23,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # The CUDA execution-provider artifact onnxruntime-node downloads is no longer published;
+      # Memory's embedder pins device: "cpu", so the bundled CPU binaries suffice.
       - run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
       - run: npm run typecheck -w @memmy/memory
       - run: npm test -w @memmy/memory
       - run: npm run build -w @memmy/migrations
@@ -56,6 +60,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
       - name: Resolve version
         id: version
         shell: bash
