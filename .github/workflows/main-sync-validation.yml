@@ -72,6 +72,10 @@ jobs:
           node-version: 22
           cache: npm
       - name: Install declared workspace and Agent dependencies
+        env:
+          # The CUDA execution-provider artifact onnxruntime-node downloads is no longer published;
+          # Memory's embedder pins device: "cpu", so the bundled CPU binaries suffice.
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
         run: |-
           npm ci
           npm ci --prefix App/memmy-agent

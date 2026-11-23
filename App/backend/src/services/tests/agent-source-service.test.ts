@@ -722,6 +722,67 @@ describe("agent source service", () => {
       },
     });
   });
+
+  it("refreshes the memory hook before syncing the project hook on start-up", async () => {
+    // 升级后第一次启动必须先让记忆钩子换成不含项目指令的版本，项目钩子这时才装得上；
+    // 顺序反了，这次启动期间本机项目指令会缺一段。
+    const repository = createRepository();
+    repository.upsertSource({
+      sourceId: "cursor",
+      displayName: "Cursor",
+      dataPath: "/tmp/cursor",
+      builtin: true
+    });
+    const order: string[] = [];
+    const service = createService({
+      repository,
+      adapters: [createFakeAdapter("cursor")],
+      skillDistributionService: {
+        async install() {
+          return undefined;
+        },
+        async uninstall() {
+          return undefined;
+        },
+        async installPlugin() {
+          return undefined;
+        },
+        async uninstallPlugin() {
+          return undefined;
+        },
+        async refreshInstalledSkill() {
+          order.push("memory-hook");
+          return true;
+        },
+        async ensureProjectSkills() {
+          order.push("project-skill");
+          return ["cursor"];
+        },
+        async installProjectSkill() {
+          return undefined;
+        },
+        async removeProjectSkill() {
+          return undefined;
+        },
+        async removeProjectSkills() {
+          return [];
+        },
+        async hasProjectSkill() {
+          return true;
+        },
+        async syncProjectHooks() {
+          order.push("project-hook");
+          return ["cursor"];
+        }
+      } as never
+    });
+
+    const refreshed = await service.refreshInstalledSkills();
+
+    expect(order).toEqual(["memory-hook", "project-skill", "project-hook"]);
+    // 这三步的产出都算进「这次启动刷新了什么」，界面与日志只看这一份。
+    expect(refreshed).toEqual(["cursor"]);
+  });
 });
 
 function createService(

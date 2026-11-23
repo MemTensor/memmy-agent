@@ -99,7 +99,9 @@ export function ThreadTabPreview(props: { tab: Extract<ThreadPanelTab, { type: "
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
     // Change previews reload when Git status arrives. File edits keep their own draft.
-  }, [tab, attempt, environmentRevision, props.revision]);
+    // The artifact client also changes scope: a draft task previews project files, and once its first
+    // message creates a session the same open tab has to resolve again under the session.
+  }, [tab, attempt, environmentRevision, props.revision, context.artifactClient]);
 
   const filePath = result.path ?? (tab.type === "change" ? tab.absolutePath ?? tab.path : tab.path ?? null);
   const fileActions = Boolean(context.artifactClient && filePath);

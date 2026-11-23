@@ -21,6 +21,8 @@ export interface NotificationInput {
   onAction?: () => void;
   /** Side effect to run when this notification is dismissed (e.g. refresh balance). */
   onClose?: () => void;
+  /** When set, the notification dismisses itself after this many milliseconds. */
+  autoDismissMs?: number;
 }
 
 interface NotificationItem extends NotificationInput {
@@ -48,8 +50,14 @@ export function NotificationCenterProvider(props: { children: ReactNode }) {
   const { t } = useTranslation();
   const [items, setItems] = useState<NotificationItem[]>([]);
   const closeCallbacksRef = useRef(new Map<string, (() => void) | undefined>());
+  const dismissTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   const dismiss = useCallback((id: string) => {
+    const timer = dismissTimersRef.current.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      dismissTimersRef.current.delete(id);
+    }
     if (!closeCallbacksRef.current.has(id)) {
       return;
     }
@@ -63,8 +71,14 @@ export function NotificationCenterProvider(props: { children: ReactNode }) {
     const id = nextNotificationId();
     closeCallbacksRef.current.set(id, input.onClose);
     setItems((current) => [...current, { ...input, id }]);
+    if (input.autoDismissMs !== undefined) {
+      dismissTimersRef.current.set(
+        id,
+        setTimeout(() => dismiss(id), input.autoDismissMs)
+      );
+    }
     return id;
-  }, []);
+  }, [dismiss]);
 
   const value = useMemo<NotificationCenterValue>(() => ({ notify, dismiss }), [notify, dismiss]);
 
@@ -109,4 +123,9 @@ export function useNotificationCenter(): NotificationCenterValue {
     throw new Error("useNotificationCenter must be used within NotificationCenterProvider");
   }
   return value;
+}
+
+/** 可选版本：不在 Provider 里时返回 null，测试或独立渲染的页面不必为此包一层。 */
+export function useOptionalNotificationCenter(): NotificationCenterValue | null {
+  return useContext(NotificationCenterContext);
 }

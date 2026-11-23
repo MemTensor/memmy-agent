@@ -16,6 +16,32 @@ import {
 const t = "2099-01-01T10:00:00.000Z";
 
 describe("review regressions for native source turns", () => {
+  it("keeps declared Cursor chunks authoritative while retaining legacy external-header recovery", async () => {
+    const headers = [{ bubbleId: "u", type: 1 }, { bubbleId: "a", type: 2 }];
+    const bubbles: Record<string, Record<string, unknown>> = {
+      u: { type: 1, text: "Inspect the configuration.", requestId: "req", createdAt: t },
+      a: { type: 2, text: "Configuration inspected.", createdAt: t }
+    };
+    let declared = true, damaged = false, legacyReads = 0;
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => ["c"],
+      composerData: () => ({ fullConversationHeadersOnly: [],
+        ...(declared ? { headerLog: { chunkSize: 1, chunkCount: 2, count: 2 } } : {}) }),
+      conversationHeaderChunk: (_id, index) => damaged && index === 1 ? undefined : [headers[index]],
+      conversationHeaders: () => { legacyReads++; return headers; },
+      bubble: (_id, id) => bubbles[id]
+    };
+    expect((await readCursorSourceTurn(source, { conversationId: "c", requestId: "req" })).turn)
+      .toMatchObject({ query: "Inspect the configuration.", answer: "Configuration inspected." });
+    damaged = true;
+    expect((await readCursorSourceTurn(source, { conversationId: "c", requestId: "req" })).turn).toBeNull();
+    expect(legacyReads).toBe(0);
+    declared = false;
+    expect((await readCursorSourceTurn(source, { conversationId: "c", requestId: "req" })).turn)
+      .toMatchObject({ query: "Inspect the configuration.", answer: "Configuration inspected." });
+    expect(legacyReads).toBeGreaterThan(0);
+  });
+
   it("lets cancelled skips commit a watermark and keeps incomplete skips retryable", () => {
     expect(sourceTurnSkipBlocksWatermark("turn_cancelled")).toBe(false);
     expect(sourceTurnSkipBlocksWatermark("turn_incomplete")).toBe(true);
@@ -150,6 +176,44 @@ describe("review regressions for native source turns", () => {
     };
     const result = await readCursorSourceTurn(source, { conversationId: "c", requestId: "req" });
     expect(result.turn?.answer).toBe("Configuration inspected.");
+  });
+
+  it("reads a Cursor turn whose header list lives in composerConvHeaders rows", async () => {
+    const bubbles: Record<string, Record<string, unknown>> = {
+      u: { type: 1, text: "Implement the configuration reader.", createdAt: t, requestId: "req" },
+      a: { type: 2, text: "Configuration inspected.", createdAt: t }
+    };
+    const headers = Object.entries(bubbles).map(([bubbleId, bubble]) => ({ bubbleId, type: bubble.type }));
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => ["c"],
+      // Newer Cursor versions keep the chat's inline list empty and split the headers over their own rows.
+      composerData: () => ({ status: "completed", fullConversationHeadersOnly: [] }),
+      conversationHeaders: () => headers,
+      bubble: (_composerId, id) => bubbles[id]
+    };
+    const result = await readCursorSourceTurn(source, { conversationId: "c", requestId: "req" });
+    expect(result.turn).toMatchObject({
+      conversationId: "c",
+      turnId: "u",
+      query: "Implement the configuration reader.",
+      answer: "Configuration inspected."
+    });
+  });
+
+  it("prefers the inline header list while Cursor still writes one", async () => {
+    const bubbles: Record<string, Record<string, unknown>> = {
+      inline: { type: 1, text: "Inline header list.", createdAt: t, requestId: "req" },
+      answer: { type: 2, text: "Inline answer.", createdAt: t },
+      stale: { type: 1, text: "Chunked header list.", createdAt: "2099-01-01T10:01:00.000Z", requestId: "req2" }
+    };
+    const source: CursorVscdbSource = {
+      mainComposerIds: () => ["c"],
+      composerData: () => ({ status: "completed", fullConversationHeadersOnly: [{ bubbleId: "inline", type: 1 }, { bubbleId: "answer", type: 2 }] }),
+      conversationHeaders: () => [{ bubbleId: "stale", type: 1 }],
+      bubble: (_composerId, id) => bubbles[id]
+    };
+    const result = await readCursorSourceTurn(source, { conversationId: "c", requestId: "req" });
+    expect(result.turn).toMatchObject({ query: "Inline header list.", answer: "Inline answer." });
   });
 
   it("keeps an OpenCode turn on the user message agent after session.agent changes", async () => {

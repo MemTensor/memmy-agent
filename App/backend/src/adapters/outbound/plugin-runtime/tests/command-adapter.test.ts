@@ -10,6 +10,7 @@ import {
   createCommandPluginAdapter,
   resolveCommandRuntimeDependencies,
   resolvePluginEnvironment,
+  type CreateCommandPluginAdapterOptions,
   selectOfficeCjkFontFiles
 } from "../command-adapter.js";
 import type { PluginRuntimeContext } from "../types.js";
@@ -73,6 +74,22 @@ async function collect(iterable: AsyncIterable<CapabilityEvent>): Promise<Capabi
 }
 
 describe("CommandPluginAdapter", () => {
+  it.each(["linux", "darwin", "win32"] as const)("passes only approved canonical input roots on %s", async platform => {
+    const ctx = context();
+    const uploads = join(root!, "uploads"); mkdirSync(uploads);
+    const permission = { type: "host-service" as const, services: ["file-input"] };
+    ctx.plugin.manifest.permissions = [permission];
+    const adapter = createCommandPluginAdapter({ platform, fileInputRoots: [uploads],
+      buildLaunch: async () => ({ command: process.execPath, args: [], cwd: root! }) });
+    const denied = await adapter.activate(ctx);
+    try { expect(JSON.parse(denied.env.MEMMY_PLUGIN_INPUT_ROOTS)).toEqual([]); }
+    finally { await adapter.deactivate(denied); }
+    ctx.plugin.approvedPermissions = [permission];
+    const granted = await adapter.activate(ctx);
+    try { expect(JSON.parse(granted.env.MEMMY_PLUGIN_INPUT_ROOTS)).toEqual([realpathSync(uploads)]); }
+    finally { await adapter.deactivate(granted); }
+  });
+
   it("stops a silent plugin independently of its blocked event loop", async () => {
     const adapter = createCommandPluginAdapter({ buildLaunch: async () => ({ command: process.execPath, args: ["-e", "while(true) {}"], cwd: root! }) });
     const ctx = context("ndjson");
@@ -181,20 +198,26 @@ describe("CommandPluginAdapter", () => {
             env: testCase.provisioned ? {} : { MEMMY_OFFICE_TOOLS: JSON.stringify(tools), MEMMY_OFFICE_RENDERER_RESOLVED: "1" },
             ...(!testCase.provisioned ? { officeRendererResolved: true } : {})
           };
-          const adapter = createCommandPluginAdapter({ pluginDataRoot: dataRoot, officeRuntimeInstaller: { ensure } });
+          const spawnFn = vi.fn(spawn);
+          const adapter = createCommandPluginAdapter({ pluginDataRoot: dataRoot, officeRuntimeInstaller: { ensure }, spawnFn });
           const session = await adapter.activate(pluginContext);
           try {
-            const profile = (session as typeof session & { launch: { args: string[] } }).launch.args[1] ?? "";
+            const events = await collect(adapter.invoke(session, {
+              callId: testCase.name, pluginId: testCase.id, capabilityId: "run", conversationId: "test", input: {}
+            }));
+            // Office prepares in the background: inspect the actual per-call sandbox,
+            // rather than the deliberately unprovisioned activation-time launch.
+            const args = spawnFn.mock.calls.at(-1)?.[1];
+            const profile = Array.isArray(args) ? String(args[1] ?? "") : "";
             const services = [...profile.matchAll(/\(global-name\s+"([^"]+)"\)/gu)].map(match => match[1]);
             expect(services, testCase.name).toEqual(testCase.allowed
               ? ["com.apple.coreservices.launchservicesd", "com.apple.windowserver.active"] : []);
             expect(profile).not.toMatch(/global-name-prefix|local-name|xpc-service-name|system-graphics|\(allow\s+mach-lookup\s*\)/u);
-            const events = await collect(adapter.invoke(session, {
-              callId: testCase.name, pluginId: testCase.id, capabilityId: "run", conversationId: "test", input: {}
-            }));
-            expect(events).toHaveLength(1);
-            expect(events[0]?.type).toBe("result");
-            const output = (events[0] as Extract<CapabilityEvent, { type: "result" }>).output as Record<string, unknown>;
+            expect(events.every(event => event.type === "progress" || event.type === "result")).toBe(true);
+            const results = events.filter((event): event is Extract<CapabilityEvent, { type: "result" }> => event.type === "result");
+            expect(results).toHaveLength(1);
+            expect(results[0]?.type).toBe("result");
+            const output = results[0]!.output as Record<string, unknown>;
             expect(output, testCase.name).toMatchObject({
               launchServices: testCase.allowed, windowServer: testCase.allowed,
               bound: true, external: false, network: false, readOutside: false, writeOutside: false
@@ -550,6 +573,28 @@ describe("CommandPluginAdapter", () => {
     expect(networkEnabled).toBe(true);
   });
 
+  it.each(["linux", "darwin", "win32"] as const)("does not fail activation when an optional file-input root is missing on %s", async platform => {
+    const pluginContext = context();
+    const existingRoot = realpathSync(root!);
+    const missingRoot = join(root!, "media");
+    const permission = { type: "host-service" as const, services: ["file-input"] };
+    pluginContext.plugin.manifest.permissions = [permission];
+    pluginContext.plugin.approvedPermissions = [permission];
+    const adapter = createCommandPluginAdapter({
+      platform,
+      fileInputRoots: [missingRoot, existingRoot],
+      buildLaunch: async () => ({ command: process.execPath, args: [], cwd: root! })
+    });
+
+    const session = await adapter.activate(pluginContext);
+    try {
+      const env = (session as typeof session & { env: Record<string, string> }).env;
+      expect(JSON.parse(env.MEMMY_PLUGIN_INPUT_ROOTS)).toEqual([existingRoot]);
+    } finally {
+      await adapter.deactivate(session);
+    }
+  });
+
   it("rejects commands outside the artifact", async () => {
     const pluginContext = context();
     pluginContext.plugin.manifest.permissions = [];
@@ -680,14 +725,62 @@ describe("CommandPluginAdapter", () => {
 
   it("resolves the default runtime route against the registry origin, including bases with /api", async () => {
     const pluginContext = context();
+    pluginContext.plugin.id = pluginContext.plugin.manifest.id = "office";
     vi.stubEnv("MEMMY_PLUGIN_REGISTRY_URL", "http://127.0.0.1:19391/api");
     vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
     vi.stubEnv("MEMMY_OFFICE_RUNTIME_CATALOG_URL", "");
     delete process.env.MEMMY_OFFICE_RUNTIME_CATALOG_URL;
     const fetchFn = vi.fn(async (_input: unknown) => new Response("not provisioned", { status: 404 })); vi.stubGlobal("fetch", fetchFn);
     pluginContext.plugin.manifest.runtime.config = { ...pluginContext.plugin.manifest.runtime.config, runtimeDependencies: ["office"] };
-    await expect(createCommandPluginAdapter({ platform: "win32", pluginDataRoot: join(root!, "plugin-data") }).activate(pluginContext)).rejects.toThrow(/HTTP 404/);
+    const adapter = createCommandPluginAdapter({ platform: "win32", pluginDataRoot: join(root!, "plugin-data") });
+    const session = await adapter.activate(pluginContext);
+    expect(fetchFn).not.toHaveBeenCalled();
+    const status = adapter.invoke(session, { callId: "status", pluginId: "office", capabilityId: "office_status", conversationId: "test", input: {} })[Symbol.asyncIterator]();
+    expect((await status.next()).value).toMatchObject({ type: "progress", phase: "runtime-preparation", runtimeStage: "preparing", message: "Preparing Office runtime…", cancellable: true });
+    await expect(status.next()).rejects.toMatchObject({ code: "plugin_runtime_error", message: expect.stringContaining("Retry") });
     expect(String(fetchFn.mock.calls[0]?.[0])).toBe(`http://127.0.0.1:19391/api/v1/plugins/office/runtimes/win32-${process.arch}`);
+    await adapter.deactivate(session);
+  });
+
+  it("enables Office before preparation, shares the download, and grants renderer access on the prepared call", async () => {
+    const ctx = context();
+    ctx.plugin.id = ctx.plugin.manifest.id = "office";
+    ctx.plugin.manifest.runtime.config = { ...ctx.plugin.manifest.runtime.config, runtimeDependencies: ["office"] };
+    vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+    const runtimeRoot = realpathSync(root!);
+    const renderer = join(runtimeRoot, "runtime/plugin");
+    const tools = { soffice: renderer, pdfinfo: renderer, pdftoppm: renderer, pdftotext: renderer };
+    let finish!: () => void;
+    const ensure = vi.fn(() => new Promise<{ root: string; version: string; tools: typeof tools }>(resolve => {
+      finish = () => resolve({ root: runtimeRoot, version: "test", tools });
+    }));
+    const spawnFn = vi.fn(spawn);
+    const buildLaunch = vi.fn<NonNullable<CreateCommandPluginAdapterOptions["buildLaunch"]>>(async () => ({
+      command: process.execPath, args: ["-e", "console.log(JSON.stringify({tools:JSON.parse(process.env.MEMMY_OFFICE_TOOLS||'{}')}))"], cwd: root!
+    }));
+    const adapter = createCommandPluginAdapter({ platform: "darwin", officeRuntimeInstaller: { ensure }, buildLaunch, spawnFn });
+    const session = await adapter.activate(ctx);
+    expect(ensure).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(ensure).toHaveBeenCalledTimes(1));
+    const call = { callId: "create", pluginId: "office", capabilityId: "office_create", conversationId: "test", input: { format: "xlsx" } };
+    expect(await collect(adapter.invoke(session, call))).toEqual([{ type: "result", output: { tools: {} } }]);
+    const renderCall = { ...call, callId: "render", capabilityId: "office_render" };
+    const waiting = adapter.invoke(session, renderCall)[Symbol.asyncIterator]();
+    const cancelled = adapter.invoke(session, { ...renderCall, callId: "cancelled" })[Symbol.asyncIterator]();
+    expect((await waiting.next()).value).toMatchObject({ type: "progress", cancellable: true });
+    expect((await cancelled.next()).value).toMatchObject({ type: "progress", cancellable: true });
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+    await adapter.cancel!(session, "cancelled");
+    await expect(cancelled.next()).rejects.toMatchObject({ code: "plugin_cancelled" });
+    const result = waiting.next();
+    finish();
+    expect((await result).value).toEqual({ type: "result", output: { tools } });
+    await waiting.next();
+    expect(buildLaunch.mock.calls.at(-1)?.[3]).toMatchObject({
+      executableRoots: [runtimeRoot]
+    });
+    expect(ensure).toHaveBeenCalledTimes(1);
+    await adapter.deactivate(session);
   });
 
   it("prepares TeX from the literature registry in the background without failing activation on HTTP 404", async () => {
@@ -716,6 +809,55 @@ describe("CommandPluginAdapter", () => {
       environment: { MEMMY_TEX_CACHE_ROOT: join(root!, "tex-cache"), MEMMY_TEX_FONTSET: "fandol" } };
     return { ctx, resolve, runtime, finish: () => finish(runtime) };
   }
+
+  it("combines prepared Office and TeX grants in the same call without losing either runtime", async () => {
+    const ctx = context();
+    ctx.plugin.id = ctx.plugin.manifest.id = "office";
+    ctx.plugin.manifest.runtime.config = { ...ctx.plugin.manifest.runtime.config, runtimeDependencies: ["office", "texlive"] };
+    vi.stubEnv("MEMMY_OFFICE_RUNTIME_PREFER_MANAGED", "1");
+    const runtimeRoot = realpathSync(root!);
+    const renderer = join(runtimeRoot, "runtime/plugin");
+    const tools = { soffice: renderer, pdfinfo: renderer, pdftoppm: renderer, pdftotext: renderer };
+    let finishOffice!: () => void;
+    const ensure = vi.fn(() => new Promise<{ root: string; version: string; tools: typeof tools }>(resolve => {
+      finishOffice = () => resolve({ root: runtimeRoot, version: "test", tools });
+    }));
+    const tex = { pathEntries: [join(runtimeRoot, "tex/bin")], readRoots: [join(runtimeRoot, "tex")],
+      executableRoots: [join(runtimeRoot, "tex")], environment: { MEMMY_TEX_CACHE_ROOT: join(runtimeRoot, "tex-cache"), MEMMY_TEX_FONTSET: "fandol" } };
+    let finishTex!: () => void;
+    const resolveTex = vi.spyOn(texliveRuntime, "resolveTexliveRuntime").mockImplementation(() => new Promise(resolve => {
+      finishTex = () => resolve(tex);
+    }));
+    const buildLaunch = vi.fn<NonNullable<CreateCommandPluginAdapterOptions["buildLaunch"]>>(async () => ({
+      command: process.execPath, args: ["-e", "console.log(JSON.stringify({tools:JSON.parse(process.env.MEMMY_OFFICE_TOOLS||'{}'),fontset:process.env.MEMMY_TEX_FONTSET,path:process.env.PATH}))"], cwd: root!
+    }));
+    const spawnFn = vi.fn(spawn);
+    const adapter = createCommandPluginAdapter({ platform: "darwin", officeRuntimeInstaller: { ensure }, buildLaunch, spawnFn });
+    const session = await adapter.activate(ctx);
+    const events: CapabilityEvent[] = [];
+    const pending = (async () => {
+      for await (const event of adapter.invoke(session, { callId: "both", pluginId: "office", capabilityId: "office_render", conversationId: "test", input: {} })) events.push(event);
+    })();
+    try {
+      await vi.waitFor(() => { expect(ensure).toHaveBeenCalledTimes(1); expect(resolveTex).toHaveBeenCalledTimes(1); });
+      expect(spawnFn).not.toHaveBeenCalled();
+      finishOffice();
+      await vi.waitFor(() => expect(events.filter(event => event.type === "progress").length).toBeGreaterThanOrEqual(2));
+      expect(spawnFn).not.toHaveBeenCalled();
+      finishTex();
+      await pending;
+      expect(events.at(-1)).toMatchObject({ type: "result", output: { tools, fontset: "fandol", path: expect.stringContaining(tex.pathEntries[0]!) } });
+      expect(buildLaunch.mock.calls.at(-1)?.[3]).toMatchObject({
+        readRoots: expect.arrayContaining([runtimeRoot, ...tex.readRoots]),
+        executableRoots: expect.arrayContaining([runtimeRoot, ...tex.executableRoots]),
+        officeRendererResolved: true
+      });
+    } finally {
+      finishOffice?.(); finishTex?.();
+      await adapter.deactivate(session);
+      await pending.catch(() => undefined);
+    }
+  });
 
   it("enables immediately, allows ordinary calls during download, and joins preparation before rendering with fresh sandbox roots", async () => {
     const f = deferredTexContext();

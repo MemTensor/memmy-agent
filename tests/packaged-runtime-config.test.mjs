@@ -459,6 +459,24 @@ describe("packaged desktop runtime configuration", { timeout: 20_000 }, () => {
     });
     expect(good.status, good.stderr).toBe(0);
 
+    const projectHookRuntimePath =
+      "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/project-hook/memmy-project-runtime.mjs";
+    const withoutProjectHookRuntimeAsar = await createAsarFixture(
+      root,
+      "without-project-hook-runtime",
+      "1.0.8",
+      false,
+      true,
+      [[projectHookRuntimePath, null]],
+    );
+    const withoutProjectHookRuntime = spawnSync(
+      process.execPath,
+      [verifier, ...verifierArgs(withoutProjectHookRuntimeAsar, "1.0.8")],
+      { encoding: "utf8" },
+    );
+    expect(withoutProjectHookRuntime.status).not.toBe(0);
+    expect(withoutProjectHookRuntime.stderr).toContain(projectHookRuntimePath);
+
     const missingAgentSourceCoreAsar = await createAsarFixture(
       root,
       "without-agent-source-core",
@@ -833,6 +851,12 @@ async function createAsarFixture(
   );
   mkdirSync(dirname(lifecycleSidecar), { recursive: true });
   writeFileSync(lifecycleSidecar, "export {};\n");
+  const projectHookRuntime = join(
+    source,
+    "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/project-hook/memmy-project-runtime.mjs",
+  );
+  mkdirSync(dirname(projectHookRuntime), { recursive: true });
+  writeFileSync(projectHookRuntime, "export {};\n");
   for (const [relativePath, contents] of extraFiles) {
     const targetPath = join(source, relativePath);
     if (contents === null) { rmSync(targetPath, { force: true }); continue; }

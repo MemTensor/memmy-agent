@@ -309,13 +309,19 @@ describe("external browser bridge", () => {
     const ready = nextMessage(socket);
     socket.send(JSON.stringify({ type: "hello", browser: "edge" }));
     await ready;
+    // A pong acknowledges earlier messages on this ordered WebSocket.
+    const messagesProcessed = async () => {
+      const pong = nextMessage(socket);
+      socket.send(JSON.stringify({ type: "ping" }));
+      await expect(pong).resolves.toEqual({ type: "pong" });
+    };
     socket.send(JSON.stringify({ type: "tab_status", browser: "edge", tabId: 7,
       title: "百度", url: "https://www.baidu.com/", status: "attach_failed", reason: "调试会话占用" }));
     socket.send(JSON.stringify({ type: "tab_status", browser: "edge", tabId: 8,
       title: "设置", url: "edge://extensions/", status: "unsupported", reason: "内部页面不支持" }));
     socket.send(JSON.stringify({ type: "tab_status", browser: "edge", tabId: 9,
       title: "未声明", url: "https://example.test/", status: "ready" }));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await messagesProcessed();
     expect(bridge.listConnected()).toEqual(["edge"]);
     expect(bridge.listClaims()).toEqual([]);
     expect(bridge.listTabStatuses()).toMatchObject([
@@ -326,11 +332,11 @@ describe("external browser bridge", () => {
       title: "百度", url: "https://www.baidu.com/" }));
     socket.send(JSON.stringify({ type: "tab_status", browser: "edge", tabId: 7,
       title: "百度", url: "https://www.baidu.com/", status: "ready", reason: "已就绪" }));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await messagesProcessed();
     expect(bridge.listClaims()).toHaveLength(1);
     expect(bridge.listTabStatuses().find(tab => tab.tabId === 7)?.status).toBe("ready");
     socket.send(JSON.stringify({ type: "tab_removed", tabId: 7 }));
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await messagesProcessed();
     expect(bridge.listClaims()).toEqual([]);
     expect(bridge.listTabStatuses()).toHaveLength(1);
   });

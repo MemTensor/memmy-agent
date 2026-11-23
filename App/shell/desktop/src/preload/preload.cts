@@ -112,6 +112,10 @@ interface MemmyPreloadApi {
   setPetWindow(enabled: boolean, target?: { route?: string; hash?: string; agentChatId?: string; petIntent?: "user" }): Promise<void>;
   hidePetWindow(): Promise<void>;
   onRouteTargetRequest(callback: (target: { route?: string; hash?: string; agentChatId?: string }) => void): () => void;
+  /** 浏览器里的邀请链接用 memmy://invite/<code> 唤起桌面端，界面收到邀请码后弹「加入项目」。 */
+  onInviteLink(callback: (code: string) => void): () => void;
+  /** 取走界面就绪前收到的邀请（冷启动时链接比界面先到）。 */
+  takeInviteLinks(): Promise<string[]>;
   onEmbeddedBrowserOpen(callback: (url: string, owner?: { scopeKey?: string; sourceGuestId?: number }) => void): () => void;
   onEmbeddedBrowserClose(callback: (tabId: number) => void): () => void;
   copyEmbeddedBrowserTabMention(tabId: number): Promise<void>;
@@ -455,6 +459,22 @@ const memmyPreloadApi: MemmyPreloadApi = {
     };
     ipcRenderer.on("memmy:route-target-request", listener);
     return () => ipcRenderer.removeListener("memmy:route-target-request", listener);
+  },
+
+  onInviteLink(callback: (code: string) => void): () => void {
+    const listener = (_event: IpcRendererEvent, code: unknown) => {
+      // 主进程已经校验过格式，这里再挡一次：只有 16–32 位邀请码字符才交给界面。
+      if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{16,32}$/.test(code)) return;
+      callback(code);
+    };
+    ipcRenderer.on("memmy:open-invite", listener);
+    return () => ipcRenderer.removeListener("memmy:open-invite", listener);
+  },
+
+  async takeInviteLinks(): Promise<string[]> {
+    const pending = await ipcRenderer.invoke("memmy:take-invite-links");
+    if (!Array.isArray(pending)) return [];
+    return pending.filter((code): code is string => typeof code === 'string' && /^[A-Za-z0-9_-]{16,32}$/.test(code));
   },
 
   onEmbeddedBrowserOpen(callback: (url: string, owner?: { scopeKey?: string; sourceGuestId?: number }) => void): () => void {
