@@ -37,6 +37,18 @@ function makeAutoCompact({
 }
 
 describe("AutoCompact", () => {
+  it("does not read sessions when idle compaction is disabled", () => {
+    const sessions = { listSessions: vi.fn(() => []) };
+    const schedule = vi.fn();
+    const compact = makeAutoCompact({ ttl: 0, sessions });
+
+    compact.checkExpired(schedule);
+    compact.checkExpired(schedule);
+
+    expect(sessions.listSessions).not.toHaveBeenCalled();
+    expect(schedule).not.toHaveBeenCalled();
+  });
+
   it("detects expiration boundaries and formats summaries", () => {
     const ac = new AutoCompact(new SessionManager(tmpDir()), {}, 15);
     const now = new Date("2026-01-01T12:00:00.000Z");
