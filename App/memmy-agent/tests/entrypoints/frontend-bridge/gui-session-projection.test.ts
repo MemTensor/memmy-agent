@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../../src/core/session/manager.js";
 import {
   fromGuiChatId,
@@ -41,6 +41,78 @@ afterEach(() => {
 });
 
 describe("GuiSessionProjection", () => {
+  it("reuses unchanged disk records and reloads only the session another process saves", () => {
+    const { root, sessions: writer } = createSessions();
+    const changed = createVisibleSession(writer, root, "cli:changed");
+    createVisibleSession(writer, root, "cli:unchanged");
+    writer.save(writer.getOrCreate("cli:hidden"));
+    const reader = new SessionManager(writer.root);
+    const projection = new GuiSessionProjection(reader);
+    const read = vi.spyOn(fs, "readFileSync");
+
+    expect(projection.snapshot()).toHaveLength(2);
+    read.mockClear();
+    expect(projection.snapshot()).toHaveLength(2);
+    expect(projection.snapshot()).toHaveLength(2);
+    expect(read).not.toHaveBeenCalled();
+
+    changed.metadata.title = "Updated externally";
+    writer.save(changed);
+    read.mockClear();
+    expect(projection.snapshot().find((row) => row.title === "Updated externally")).toBeDefined();
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("detects same-size external rewrites with a preserved modification time", () => {
+    const { root, sessions: writer } = createSessions();
+    const session = createVisibleSession(writer, root, "cli:rewrite");
+    session.metadata.title = "old title";
+    writer.save(session);
+    const reader = new SessionManager(writer.root);
+    const projection = new GuiSessionProjection(reader);
+    expect(projection.snapshot()[0]?.title).toBe("old title");
+    const file = writer.pathFor(session.key);
+    const stat = fs.statSync(file);
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("old title", "new title"));
+    fs.utimesSync(file, stat.atime, stat.mtime);
+
+    expect(projection.snapshot()[0]?.title).toBe("new title");
+  });
+
+  it("discovers new sessions, drops deleted files, and honors local invalidation", () => {
+    const { root, sessions: writer } = createSessions();
+    const reader = new SessionManager(writer.root);
+    const projection = new GuiSessionProjection(reader);
+    expect(projection.snapshot()).toEqual([]);
+    const session = createVisibleSession(writer, root, "cli:created");
+    expect(projection.snapshot()).toHaveLength(1);
+    writer.delete(session.key);
+    expect(projection.snapshot()).toEqual([]);
+    writer.save(session);
+    expect(projection.snapshot()).toHaveLength(1);
+    const read = vi.spyOn(fs, "readFileSync");
+    reader.invalidate(session.key);
+    expect(projection.snapshot()).toHaveLength(1);
+    expect(read).toHaveBeenCalledTimes(1);
+    reader.hardDeleteSession(session.key);
+    writer.save(session);
+    expect(projection.snapshot()).toEqual([]);
+  });
+
+  it("keeps newer in-memory state and retries a failed disk read", () => {
+    const { root, sessions: writer } = createSessions();
+    const session = createVisibleSession(writer, root, "cli:retry");
+    const reader = new SessionManager(writer.root);
+    const projection = new GuiSessionProjection(reader);
+    vi.spyOn(reader, "loadSession").mockReturnValueOnce(null);
+    expect(projection.snapshot()).toEqual([]);
+    expect(projection.snapshot()).toHaveLength(1);
+    const live = reader.get(session.key)!;
+    live.metadata.title = "Unsaved live title";
+    live.updatedAt = new Date(Date.parse(live.updatedAt) + 1_000).toISOString();
+    expect(projection.snapshot()[0]?.title).toBe("Unsaved live title");
+  });
+
   it("round-trips canonical external keys without creating an alias Session", () => {
     const { root, sessions } = createSessions();
     const canonicalKey = "telegram:123456";

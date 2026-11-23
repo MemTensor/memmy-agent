@@ -369,6 +369,7 @@ export class SessionManager {
   private readonly legacyWebuiWorkspaceCwd: string | null;
   private readonly webuiBindingReservations = new Map<string, WebuiSessionBindingReservation>();
   private readonly permanentlyDeletedSessionKeys = new Set<string>();
+  private readonly webuiDiskSessions = new Map<string, { stat: fs.Stats; session: Session | null }>();
 
   constructor(root: string, options: SessionManagerOptions = {}) {
     this.root = path.resolve(String(root));
@@ -490,6 +491,7 @@ export class SessionManager {
 
   invalidate(key: string): void {
     this.sessions.delete(key);
+    this.webuiDiskSessions.delete(path.basename(this.pathFor(key)));
   }
 
   reload(key: string): Session | null {
@@ -692,6 +694,7 @@ export class SessionManager {
     this.webuiBindingReservations.delete(key);
     this.sessions.delete(key);
     const file = this.pathFor(key);
+    this.webuiDiskSessions.delete(path.basename(file));
     if (fs.existsSync(file)) {
       fs.unlinkSync(file);
       return true;
@@ -785,12 +788,35 @@ export class SessionManager {
 
   listWebuiSessionRecords(): Session[] {
     const records = new Map<string, Session>();
-    if (!fs.existsSync(this.root)) return [];
-    for (const file of fs.readdirSync(this.root).filter((name) => name.endsWith(".jsonl"))) {
+    if (!fs.existsSync(this.root)) {
+      this.webuiDiskSessions.clear();
+      return [];
+    }
+    const files = new Set(fs.readdirSync(this.root).filter((name) => name.endsWith(".jsonl")));
+    for (const file of this.webuiDiskSessions.keys()) {
+      if (!files.has(file)) this.webuiDiskSessions.delete(file);
+    }
+    for (const file of files) {
       const fallbackKey = path.basename(file, ".jsonl").replace("_", ":");
-      const session = this.loadSession(fallbackKey);
-      if (!session || !isWebuiSession(session)) continue;
-      records.set(session.key, session);
+      try {
+        const stat = fs.statSync(path.join(this.root, file));
+        let cached = this.webuiDiskSessions.get(file);
+        // Poll file metadata, not entire histories; other processes can replace or append sessions.
+        if (!cached || cached.stat.ino !== stat.ino || cached.stat.size !== stat.size
+          || cached.stat.mtimeMs !== stat.mtimeMs || cached.stat.ctimeMs !== stat.ctimeMs) {
+          const session = this.loadSession(fallbackKey);
+          if (!session) {
+            this.webuiDiskSessions.delete(file);
+            continue;
+          }
+          cached = { stat, session: isWebuiSession(session) ? session : null };
+          this.webuiDiskSessions.set(file, cached);
+        }
+        if (cached.session) records.set(cached.session.key, cached.session);
+      } catch {
+        // A concurrent writer can remove the file between readdir and stat; retry next scan.
+        this.webuiDiskSessions.delete(file);
+      }
     }
     for (const [key, session] of this.sessions) {
       if (!isWebuiSession(session)) continue;
