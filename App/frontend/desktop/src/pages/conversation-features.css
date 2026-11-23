@@ -1659,7 +1659,6 @@
 .recording-page > .recording-panel__status,
 .recording-page > .recording-panel__player,
 .recording-page > .recording-panel__section,
-.recording-page > .recording-panel__lines,
 .recording-page > .recording-panel__turns,
 .recording-page > .recording-panel__flat-text {
   margin: 0 12px 8px;
@@ -1680,6 +1679,19 @@
 .recording-page {
   overflow-y: auto;
   padding-bottom: 12px;
+}
+
+/* Only the transcript viewport scrolls, keeping the recording controls reachable. */
+.recording-page--live {
+  overflow: clip;
+}
+
+.recording-page--live > .recording-panel__transcript {
+  margin-inline: 12px;
+}
+
+.recording-page--live .recording-panel__lines {
+  margin-top: 0;
 }
 
 .recording-page__deliverables {
@@ -2057,6 +2069,38 @@
   min-height: 0;
   overflow-y: auto;
   padding: 12px;
+}
+
+.recording-panel__body--live {
+  display: flex;
+  flex-direction: column;
+  overflow: clip;
+}
+
+.recording-page--live > .recording-page__bar,
+.recording-page--live > .recording-panel__status,
+.recording-panel__body--live > .recording-panel__status,
+.recording-panel__body--live > .recording-panel__player {
+  flex: none;
+}
+
+.recording-panel__transcript {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.recording-panel__transcript-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+.recording-panel__transcript > .recording-panel__jump-to-latest {
+  bottom: 8px;
 }
 
 .recording-panel__bar-slot {

@@ -107,17 +107,23 @@ describe("RecordingPlayer", () => {
     expect(scrubber.style.background).not.toContain("300%");
   });
 
-  it("finishes at 100% when the playable media ends before the measured duration", () => {
-    render(4_250);
+  it("uses the actual endpoint when a saved duration includes time that never played", () => {
+    render(10_000);
     const audio = container.querySelector("audio")!;
     Object.defineProperty(audio, "duration", { configurable: true, value: 4.05 });
     Object.defineProperty(audio, "currentTime", { configurable: true, value: 4.05 });
     act(() => audio.dispatchEvent(new Event("ended")));
 
     const scrubber = container.querySelector<HTMLInputElement>(".recording-panel__player-scrubber")!;
-    expect(scrubber.max).toBe("4250");
-    expect(scrubber.value).toBe("4250");
+    expect(scrubber.max).toBe("4050");
+    expect(scrubber.value).toBe("4050");
     expect(scrubber.style.background).toContain("100%");
+
+    act(() => audio.dispatchEvent(new Event("durationchange")));
+    Object.defineProperty(audio, "currentTime", { configurable: true, value: 2.025 });
+    act(() => audio.dispatchEvent(new Event("timeupdate")));
+    expect(scrubber.max).toBe("4050");
+    expect(scrubber.style.background).toContain("50%");
   });
 });
 
@@ -180,6 +186,26 @@ describe("InterviewRecordingPanel", () => {
     // With nothing recorded there is no status row and no player to show.
     expect(container.querySelector(".recording-panel__status")).toBeNull();
     expect(container.querySelector(".recording-panel__player")).toBeNull();
+  });
+
+  it("keeps the reader's position when a transcript update precedes the scroll event", () => {
+    const firstLine = { startMs: 0, endMs: 1_000, text: "第一句" };
+    const secondLine = { startMs: 1_000, endMs: 2_000, text: "第二句" };
+    render({ session: session({ lines: [firstLine] }) });
+    const viewport = container.querySelector<HTMLDivElement>(".recording-panel__transcript-scroll")!;
+    let scrollHeight = 240;
+    Object.defineProperties(viewport, {
+      clientHeight: { value: 100 },
+      scrollHeight: { get: () => scrollHeight }
+    });
+    render({ session: session({ lines: [firstLine, secondLine] }) });
+    expect(viewport.scrollTop).toBe(140);
+
+    viewport.scrollTop = 25;
+    scrollHeight = 300;
+    render({ session: session({ lines: [firstLine, secondLine, { startMs: 2_000, endMs: 3_000, text: "第三句" }] }) });
+    expect(viewport.scrollTop).toBe(25);
+    expect(container.querySelector('button[aria-label="回到最新"]')).not.toBeNull();
   });
 
   it("frames the finished transcript with its player and speaker turns", () => {

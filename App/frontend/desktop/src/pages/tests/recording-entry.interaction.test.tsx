@@ -158,6 +158,67 @@ describe("RecordingEntryPage", () => {
     expect(container.textContent).toContain("我们社保在北京参保");
   });
 
+  it("follows live text until the reader scrolls up, then jumps back and resumes following", async () => {
+    const firstLine = { startMs: 0, endMs: 1_000, text: "第一句" };
+    const secondLine = { startMs: 1_000, endMs: 2_000, text: "第二句" };
+    const live = session({ view: "live", status: "recording", lines: [firstLine] });
+    await render(live);
+
+    const viewport = container.querySelector<HTMLDivElement>(".recording-panel__transcript-scroll")!;
+    const toolbar = container.querySelector<HTMLElement>(".recording-page__bar")!;
+    expect(viewport.contains(toolbar)).toBe(false);
+    const jumpButton = () => container.querySelector<HTMLButtonElement>('button[aria-label="回到最新"]');
+    let scrollHeight = 260;
+    Object.defineProperties(viewport, {
+      clientHeight: { value: 100 },
+      scrollHeight: { get: () => scrollHeight }
+    });
+
+    await render({ ...live, lines: [firstLine, secondLine] });
+    expect(viewport.scrollTop).toBe(160);
+    expect(jumpButton()).toBeNull();
+
+    scrollHeight = 300;
+    const expandedLine = { ...secondLine, text: "第二句继续转写，内容变长了。" };
+    await render({ ...live, lines: [firstLine, expandedLine] });
+    expect(viewport.scrollTop).toBe(200);
+
+    act(() => {
+      viewport.scrollTop = 0;
+      viewport.dispatchEvent(new Event("scroll"));
+    });
+    expect(jumpButton()).not.toBeNull();
+
+    scrollHeight = 360;
+    const thirdLine = { startMs: 2_000, endMs: 3_000, text: "第三句" };
+    await render({ ...live, lines: [firstLine, expandedLine, thirdLine] });
+    expect(viewport.scrollTop).toBe(0);
+    expect(viewport.textContent).toContain("第三句");
+
+    act(() => jumpButton()!.click());
+    expect(viewport.scrollTop).toBe(260);
+    expect(jumpButton()).toBeNull();
+
+    scrollHeight = 420;
+    const latest = { ...live, lines: [firstLine, expandedLine, thirdLine, { startMs: 3_000, endMs: 4_000, text: "第四句" }] };
+    await render(latest);
+    expect(viewport.scrollTop).toBe(320);
+    expect(jumpButton()).toBeNull();
+
+    const [pauseOrResume, finish] = toolbar.querySelectorAll<HTMLButtonElement>(".recording-page__controls button");
+    expect(pauseOrResume?.textContent).toBe("暂停");
+    act(() => pauseOrResume!.click());
+    expect(live.pause).toHaveBeenCalledTimes(1);
+
+    await render({ ...latest, status: "paused" });
+    expect(viewport.scrollTop).toBe(320);
+    expect(pauseOrResume?.textContent).toBe("继续");
+    act(() => pauseOrResume!.click());
+    act(() => finish!.click());
+    expect(live.resume).toHaveBeenCalledTimes(1);
+    expect(live.finish).toHaveBeenCalledTimes(1);
+  });
+
   it("groups the finished transcript by speaker", async () => {
     await render(session({ view: "transcript", opened: entry }));
 
