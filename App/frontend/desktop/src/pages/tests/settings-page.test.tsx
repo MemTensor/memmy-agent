@@ -808,7 +808,7 @@ describe("SettingsPageView", () => {
       ["zhipu", "https://open.bigmodel.cn/api/paas/v4", "glm-4"],
       ["qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-max"],
       ["moonshot", "https://api.moonshot.ai/v1", "moonshot-v1-128k"],
-      ["minimax", "https://api.minimax.chat/v1", "MiniMax-Text-01"],
+      ["minimax", "https://api.minimax.io/v1", "MiniMax-M3.1-Flash"],
       ["baidu", "https://qianfan.baidubce.com/v2", "ernie-x1.1"],
       ["doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-256k"],
       ["stepfun", "https://api.stepfun.com/v1", "step-3.5-flash"],
@@ -825,7 +825,7 @@ describe("SettingsPageView", () => {
     expect(workspaceSource).toContain("endpoint: DEFAULT_ENDPOINTS[provider]");
     expect(workspaceSource).toContain("modelDraft: DEFAULT_MODEL_IDS[provider]");
     expect(modelSource).toContain("endpoint: DEFAULT_ENDPOINTS[protocol]");
-    expect(modelSource).toContain('modelId: ""');
+    expect(modelSource).toContain('modelId: protocol === "minimax" ? DEFAULT_MODEL_IDS.minimax : ""');
     expect(modelSource).toContain('apiKey: ""');
     expect(modelSource).not.toContain("DEFAULT_MODEL_PLACEHOLDER");
   });
