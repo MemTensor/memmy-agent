@@ -16,9 +16,10 @@ permissions:
 jobs:
   request:
     if: ${{ github.repository == 'MemTensor/memmy-agent' && github.ref == 'refs/heads/main' }}
-    # Draft visibility needs push access; the request producer still permits only GET.
+    # The trusted main workflow creates the synchronization branches and draft PRs.
     permissions:
       contents: write
+      pull-requests: write
       actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -37,6 +38,11 @@ jobs:
           SYNC_SOURCE_SHA: ${{ inputs.source_sha }}
           MAIN_SYNC_REQUEST_PATH: ${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json
         run: node scripts/main-sync/cli.mjs recover
+      - name: Create or reuse main synchronization PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SYNC_REQUEST_PATH: ${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json
+        run: node scripts/main-sync/create-prs.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: memmy-main-sync-request-${{ github.run_attempt }}
