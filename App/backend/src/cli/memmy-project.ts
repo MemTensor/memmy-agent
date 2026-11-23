@@ -19,9 +19,12 @@ const DESKTOP_NOT_RUNNING = "无法连接 Memmy，请打开 Memmy 后重试。";
 // command outside the sandbox does.
 const SANDBOX_BLOCKED = "当前环境不允许连接本机的 Memmy，通常是 Agent 的沙箱（sandbox）关闭了网络访问，Memmy 本身可能正常运行。请用沙箱外权限重新运行这条命令，不需要重新打开 Memmy。";
 const NO_MATCH = "没有匹配的任务。可以换更短的关键词，或去掉 --member、--since 后重试；任务也可能还没有共享到项目。";
-// Both say that no keyword can find anything, so an agent stops instead of retrying the search.
-const NO_PROJECT = "你还没有加入任何 Memmy 协作项目，没有可检索的任务，换关键词也找不到。在 Memmy 中新建或加入协作项目后再试。";
-const NO_SHARED_TASKS = "你加入的协作项目中还没有共享的任务，换关键词也找不到。成员在 Memmy 中开启协作、同步任务后才能找到。";
+// Both say that no keyword can find anything, so an agent stops searching projects; each one also says that an
+// empty project list does not mean the person's own memory has nothing, so the agent turns to whatever memory
+// capability the host agent has instead of ending the answer there. Neither names a specific memory tool: the
+// person may use another one, and this command stays independent of it.
+const NO_PROJECT = "你还没有加入任何 Memmy 协作项目，没有可检索的任务，换关键词也找不到。这只说明协作项目为空，不代表用户自己的记忆里没有相关记录：问的是用户自己或手上项目的进展时，改用你可用的记忆能力或工具检索后再回答。要查其他成员的工作，先在 Memmy 中新建或加入协作项目。";
+const NO_SHARED_TASKS = "你加入的协作项目中还没有共享的任务，换关键词也找不到。这只说明协作项目里没有共享任务，不代表用户自己的记忆里没有相关记录：问的是用户自己或手上项目的进展时，改用你可用的记忆能力或工具检索后再回答。要查成员共享的任务，成员在 Memmy 中开启协作、同步任务后才能找到。";
 const USAGE = [
   "Usage:",
   "  memmy-project list",
