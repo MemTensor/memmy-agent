@@ -21,14 +21,13 @@ import { AgentSourceScanReconciler } from "./app/agent-source-scan-reconciler.js
 import { AppRouter } from "./app/router.js";
 import { UpdateCoordinatorProvider } from "./app/update-coordinator.js";
 import { GithubStarPromptHost } from "./components/github-star-prompt-host.js";
-import { CollabLaunchPromptHost } from "./components/collab-launch-prompt-host.js";
 import { HistoryLaunchPromptHost } from "./components/history-launch-prompt-host.js";
 import { InviteResultToast } from "./components/invite-result-toast.js";
 import { NotificationCenterProvider } from "./components/notification-center.js";
+import { TokenCreditToastHost } from "./components/token-credit-toast-host.js";
 import { TaskTokenGiftPromptHost } from "./components/task-token-gift-prompt-host.js";
 import {
   FOCUSED_AGENT_CHAT_STORAGE_KEY,
-  GUIDANCE_PROGRESS_STORAGE_KEY,
   readGuidanceCompleted,
   readLaunchModeOverride,
   readPetIntentOverride,
@@ -48,6 +47,7 @@ import { MemmyAgentRequestError, type MemmyAgentClient } from "./api/memmy-agent
 import { getRuntimeConfig } from "./api/runtime-config.js";
 import { readHistoryPermissionSetup } from "./pages/memory/computer-history-permission-state.js";
 import { shouldReturnToWeChatSettings } from "./pages/memory/computer-history-wechat-permission-state.js";
+import { ActiveRecordingBar } from "./pages/memory/task-recordings.js";
 import { readLocalNickname } from "./app/nickname.js";
 import { useTranslation } from "./i18n/use-translation.js";
 import {
@@ -59,11 +59,6 @@ import {
 import type { AgentState } from "./state/agent-chat-slice.js";
 import { useAppState } from "./state/app-state.js";
 import { useComputerHistoryTrayIndicator } from "./app/computer-history-tray-indicator.js";
-
-// Machine-level "guidance completed" mark. routes.ts owns the read/write side of this key
-// (readGuidanceCompleted / writeGuidanceCompleted) but keeps the literal module-private, so it is
-// repeated here. The two must stay identical.
-const GUIDANCE_COMPLETED_STORAGE_KEY = "memmy.guidanceCompleted";
 
 /** Handles app. */
 export function App() {
@@ -209,7 +204,7 @@ function RuntimeApp() {
         const clients = createAppClients({ runtimeConfig });
         const bootstrap = await clients.bootstrap.getBootstrap();
         const currentRoute = readCurrentRoute(typeof window === "undefined" ? undefined : window.sessionStorage);
-        let guidanceCompleted = readGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage);
+        const guidanceCompleted = readGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage);
         const launchModeOverride = readLaunchModeOverride(typeof window === "undefined" ? undefined : window.location.search);
         const petIntent = readPetIntentOverride(typeof window === "undefined" ? undefined : window.location.search);
         const launchRouteOverride = readLaunchRouteOverride(typeof window === "undefined" ? undefined : window.location.search);
@@ -220,22 +215,6 @@ function RuntimeApp() {
           clients.agentSources.getScanStatus()
         ]);
         const effectiveBootstrap = reconcileInitialOnboarding({ bootstrap, accountSession });
-        // The guidance completion mark is machine-level and lives only in localStorage, while the account's
-        // hasFinishedGuide lives in the cloud. Reinstalling or clearing app data wipes localStorage but keeps
-        // the cloud flag, so an existing user would replay the product tour, the nickname step and the one-shot
-        // prompts. Stamp the same keys readGuidanceCompleted()/readDeferredGuidanceStep() read and carry the
-        // value into this boot, so resolveInitialView() below acts on it in the same pass. BYOK has no cloud
-        // account and therefore nothing to adopt.
-        const guidanceStorage = typeof window === "undefined" ? undefined : window.localStorage;
-        if (guidanceStorage && !guidanceCompleted && accountSession.authenticated && accountSession.profile.hasFinishedGuide === true) {
-          try {
-            guidanceStorage.setItem(GUIDANCE_COMPLETED_STORAGE_KEY, "1");
-            guidanceStorage.setItem(GUIDANCE_PROGRESS_STORAGE_KEY, "completed");
-            guidanceCompleted = true;
-          } catch {
-            // A storage that refuses writes only costs one extra showing of the guidance.
-          }
-        }
         const persistedPreferredMode = resolvePreferredLaunchMode({
           defaultLaunchMode: effectiveBootstrap.app.defaultLaunchMode,
           lastLaunchMode: effectiveBootstrap.app.lastLaunchMode
@@ -309,9 +288,23 @@ function RuntimeApp() {
         dispatch(appActions.eventStatusChanged("connecting"));
 
         events = createEventsConnection(runtimeConfig);
+        let modelRefreshVersion = 0;
+        const refreshModelView = async () => {
+          const version = ++modelRefreshVersion;
+          try {
+            const config = await clients.config.getModelConfig();
+            if (isActive && version === modelRefreshVersion) dispatch(appActions.modelConfigUpdated(config));
+          } catch (error) {
+            console.warn("Model capability view refresh failed", error);
+          }
+        };
         events.addEventListener("app.connected", () => {
           dispatch(appActions.eventStatusChanged("connected"));
           void reconcileAgentSourceScanStatus(clients.agentSources);
+          void refreshModelView();
+        });
+        events.addEventListener("model_catalog.updated", (event) => {
+          if (parseSseEvent(event)?.type === "model_catalog.updated") void refreshModelView();
         });
         events.addEventListener("app.heartbeat", () => {
           dispatch(appActions.eventStatusChanged("heartbeat"));
@@ -366,9 +359,11 @@ function RuntimeApp() {
         <NotificationCenterProvider>
         <AgentSourceScanReconciler />
           <AppRouter onRetry={retry} />
-          <CollabLaunchPromptHost />
-          <TaskTokenGiftPromptHost />
+          <ActiveRecordingBar client={clients?.memmyAgent ?? null} />
+<TaskTokenGiftPromptHost />
+
           <HistoryLaunchPromptHost />
+          <TokenCreditToastHost />
           <GithubStarPromptHost />
           {state.invitationToast ? (
           <InviteResultToast

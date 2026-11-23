@@ -1,43 +1,12 @@
 /** Error envelope module. */
 import { ZodError } from "zod";
+import { ApiErrorCodeSchema, type ApiErrorCode } from "@memmy/local-api-contracts";
+import { VerificationRequestError } from "./verification-request-error.js";
 import { MemoryLayerError, MemoryLayerNetworkError } from "../adapters/outbound/memory-client/index.js";
 import type { FastifyReply, FastifyRequest, RouteHandlerMethod } from "fastify";
 
-export const API_ERROR_CODES = [
-  "invalid_argument",
-  "unauthorized",
-  "forbidden",
-  "not_found",
-  "conflict",
-  "rate_limited",
-  "internal",
-  "memory_layer_unavailable",
-  "memory_scan_upgrade_required",
-  "missing_idempotency_key",
-  "idempotency_body_mismatch",
-  "scan_not_permitted",
-  "memory_recall_not_permitted",
-  "skill_write_not_permitted",
-  "agent_source_unavailable",
-  "composio_not_configured",
-  "toolkit_unsupported",
-  "model_config_changed",
-  "config_write_busy",
-  "account_model_preset_conflict",
-  "collab_quota_exceeded",
-  "plugin_invalid",
-  "plugin_incompatible",
-  "plugin_adapter_unsupported",
-  "plugin_permission_denied",
-  "plugin_entitlement_required",
-  "plugin_activation_failed",
-  "plugin_runtime_error",
-  "plugin_timeout",
-  "plugin_unavailable",
-  "plugin_interaction_invalid"
-] as const;
-
-export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
+export const API_ERROR_CODES = ApiErrorCodeSchema.options;
+export type { ApiErrorCode } from "@memmy/local-api-contracts";
 
 export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Object.freeze({
   invalid_argument: 400,
@@ -48,6 +17,8 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Objec
   rate_limited: 429,
   internal: 500,
   memory_layer_unavailable: 503,
+  memory_starting: 503,
+  memory_upgrading: 503,
   memory_scan_upgrade_required: 503,
   missing_idempotency_key: 400,
   idempotency_body_mismatch: 409,
@@ -60,7 +31,6 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Objec
   model_config_changed: 409,
   config_write_busy: 409,
   account_model_preset_conflict: 409,
-  collab_quota_exceeded: 409,
   plugin_invalid: 400,
   plugin_incompatible: 400,
   plugin_adapter_unsupported: 400,
@@ -70,7 +40,8 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Objec
   plugin_runtime_error: 502,
   plugin_timeout: 504,
   plugin_unavailable: 409,
-  plugin_interaction_invalid: 409
+  plugin_interaction_invalid: 409,
+  collab_quota_exceeded: 429
 });
 
 export interface ApiError extends Error {
@@ -82,6 +53,8 @@ interface ErrorEnvelope {
   code: ApiErrorCode;
   status: number;
   message: string;
+  retryAfterSec?: number;
+  upstreamRequestId?: string;
 }
 
 /** Handles with error envelope. */
@@ -93,11 +66,15 @@ export function withErrorEnvelope<Reply>(
       return await handler(request, reply);
     } catch (error) {
       const envelope = toErrorEnvelope(error);
+      if (envelope.retryAfterSec !== undefined) {
+        reply.header("Retry-After", String(envelope.retryAfterSec));
+      }
       return reply.code(envelope.status).send({
         error: {
           code: envelope.code,
           message: envelope.message,
-          requestId: extractRequestId(request)
+          requestId: extractRequestId(request),
+          ...(envelope.upstreamRequestId ? { upstreamRequestId: envelope.upstreamRequestId } : {})
         }
       });
     }
@@ -106,6 +83,9 @@ export function withErrorEnvelope<Reply>(
 
 /** Handles to error envelope. */
 function toErrorEnvelope(error: unknown): ErrorEnvelope {
+  if (error instanceof VerificationRequestError) {
+    return { code: error.code, status: error.status, message: error.message, retryAfterSec: error.retryAfterSec };
+  }
   if (error instanceof ZodError) {
     return {
       code: "invalid_argument",
@@ -119,7 +99,8 @@ function toErrorEnvelope(error: unknown): ErrorEnvelope {
     return {
       code,
       status: error.status,
-      message: error.message
+      message: error.message,
+      ...(error.requestId ? { upstreamRequestId: error.requestId } : {})
     };
   }
 
@@ -166,7 +147,7 @@ function extractRequestId(request: FastifyRequest): string {
 
   const headerValue = request.headers["x-request-id"] ?? request.headers["x-requestid"];
   const header = Array.isArray(headerValue) ? headerValue[0] : headerValue;
-  return typeof header === "string" && header.length > 0 ? header : "unknown";
+  return typeof header === "string" && header.length > 0 ? header : request.id;
 }
 
 /** Checks is api error code. */

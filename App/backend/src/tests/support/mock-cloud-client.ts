@@ -55,6 +55,10 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
       return { text: "", modelId: QWEN_ASR_MODEL_ID, provider: ASR_PROVIDER };
     },
 
+    async getModelCapabilityCatalog() {
+      throw new Error("Model catalog response is not configured in this test");
+    },
+
     async health() {
       return (
         options.health ?? {

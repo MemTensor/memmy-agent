@@ -7,9 +7,12 @@ import {
   isMemmySkillDirectoryCurrent,
   memmyProjectSkillExists,
   readInstalledSkillKind,
+  readSkillInstallationState,
   removeMemmyProjectSkillDirectory,
   replaceMemmyProjectSkillDirectory,
-  replaceMemmySkillDirectory
+  replaceMemmySkillDirectory,
+  rollbackSkillInstallation,
+  type SkillInstallationState
 } from "../adapters/outbound/skill-writer/skill-directory.js";
 import { renderMemmyDefaultSkillManifest } from "../adapters/outbound/skill-writer/templates/memmy-default.js";
 import { renderMemmyPluginSkillManifest } from "../adapters/outbound/skill-writer/templates/memmy-plugin.js";
@@ -34,9 +37,11 @@ export interface ScannedAgentSkill {
 /** Contract for skill distribution service. */
 export interface SkillDistributionService {
   listSkills?(sourceId: string): Promise<ScannedAgentSkill[]>;
-  install(sourceId: string): Promise<void>;
+  readInstallationState?(sourceId: string): Promise<SkillInstallationState>;
+  rollbackInstallation?(sourceId: string, kind: "skill" | "plugin", before: SkillInstallationState): Promise<void>;
+  install(sourceId: string, beforeInstall?: () => void | Promise<void>): Promise<void>;
   uninstall(sourceId: string): Promise<void>;
-  installPlugin(sourceId: string): Promise<void>;
+  installPlugin(sourceId: string, beforeInstall?: () => void | Promise<void>): Promise<void>;
   uninstallPlugin(sourceId: string): Promise<void>;
   isInstalledHookCurrent?(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts?(): Promise<MemoryPluginConflict[]>;
@@ -124,6 +129,14 @@ export function createSkillDistributionService(
   }
 
   return {
+    async readInstallationState(sourceId) {
+      return readSkillInstallationState(options.targetRegistry.require(sourceId), sourceId);
+    },
+
+    async rollbackInstallation(sourceId, kind, before) {
+      await rollbackSkillInstallation(options.targetRegistry.require(sourceId), sourceId, kind, before);
+    },
+
     async listSkills(sourceId) {
       const target = options.targetRegistry.get(sourceId);
       const root = await target?.resolveRootDirectory();
@@ -151,12 +164,13 @@ export function createSkillDistributionService(
       }));
     },
 
-    async install(sourceId) {
+    async install(sourceId, beforeInstall) {
       const target = options.targetRegistry.require(sourceId);
       if (!(await target.resolveRootDirectory())) {
         throw new AgentSourceUnavailableError(target.displayName);
       }
 
+      await beforeInstall?.();
       await target.install(renderMemmyDefaultSkillManifest(sourceId));
     },
 
@@ -165,7 +179,7 @@ export function createSkillDistributionService(
       await target.uninstall(sourceId);
     },
 
-    async installPlugin(sourceId) {
+    async installPlugin(sourceId, beforeInstall) {
       const target = options.targetRegistry.require(sourceId);
       if (!target.installPlugin) {
         throw new Error(`Native plugin installation is not supported for ${target.displayName}`);
@@ -174,6 +188,7 @@ export function createSkillDistributionService(
         throw new AgentSourceUnavailableError(target.displayName);
       }
 
+      await beforeInstall?.();
       await target.installPlugin(sourceId);
     },
 
@@ -184,7 +199,7 @@ export function createSkillDistributionService(
       }
 
       await target.uninstallPlugin(sourceId);
-      await target.uninstall(sourceId);
+      if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
     },
 
     async isInstalledHookCurrent(sourceId) {
