@@ -20,7 +20,7 @@ interface WorkflowStep {
   "continue-on-error"?: boolean;
 }
 const steps = (job.steps ?? []) as WorkflowStep[];
-const powershell = process.platform === "win32" ? "powershell.exe" : "pwsh";
+const powershell = process.platform === "win32" ? "pwsh.exe" : "pwsh";
 const hasPowerShell = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], { encoding: "utf8" }).status === 0;
 
 describe("Windows Memory validation workflow", () => {
@@ -73,7 +73,7 @@ describe("Windows Memory validation workflow", () => {
   });
 });
 
-describe.skipIf(!hasPowerShell)("Windows session preflight behavior", () => {
+describe.skipIf(process.platform !== "win32" && !hasPowerShell)("Windows session preflight behavior", () => {
   const activeOutput = " USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME\n>runneradmin           console             2  Active      none   9/7/2026 7:15 AM";
 
   // Each case launches a fresh PowerShell process. Allow its existing 10s child

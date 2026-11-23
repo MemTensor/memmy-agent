@@ -23,20 +23,6 @@ export default tseslint.config(
     },
   },
   {
-    // Windows history smoke tests run in Node.
-    files: [
-      "src/tools/computer-history/win/native/tests/integration/browser-smoke.mjs",
-      "src/tools/computer-history/win/native/tests/integration/electron-text-smoke.mjs",
-    ],
-    languageOptions: {
-      globals: {
-        process: "readonly", console: "readonly", URL: "readonly",
-        setTimeout: "readonly", clearTimeout: "readonly",
-        setInterval: "readonly", clearInterval: "readonly",
-      },
-    },
-  },
-  {
     files: ["scripts/**/*.mjs"],
     languageOptions: {
       globals: {

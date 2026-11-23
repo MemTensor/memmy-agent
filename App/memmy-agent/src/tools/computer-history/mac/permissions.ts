@@ -5,8 +5,12 @@ import { historyNativeCommand } from "./native-helper.js";
 import { macPermissionSettingsGuide } from "../../computer-use/mac-permission-settings.js";
 import { isMacNativeRuntimeSupported } from "../../computer-use/mac-native-runtime-support.js";
 
-import type { HistoryPermission, HistoryPermissions } from "../core/platform-driver.js";
-export type { HistoryPermission, HistoryPermissions } from "../core/platform-driver.js";
+export type HistoryPermission = "accessibility" | "inputMonitoring";
+export interface HistoryPermissions {
+  supported: boolean;
+  accessibility: boolean;
+  inputMonitoring: boolean;
+}
 const execute = promisify(execFile);
 
 /** Use the recorder's own native identity, without installing an event tap. */

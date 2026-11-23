@@ -47,7 +47,6 @@ import { MemmyAgentRequestError, type MemmyAgentClient } from "./api/memmy-agent
 import { getRuntimeConfig } from "./api/runtime-config.js";
 import { readHistoryPermissionSetup } from "./pages/memory/computer-history-permission-state.js";
 import { shouldReturnToWeChatSettings } from "./pages/memory/computer-history-wechat-permission-state.js";
-import { ActiveRecordingBar } from "./pages/memory/task-recordings.js";
 import { readLocalNickname } from "./app/nickname.js";
 import { useTranslation } from "./i18n/use-translation.js";
 import {
@@ -359,9 +358,7 @@ function RuntimeApp() {
         <NotificationCenterProvider>
         <AgentSourceScanReconciler />
           <AppRouter onRetry={retry} />
-          <ActiveRecordingBar client={clients?.memmyAgent ?? null} />
-<TaskTokenGiftPromptHost />
-
+          <TaskTokenGiftPromptHost />
           <HistoryLaunchPromptHost />
           <TokenCreditToastHost />
           <GithubStarPromptHost />

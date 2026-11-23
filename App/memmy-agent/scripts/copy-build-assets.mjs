@@ -11,7 +11,6 @@ await writeBrowserHistorySensor();
 // Default App builds must not ship or advertise these built-in format skills.
 const excludedOfficeSkills = ["docx", "pdf", "pptx", "xlsx"];
 const excludedSkillRoots = new Set(excludedOfficeSkills.map((skill) => path.resolve("src", "skills", skill)));
-const nativeSourceRoot = path.resolve("src/tools/computer-history/win/native");
 
 const staleDirectories = [
   "dist/skills/goal",
@@ -19,7 +18,6 @@ const staleDirectories = [
   "dist/skills/my",
   // Computer History moved under src/tools/.
   "dist/core/agent-runtime/computer-history",
-  "dist/tools/computer-history/win/native",
 ];
 const compiled = (stem) => [`${stem}.js`, `${stem}.js.map`, `${stem}.d.ts`];
 const staleFiles = [
@@ -51,7 +49,7 @@ for (const source of ["src/templates", "src/skills", "src/tools"]) {
   const destination = path.join("dist", path.relative("src", source));
   fs.cpSync(source, destination, {
     recursive: true,
-    filter: (entry) => !excludedSkillRoots.has(path.resolve(entry)) && path.resolve(entry) !== nativeSourceRoot
+    filter: (entry) => !excludedSkillRoots.has(path.resolve(entry))
       && !entry.endsWith(".ts") && path.basename(entry) !== ".gitkeep",
   });
 }

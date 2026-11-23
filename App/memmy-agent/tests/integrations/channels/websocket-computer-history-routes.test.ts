@@ -7,8 +7,6 @@ import { WebSocketChannel } from "../../../src/integrations/channels/websocket.j
 import { ComputerHistoryDemoService, type ComputerHistorySnapshot } from "../../../src/tools/computer-history/mac/computer-history-api.js";
 
 const history = vi.hoisted(() => ({ snapshot: vi.fn(), observationStatus: vi.fn(), setLlmRuntime: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), setWeChatChatAccess: vi.fn(), connectWeChat: vi.fn(), prepareWeChatReader: vi.fn(), startObservationWithPermissions: vi.fn(), restoreObservationOnLaunch: vi.fn(), applicationIcon: vi.fn(), listApplications: vi.fn(), getObservationSettings: vi.fn(), updateObservationSettings: vi.fn(), deleteHistory: vi.fn(), importMarkdown: vi.fn(), pauseObservation: vi.fn(), stopObservation: vi.fn(), createWorkflow: vi.fn() }));
-const windows = vi.hoisted(() => ({ getWindowsConfiguration: vi.fn(), updateWindowsSettings: vi.fn() }));
-vi.mock("../../../src/tools/computer-history/win/computer-history-api.js", () => ({ getWindowsComputerHistoryService: () => ({ ...history, ...windows }) }));
 
 // Keep routing, authentication and clientSnapshot real without constructing a
 // service that can read or remove the user's Computer History files.
@@ -21,7 +19,6 @@ vi.mock("../../../src/tools/computer-history/mac/computer-history-api.js", async
 beforeEach(() => { vi.spyOn(process, "platform", "get").mockReturnValue("darwin"); });
 afterEach(() => {
   for (const method of Object.values(history)) method.mockReset();
-  for (const method of Object.values(windows)) method.mockReset();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   vi.useRealTimers();
@@ -186,9 +183,10 @@ describe("personal WeChat History HTTP boundary", () => {
   });
 });
 
-describe.each(["linux"] as const)("Computer History unsupported platform %s", (platform) => {
+describe.each(["win32", "linux"] as const)("Computer History unsupported platform %s", (platform) => {
   it.each([undefined, "1"])("blocks all HTTP entry points even with MEMMY_COMPUTER_HISTORY=%s", async (enabled) => {
     vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+    if (platform === "win32") vi.spyOn(os, "release").mockReturnValue("10.0.19045");
     vi.stubEnv("MEMMY_COMPUTER_HISTORY", enabled);
     const instance = channel();
     instance.modelSelectionResolver = vi.fn();
@@ -206,7 +204,7 @@ describe.each(["linux"] as const)("Computer History unsupported platform %s", (p
     for (const [method, route] of routes) {
       const response = await instance.dispatchHttp({}, request({ method, path: route, body: "{}" }));
       expect(response?.status, route).toBe(400);
-      expect(String(response?.body), route).toContain("available on macOS and Windows");
+      expect(String(response?.body), route).toContain("requires macOS or Windows 11");
     }
     for (const method of Object.values(history)) expect(method).not.toHaveBeenCalled();
     expect(instance.modelSelectionResolver).not.toHaveBeenCalled();
@@ -217,33 +215,6 @@ describe.each(["linux"] as const)("Computer History unsupported platform %s", (p
     const response = await channel().dispatchHttp({}, request({ headers: {} }));
     expect(response?.status).toBe(401);
     for (const method of Object.values(history)) expect(method).not.toHaveBeenCalled();
-  });
-});
-
-describe("Windows Computer History routes", () => {
-  it("requires authentication and the Windows host before reading or writing consent", async () => {
-    const instance = channel();
-    expect((await instance.dispatchHttp({}, request({ method: "GET", path: "/api/computer-history/windows/settings", headers: {} })))?.status).toBe(401);
-    expect((await instance.dispatchHttp({}, request({ method: "GET", path: "/api/computer-history/windows/settings" })))?.status).toBe(400);
-    expect(windows.getWindowsConfiguration).not.toHaveBeenCalled();
-    expect(windows.updateWindowsSettings).not.toHaveBeenCalled();
-  });
-  it("uses Windows readiness and persistent consent through the shared product routes", async () => {
-    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
-    const instance = channel();
-    history.snapshot.mockReturnValue(snapshot());
-    expect((await instance.dispatchHttp({}, request({ method: "GET", path: "/api/computer-history" })))?.status).toBe(200);
-    const configuration = { settings: { version: 1, applications: [] }, applications: [], permissions: {
-      supported: true, platform: "windows", ready: false, accessibility: false, inputMonitoring: false, reason: "authorization_required" } };
-    windows.getWindowsConfiguration.mockResolvedValue(configuration);
-    const get = await instance.dispatchHttp({}, request({ method: "GET", path: "/api/computer-history/windows/settings" }));
-    expect(get?.status).toBe(200); expect(JSON.parse(String(get?.body))).toEqual(configuration);
-    windows.updateWindowsSettings.mockResolvedValue(configuration);
-    expect((await instance.dispatchHttp({}, request({ path: "/api/computer-history/windows/settings", body: JSON.stringify({ settings: configuration.settings }) })))?.status).toBe(200);
-    expect(windows.updateWindowsSettings).toHaveBeenCalledExactlyOnceWith(configuration.settings);
-    expect((await instance.dispatchHttp({}, request({ path: "/api/computer-history/windows/settings", body: "x".repeat(256 * 1024 + 1) })))?.status).toBe(413);
-    expect((await instance.dispatchHttp({}, request({ path: "/api/computer-history/windows/settings", body: "{" })))?.status).toBe(400);
-    expect(windows.updateWindowsSettings).toHaveBeenCalledOnce();
   });
 });
 
