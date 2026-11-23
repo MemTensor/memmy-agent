@@ -1,0 +1,363 @@
+/**
+ * Cloud sharing state for projects. A project is a local Memmy project; a cloud project is attached to it and
+ * names the project's shared record. The sidebar lists local projects and the board reads the same store, so one
+ * store keeps a single open project — named by the local project id — and a single fetch of the cloud list.
+ */
+import type { CollabApplication, CollabApplicationDecision, CollabClient, CollabProject } from "../api/collab-client.js";
+import { readDemoGuideDone } from "./collab-demo-guide-store.js";
+
+export interface CollabProjectsSnapshot {
+  /** Null until the first load finishes, so the sidebar can tell "none" from "not loaded yet". */
+  projects: CollabProject[] | null;
+  /** 已提交、尚未通过的加入申请。云端没返回这个字段时保持上次的值。 */
+  applications: CollabApplication[];
+  /** 已经审完的申请（通过或未通过），带审核时间；桌面端据此提示一次结果。 */
+  decisions: CollabApplicationDecision[];
+  /** The local project whose board is open; the cloud project, if any, is derived from it. */
+  selectedId: string | null;
+  loading: boolean;
+  error: string | null;
+  /**
+   * 新建弹窗开着没有：这个状态放在 store 里而不是某个页面自己的 state 里。
+   * 首页在浏览完地址后又会被保留挂载，看板上可能同时存在两个应用外壳，
+   * 各自持一份就会一个关掉、另一个还开着，切回首页时弹窗自己冒出来。
+   */
+  createOpen: boolean;
+  /** 新建弹窗打开时「与成员共享」是否默认开启；目前只有新功能介绍的最后一页会要求开启。 */
+  createShareDefault: boolean;
+  /**
+   * 这次新建是新手引导的体验入口（从新功能大卡点进来的）：弹窗预填名称、预先打开共享，
+   * 蒙版停在「创建项目」上等人点一下。云端返回 `demo.active` 才真的开始演示。
+   */
+  createDemo: boolean;
+  /**
+   * A local project whose Memmy sessions should be chosen right after sharing started. The board opens that picker
+   * once and clears the flag, so a project that was just shared asks which of its own sessions go to the cloud.
+   */
+  taskPickerFor: string | null;
+  /**
+   * 看板顶部的一次性提示文案（已本地化）：例如新建项目时勾了共享但云端不可用。看板显示几秒后自行清除。
+   */
+  notice: string | null;
+  /**
+   * 每个账号可创建的在线项目数上限，由云端随列表一起给出；旧后端不返回时为 null，
+   * 新建弹窗就不提前提示额度。
+   */
+  maxOwnedProjects: number | null;
+  /**
+   * 云端在项目列表里表明「这个人可以再体验一次新手引导」。旧后端不带这个字段，按 false 处理，
+   * 因此侧栏第一次新建也不会意外进演示。
+   */
+  demoEligible: boolean;
+}
+
+let snapshot: CollabProjectsSnapshot = {
+  projects: null,
+  applications: [],
+  decisions: [],
+  selectedId: null,
+  loading: false,
+  error: null,
+  createOpen: false,
+  createShareDefault: false,
+  createDemo: false,
+  taskPickerFor: null,
+  notice: null,
+  maxOwnedProjects: null,
+  demoEligible: false
+};
+const listeners = new Set<() => void>();
+
+function update(patch: Partial<CollabProjectsSnapshot>): void {
+  snapshot = { ...snapshot, ...patch };
+  for (const listener of listeners) listener();
+}
+
+export function subscribeCollabProjects(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+export function getCollabProjectsSnapshot(): CollabProjectsSnapshot {
+  return snapshot;
+}
+
+/** The cloud project a local project is shared through, or null while it is only on this computer. */
+export function sharedProjectFor(
+  projects: CollabProject[] | null | undefined,
+  localProjectId: string | null | undefined
+): CollabProject | null {
+  if (!projects || !localProjectId) return null;
+  return projects.find((project) => project.localProjectId === localProjectId) ?? null;
+}
+
+/**
+ * 共享 store 的两个写入点都会收到「内容一样的新对象」（轮询、切回窗口后的重读），
+ * 字段逐个比一遍就能判断要不要通知订阅方；值都是字符串与数字，浅比即可。
+ */
+function sameRecord(left: object, right: object): boolean {
+  const a = left as Record<string, unknown>;
+  const b = right as Record<string, unknown>;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((key) => a[key] === b[key]);
+}
+
+function sameRecords(left: readonly object[], right: readonly object[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((entry, index) => sameRecord(entry, right[index]!));
+}
+
+/** The load in flight, so a caller that arrives during one waits for it instead of reading a stale list. */
+let inFlight: Promise<void> | null = null;
+
+/**
+ * Reloads the shared list. A second caller while a load runs waits for it and then loads again: dropping that
+ * reload is what left the sidebar showing a project whose cloud record had already been deleted.
+ */
+export async function loadCollabProjects(client: CollabClient): Promise<void> {
+  if (inFlight) await inFlight.catch(() => undefined);
+  const run = (async () => {
+    // 列表第一次读之前才需要「加载中」；重读时不动这个标记，也就不会白通知一次订阅方。
+    if (snapshot.projects === null) update({ loading: true, error: null });
+    try {
+      const listed = normalizeProjectList(await client.listProjects());
+      // The open project is local, so a reload must not move the board: only a vanished project clears it.
+      // 云端没带申请列表时保留本机刚记下的申请；已经是成员的项目不再显示「申请中」。
+      const joined = new Set(listed.projects.map((project) => project.id));
+      const applications = (listed.applications ?? snapshot.applications)
+        .filter((application) => !joined.has(application.projectId));
+      // 后台还没有审核结果这一列时保留上一次的值，免得一次刷新把待提示的结果冲掉。
+      // 结果不按「已加入」过滤：通过的那一条正是靠它给一次提示，提示过之后就记在本机不再弹。
+      const decisions = listed.decisions ?? snapshot.decisions;
+      // 额度随列表一起回来；这一次没拿到时保留上一次的值，免得弹窗上一会提示一会不提示。
+      const maxOwnedProjects = listed.maxOwnedProjects ?? snapshot.maxOwnedProjects;
+      // 演示资格同样随列表回来：旧云端没有这个字段，就按「不能体验」处理，不保留上一次的 true。
+      const demoEligible = listed.demoEligible === true;
+      // 一个字段都没变（切回窗口、轮询带来的重读）就不写：侧栏与看板不必跟着重画一遍。
+      const unchanged = snapshot.projects !== null
+        && snapshot.error === null
+        && sameRecords(snapshot.projects, listed.projects)
+        && sameRecords(snapshot.applications, applications)
+        && sameRecords(snapshot.decisions, decisions)
+        && snapshot.maxOwnedProjects === maxOwnedProjects
+        && snapshot.demoEligible === demoEligible;
+      if (unchanged) return;
+      update({
+        projects: listed.projects,
+        applications,
+        decisions,
+        loading: false,
+        error: null,
+        maxOwnedProjects,
+        demoEligible
+      });
+    } catch (cause) {
+      // 云端不可用时保留已有列表：项目就在本机，云端只决定能不能看共享内容。
+      update({ loading: false, error: messageOf(cause) });
+    }
+  })();
+  inFlight = run;
+  try {
+    await run;
+  } finally {
+    if (inFlight === run) inFlight = null;
+  }
+}
+
+/** 在看板顶部显示一次性提示（传入已本地化的文案），由看板在几秒后清除。 */
+export function showCollabNotice(message: string): void {
+  update({ notice: message });
+}
+
+/** 清除看板顶部的一次性提示。 */
+export function dismissCollabNotice(): void {
+  if (snapshot.notice !== null) update({ notice: null });
+}
+
+/** Opens one project's board, named by its local project id. */
+export function selectCollabProject(localProjectId: string | null): void {
+  if (snapshot.selectedId === localProjectId) return;
+  update({ selectedId: localProjectId });
+}
+
+/** 申请刚提交时先记到侧边栏，随后的列表刷新会用云端结果替换。 */
+export function addPendingApplication(application: CollabApplication): void {
+  const rest = snapshot.applications.filter((current) => current.projectId !== application.projectId);
+  update({ applications: [application, ...rest] });
+}
+
+/** After sharing a project: its cloud record leads the list. Opening the board is the caller's decision. */
+export function addCollabProject(project: CollabProject): void {
+  const rest = (snapshot.projects ?? []).filter((current) => current.id !== project.id);
+  update({ projects: [project, ...rest] });
+}
+
+/** Keeps the sidebar name and member count current after the board reloads a project. */
+export function replaceCollabProject(project: CollabProject): void {
+  if (!snapshot.projects) return;
+  // 轮询每 5 秒带回一份新对象：字段没变就不通知，否则侧栏会跟着重画一次。
+  const current = snapshot.projects.find((entry) => entry.id === project.id);
+  if (current && sameRecord(current, project)) return;
+  update({ projects: snapshot.projects.map((entry) => (entry.id === project.id ? project : entry)) });
+}
+
+/** Drops a project's cloud record after sharing was turned off; the local project stays. */
+export function removeCollabProject(projectId: string): void {
+  if (!snapshot.projects) return;
+  update({ projects: snapshot.projects.filter((project) => project.id !== projectId) });
+}
+
+/**
+ * Records the local Memmy project an online project runs tasks in, so the sidebar can list its sessions right
+ * after creation instead of waiting for the next full load.
+ */
+export function markCollabProjectBound(projectId: string, localProjectId: string): void {
+  if (!snapshot.projects) return;
+  update({
+    projects: snapshot.projects.map((project) => (
+      project.id === projectId ? { ...project, localProjectId } : project
+    ))
+  });
+}
+
+/**
+ * Opens the new-project dialog; `share` also turns sharing on when the dialog appears.
+ *
+ * 打开与关闭都在 store 里：弹窗是应用级的，同一个请求可能被多个挂着的应用外壳看到，
+ * 任意一处关闭都对所有外壳生效。
+ *
+ * @param options.demo 这次是新手引导的体验入口：弹窗预填名称并提前打开共享，引导先只亮「创建项目」。
+ */
+export function requestCreateProject(options?: { share?: boolean; demo?: boolean }): void {
+  update({
+    createOpen: true,
+    createShareDefault: options?.share === true,
+    createDemo: options?.demo === true
+  });
+}
+
+/** Closes the new-project dialog, whether it was cancelled, used, or switched to the join dialog. */
+export function closeCreateProject(): void {
+  if (!snapshot.createOpen && !snapshot.createShareDefault && !snapshot.createDemo) return;
+  update({ createOpen: false, createShareDefault: false, createDemo: false });
+}
+
+/**
+ * 引导在弹窗上被退出（本机从此不再自动演示）：这一次新建改按普通新建处理，
+ * 免得同一次弹窗里再点「创建项目」时还带着体验，让云端又重新开一场演示。
+ */
+export function clearCreateProjectDemo(): void {
+  if (!snapshot.createDemo) return;
+  update({ createDemo: false });
+}
+
+/**
+ * 侧栏「新建项目」要不要以新手引导的演示模式打开弹窗（两条链路的第二条）。
+ *
+ * 五条规则全部为真才进演示，任一条为假都按普通新建打开：
+ * 1. `collabEnabled`：协作功能可用——与新建弹窗的 `shareAvailable` 同源，API Key 模式下没有云端账号可共享；
+ * 2. 本机没有退出过引导——退出过就不再自动带人走（`collab-demo-guide-store` 里的机器级标记），
+ *    这一条同时兼顾「建项目之前就退出」那种云端还来不及记录的情况；
+ * 3. 本人名下的在线协作项目数为 0——与看板侧栏同一份 `projects`，只算 `role === "owner"`，加入过别人的项目不影响；
+ * 4. 云端在项目列表响应里给出 `demoEligible === true`——旧云端没有这个字段时视为 false，不能因此进演示；
+ * 5. 当前没有别的演示在进行，否则第二个演示会把正在走的那一个顶掉。
+ *
+ * @param options.demoGuideDone 本机是否已经退出过引导；不传时现读本机标记。
+ */
+export function shouldDemoOnNewProject(options: {
+  collabEnabled: boolean;
+  demoGuideActive: boolean;
+  demoGuideDone?: boolean;
+}): boolean {
+  if (!options.collabEnabled || options.demoGuideActive) return false;
+  if (options.demoGuideDone ?? readDemoGuideDone()) return false;
+  if (snapshot.demoEligible !== true) return false;
+  const owned = (snapshot.projects ?? []).filter((project) => project.role === "owner").length;
+  return owned === 0;
+}
+
+/** Asks the board to open the project-session picker for a project whose sharing just started. */
+export function requestTaskPicker(localProjectId: string): void {
+  update({ taskPickerFor: localProjectId });
+}
+
+/** Clears the picker request the board just acted on. */
+export function consumeTaskPickerRequest(): void {
+  if (snapshot.taskPickerFor) update({ taskPickerFor: null });
+}
+
+/**
+ * 切换到 API Key 模式（或遇到未登录状态）时把共享列表清空：云端项目不再属于当前环境，
+ * 侧栏的「已共享」标记与看板的任务都该随之消失，本机项目与任务不受影响。
+ */
+export function clearCollabProjects(): void {
+  inFlight = null;
+  update({
+    projects: null,
+    applications: [],
+    decisions: [],
+    selectedId: null,
+    loading: false,
+    error: null,
+    createOpen: false,
+    createShareDefault: false,
+    createDemo: false,
+    taskPickerFor: null,
+    notice: null,
+    maxOwnedProjects: null,
+    demoEligible: false
+  });
+}
+
+export function resetCollabProjectsStore(): void {
+  inFlight = null;
+  snapshot = {
+    projects: null,
+    applications: [],
+    decisions: [],
+    selectedId: null,
+    loading: false,
+    error: null,
+    createOpen: false,
+    createShareDefault: false,
+    createDemo: false,
+    taskPickerFor: null,
+    notice: null,
+    maxOwnedProjects: null,
+    demoEligible: false
+  };
+  listeners.clear();
+}
+
+/**
+ * 测试里有的客户端仍直接返回项目数组。正式客户端返回 `{ projects, applications? }`，
+ * `applications` 缺省表示云端还没有这份列表。
+ */
+function normalizeProjectList(
+  listed: {
+    projects: CollabProject[];
+    applications?: CollabApplication[];
+    decisions?: CollabApplicationDecision[];
+    maxOwnedProjects?: number;
+    demoEligible?: boolean;
+  } | CollabProject[]
+): {
+  projects: CollabProject[];
+  applications?: CollabApplication[];
+  decisions?: CollabApplicationDecision[];
+  maxOwnedProjects?: number;
+  demoEligible?: boolean;
+} {
+  if (Array.isArray(listed)) return { projects: listed };
+  return listed;
+}
+
+function messageOf(cause: unknown): string {
+  const raw = cause instanceof Error ? cause.message.trim() : String(cause).trim();
+  // Schema validation prints its whole issue list; leave it to the page's readable fallback.
+  if (!raw || raw.startsWith("[") || raw.startsWith("{")) return "";
+  return raw;
+}

@@ -32,6 +32,8 @@ export interface ModalProps {
   initialFocusRef?: RefObject<HTMLElement | null>;
   style?: CSSProperties;
   onClose?: () => void;
+  /** 新手引导的锚点：弹窗自己要作为亮区时，蒙版按这个属性找到它。 */
+  demoGuideAnchor?: string;
 }
 
 export function Modal(props: ModalProps) {
@@ -110,6 +112,7 @@ export function Modal(props: ModalProps) {
         style={props.style}
         tabIndex={-1}
         onKeyDown={trapModalFocus}
+        {...(props.demoGuideAnchor ? { "data-demo-guide": props.demoGuideAnchor } : {})}
         {...labelProps}
       >
         {showHeader && (

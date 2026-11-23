@@ -8,6 +8,7 @@ import {
   type AccountSessionView
 } from "@memmy/local-api-contracts";
 import type { DatabaseSync } from "node:sqlite";
+import { INSTALLATION_SCAN_SCOPE_UUID } from "../../installation-scan-scope.js";
 import { ensureAccountDefaults, getActiveAccountUuid, setActiveAccountUuid } from "../account-context.js";
 import type { SecretStore } from "../secret-store.js";
 
@@ -215,6 +216,31 @@ export function createAccountSessionRepository(db: DatabaseSync, secretStore: Se
         db.prepare("UPDATE cloud_accounts SET cloud_uuid_ref = ?, updated_at = ? WHERE uuid = ?").run(uuidRef, now, accountUuid);
       }
       ensureAccountDefaults(db, accountUuid);
+      // A reinstall wipes the local database while the cloud keeps the account's guide
+      // completion, so a returning user would be sent back through onboarding. Copy the
+      // cloud flag into the local row; the `has_finished_guide = 0` guard keeps a locally
+      // finished account untouched, which makes repeated logins idempotent.
+      if (input.profile.hasFinishedGuide === true) {
+        db.prepare(
+          `UPDATE account_onboarding_state
+          SET has_finished_guide = 1,
+              current_step = 'completed',
+              completed_at = COALESCE(completed_at, ?),
+              updated_at = ?
+          WHERE uuid = ?
+            AND has_finished_guide = 0`
+        ).run(now, now, accountUuid);
+        // The first-encounter report runs once per installation and gates the initial route.
+        // Migration 0031 back-fills it from an already finished account row, but on a fresh
+        // install it runs before any account exists, so the flag stays pending forever.
+        db.prepare(
+          `UPDATE account_onboarding_state
+          SET first_encounter_report_status = 'skipped',
+              updated_at = ?
+          WHERE uuid = ?
+            AND first_encounter_report_status = 'pending'`
+        ).run(now, INSTALLATION_SCAN_SCOPE_UUID);
+      }
       setActiveAccountUuid(db, accountUuid);
 
       return AccountSessionViewSchema.parse({

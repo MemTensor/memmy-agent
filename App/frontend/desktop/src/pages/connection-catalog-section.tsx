@@ -1,4 +1,5 @@
-import { Link2, MessageCircle, MoreHorizontal, Plus, RefreshCw, Search } from "lucide-react";
+import { Link2, MessageCircle, MoreHorizontal, Plus, RefreshCw } from "lucide-react";
+import { SearchField } from "../components/search-field.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { deriveIntegrationState, type IntegrationConnectionState } from "../integrations/connection-state.js";
 import { CATEGORY_TABS, IntegrationLogoBadge, type IntegrationCategoryTab, type IntegrationMeta } from "../integrations/integration-meta.js";
@@ -7,6 +8,9 @@ import { selectConnectionForIntegration, type ToolsState } from "../state/tools-
 
 export interface ConnectionCatalogSectionProps {
   kind: "tools" | "channels";
+  showHeader?: boolean;
+  showFilter?: boolean;
+  showToolbar?: boolean;
   /** The parent owns filtering and ordering; this view renders the supplied results. */
   items: IntegrationMeta[];
   tools: ToolsState;
@@ -34,7 +38,7 @@ export function ConnectionCatalogSection(props: ConnectionCatalogSectionProps) {
 
   return (
     <section className="memory-panel plugin-marketplace-section" aria-label={title}>
-      <div className="memory-panel__header">
+      {props.showHeader !== false ? <div className="memory-panel__header">
         <div className="memory-panel__header-main extension-catalog-heading">
           <Memmy pose={channels ? "chat" : "connect"} size={56} />
           <div className="extension-catalog-heading-copy">
@@ -48,10 +52,10 @@ export function ConnectionCatalogSection(props: ConnectionCatalogSectionProps) {
           aria-label={t("common.refresh")} title={t("common.refresh")}>
           <RefreshCw size={15} className={loading ? "animate-spin" : ""} aria-hidden="true" />
         </button>
-      </div>
+      </div> : null}
 
-      <div className="extension-catalog-toolbar">
-        <div className="memory-log-filter-group" aria-label={t("connections.catalog.filterByConnectionStatus")}>
+      {props.showToolbar !== false ? <div className="extension-catalog-toolbar">
+        {props.showFilter !== false ? <div className="memory-log-filter-group" aria-label={t("connections.catalog.filterByConnectionStatus")}>
           {(["all", "connected"] as const).map((filter) => (
             <button key={filter} type="button" aria-pressed={props.filter === filter}
               className={`memory-log-filter${props.filter === filter ? " memory-log-filter--active" : ""}`}
@@ -59,12 +63,8 @@ export function ConnectionCatalogSection(props: ConnectionCatalogSectionProps) {
               {filter === "all" ? t("memory.memories.all") : `${t("settings.computerUse.connected")} (${props.connectedCount})`}
             </button>
           ))}
-        </div>
-        <label className="extension-catalog-search">
-          <Search size={15} aria-hidden="true" />
-          <input type="search" aria-label={searchLabel} placeholder={searchLabel} value={props.search}
-            onChange={(event) => props.onSearchChange(event.target.value)} />
-        </label>
+        </div> : null}
+        <SearchField className="extension-catalog-search" label={searchLabel} value={props.search} onChange={props.onSearchChange} />
         {!channels && props.onCategoryChange ? (
           <label className="extension-catalog-category">
             <span className="sr-only">{t("connections.catalog.toolCategory")}</span>
@@ -74,13 +74,19 @@ export function ConnectionCatalogSection(props: ConnectionCatalogSectionProps) {
             </select>
           </label>
         ) : null}
-      </div>
+        {props.showHeader === false ? <button type="button" className="memory-refresh-button" disabled={loading} onClick={props.onRefresh}
+          aria-label={t("common.refresh")} title={t("common.refresh")}>
+          <RefreshCw size={15} className={loading ? "animate-spin" : ""} aria-hidden="true" />
+        </button> : null}
+      </div> : null}
 
       {error ? <p role="alert" className="mb-4 rounded-card border border-status-error/20 bg-status-error/5 p-3 text-sm text-status-error">{error}</p> : null}
       {loading ? <p role="status" className="mb-4 text-sm text-text-ink/55">{t("connections.catalog.loadingConnectionStatus")}</p> : null}
       {!loading && props.items.length === 0 ? (
-        <div className="memory-state-box">
-          {channels ? <MessageCircle size={24} aria-hidden="true" /> : <Link2 size={24} aria-hidden="true" />}
+        <div className="memory-state-box extension-catalog-empty-state">
+          <span className="extension-catalog-empty-state__icon">
+            {channels ? <MessageCircle size={20} aria-hidden="true" /> : <Link2 size={20} aria-hidden="true" />}
+          </span>
           <p>{props.filter === "connected" && !props.search
             ? t("connections.catalog.noConnectedItemsYet")
             : t("connections.catalog.noMatchingResults")}</p>

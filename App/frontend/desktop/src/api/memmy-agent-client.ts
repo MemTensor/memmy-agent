@@ -606,6 +606,11 @@ export type MemmyAgentWebuiThread = z.infer<typeof WebuiThreadSchema>;
 export type MemmyAgentSeededChat = z.infer<typeof SeedWebuiChatResponseSchema>;
 export type MemmyAgentLastCompaction = z.infer<typeof LastCompactionSchema>;
 export type ResolvedAgentArtifact = z.infer<typeof ResolvedArtifactSchema>;
+/**
+ * Which workspace an artifact request is authorized against: the session it came from, or the project
+ * whose files a task without a session yet is showing in its side panel.
+ */
+export type ArtifactScope = { sessionKey: string } | { projectId: string };
 export type UploadedAgentImage = z.infer<typeof UploadedAgentImageSchema>;
 export type UploadedAgentMedia = z.infer<typeof UploadedAgentMediaSchema>;
 
@@ -926,7 +931,11 @@ export interface MemmyAgentClient {
     options?: MemmyAgentRequestOptions
   ): Promise<MemmyAgentSidebarState>;
   createProject(
-    input: { mode: "blank" | "existing"; path: string; name?: string },
+    /**
+     * `allowShared` registers a project over a directory another project already uses: a shared project runs its
+     * tasks in the same folder as a local project while keeping its own sessions.
+     */
+    input: { mode: "blank" | "existing"; path: string; name?: string; allowShared?: boolean },
     options?: MemmyAgentRequestOptions
   ): Promise<MemmyAgentProjectMutationResult>;
   updateProject(
@@ -939,6 +948,15 @@ export interface MemmyAgentClient {
     projectId: string,
     options?: MemmyAgentRequestOptions
   ): Promise<MemmyAgentProjectDeleteResult>;
+  /**
+   * Moves every session of one project to another project running in the same folder. Used when a shared
+   * project is deleted so its sessions continue as local tasks.
+   */
+  reassignProjectSessions(
+    fromProjectId: string,
+    toProjectId: string,
+    options?: MemmyAgentRequestOptions
+  ): Promise<{ moved: number }>;
   readWebuiThread(sessionKey: string): Promise<MemmyAgentWebuiThread>;
   seedWebuiChat(input: {
     userText: string;
@@ -948,10 +966,10 @@ export interface MemmyAgentClient {
   readLastCompaction(sessionKey: string): Promise<MemmyAgentLastCompaction>;
   renameSession(sessionKey: string, title: string): Promise<MemmyAgentSessionSummary>;
   deleteSession(sessionKey: string): Promise<boolean>;
-  resolveArtifact(path: string, sessionKey: string): Promise<ResolvedAgentArtifact>;
+  resolveArtifact(path: string, scope: ArtifactScope): Promise<ResolvedAgentArtifact>;
   resolveRecording(path: string): Promise<string>;
-  revealArtifact(path: string, sessionKey: string): Promise<void>;
-  openArtifact(path: string, sessionKey: string): Promise<void>;
+  revealArtifact(path: string, scope: ArtifactScope): Promise<void>;
+  openArtifact(path: string, scope: ArtifactScope): Promise<void>;
   uploadAgentMedia(attachments: UploadAgentMediaInput[]): Promise<UploadedAgentMedia[]>;
   deleteRecordingFiles(paths: string[]): Promise<void>;
   uploadAgentImages(images: UploadAgentImageInput[]): Promise<UploadedAgentImage[]>;
@@ -1539,7 +1557,7 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
   }
 
   async createProject(
-    input: { mode: "blank" | "existing"; path: string; name?: string },
+    input: { mode: "blank" | "existing"; path: string; name?: string; allowShared?: boolean },
     options: MemmyAgentRequestOptions = {}
   ): Promise<MemmyAgentProjectMutationResult> {
     return this.request("/api/projects", ProjectMutationResponseSchema, {
@@ -1575,6 +1593,18 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return this.request(`/api/projects/${encodeURIComponent(projectId)}`, ProjectDeleteResponseSchema, {
       ...options,
       method: "DELETE"
+    });
+  }
+
+  async reassignProjectSessions(
+    fromProjectId: string,
+    toProjectId: string,
+    options: MemmyAgentRequestOptions = {}
+  ): Promise<{ moved: number }> {
+    return this.request("/api/sessions/reassign-project", z.object({ moved: z.number() }), {
+      ...options,
+      method: "POST",
+      body: { fromProjectId, toProjectId }
     });
   }
 
@@ -1615,10 +1645,10 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return response.deleted;
   }
 
-  async resolveArtifact(path: string, sessionKey: string): Promise<ResolvedAgentArtifact> {
+  async resolveArtifact(path: string, scope: ArtifactScope): Promise<ResolvedAgentArtifact> {
     return this.request("/api/webui/artifacts/resolve", ResolvedArtifactSchema, {
       method: "POST",
-      body: { path, sessionKey }
+      body: { path, ...scope }
     });
   }
 
@@ -1630,17 +1660,17 @@ class HttpMemmyAgentClient implements MemmyAgentClient {
     return new URL(result.media_url, this.baseUrl).toString();
   }
 
-  async revealArtifact(path: string, sessionKey: string): Promise<void> {
+  async revealArtifact(path: string, scope: ArtifactScope): Promise<void> {
     await this.request("/api/webui/artifacts/reveal", RevealArtifactResponseSchema, {
       method: "POST",
-      body: { path, sessionKey }
+      body: { path, ...scope }
     });
   }
 
-  async openArtifact(path: string, sessionKey: string): Promise<void> {
+  async openArtifact(path: string, scope: ArtifactScope): Promise<void> {
     await this.request("/api/webui/artifacts/open", RevealArtifactResponseSchema, {
       method: "POST",
-      body: { path, sessionKey }
+      body: { path, ...scope }
     });
   }
 

@@ -31,9 +31,8 @@ import type { ComposerContextReference } from "../state/agent-composer-state.js"
 import { startBrowserDownload } from "./agent-message-content.js";
 import { FilePreview } from "./file-preview/file-preview.js";
 import type { FilePreviewResource, FilePreviewViewState } from "./file-preview/file-preview-types.js";
-import { SidebarResizeHandle, useResizableSidebar } from "./sidebar-resize.js";
+import { SidebarResizeHandle, useResizableSidebar, WORKSPACE_PREVIEW_WIDTH_STORAGE_KEY } from "./sidebar-resize.js";
 
-const WORKSPACE_ARTIFACT_WIDTH_STORAGE_KEY = "memmy.workspaceArtifact.previewWidth";
 const WORKSPACE_ARTIFACT_BROWSER_WIDTH_STORAGE_KEY = "memmy.workspaceArtifact.fileBrowserWidth.v3";
 const ROOT_DIRECTORY_KEY = "";
 
@@ -202,7 +201,7 @@ export function WorkspaceArtifactPanel(props: WorkspaceArtifactPanelProps): Reac
     y: number;
   } | null>(null);
   const previewResize = useResizableSidebar({
-    storageKey: WORKSPACE_ARTIFACT_WIDTH_STORAGE_KEY,
+    storageKey: WORKSPACE_PREVIEW_WIDTH_STORAGE_KEY,
     defaultWidth: 520,
     minWidth: 360,
     maxWidth: 760,

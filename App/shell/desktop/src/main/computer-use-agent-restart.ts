@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { constants, accessSync, lstatSync, realpathSync } from 'node:fs';
+import { constants, accessSync, realpathSync, statSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -60,18 +60,7 @@ function listAgentProcesses(binary: string): AgentProcess[] {
   return agents;
 }
 
-function agentSocketExists(socketPath: string): boolean {
-  try {
-    if (!lstatSync(socketPath).isSocket()) throw new Error('Native Computer Use agent path is not a socket');
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
-  }
-}
-
-async function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
-  if (!agentSocketExists(agent.socketPath)) return;
+function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<void> {
   const bundle = dirname(dirname(dirname(binary)));
   return new Promise((resolveStop, rejectStop) => {
     let connected = false;
@@ -118,13 +107,15 @@ async function stopVerifiedAgent(binary: string, agent: AgentProcess): Promise<v
       }
     });
     socket.on('error', error => {
-      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+      const code = (error as NodeJS.ErrnoException).code ?? '';
+      if (!connected && ['ENOENT', 'ECONNREFUSED'].includes(code)) {
+        // On Linux, connecting to a regular file at the socket path also gives
+        // ECONNREFUSED. A non-socket file is a corrupt/stale state that must be
+        // rejected rather than silently ignored.
         try {
-          // A helper may have exited, but an unrelated replacement file is not
-          // evidence of successful shutdown (and must never be removed).
-          agentSocketExists(agent.socketPath);
-          finish();
-        } catch (reason) { finish(reason instanceof Error ? reason : new Error(String(reason))); }
+          if (!statSync(agent.socketPath).isSocket()) { finish(error); return; }
+        } catch { /* File not found or not stat-able: treat as harmless. */ }
+        finish();
       } else finish(error);
     });
     socket.on('close', () => finish(accepted ? undefined : new Error('Native agent closed without confirming shutdown')));

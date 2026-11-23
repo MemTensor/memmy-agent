@@ -5,9 +5,20 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { resolveOpencodeConfigDirectory } from "../../agent-paths.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
-import { pathExists, removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import {
+  removeMemmyProjectSkillDirectory,
+  removeMemmySkillDirectory,
+  replaceMemmyProjectSkillDirectory,
+  replaceMemmySkillDirectory
+} from "../skill-directory.js";
 import { renderMemmyOpencodePlugin, renderMemmyOpencodeResumeCommand } from "../templates/memmy-opencode-plugin.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
+import {
+  MEMMY_PROJECT_BOOTSTRAP_START_MARKER,
+  removeMemmyProjectBootstrapBlock,
+  renderMemmyProjectBootstrapBlock,
+  upsertMemmyProjectBootstrapBlock
+} from "../templates/memmy-project-skill.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../workspace-bridge/runtime-loader.js";
@@ -54,6 +65,7 @@ export function createOpencodeSkillTarget(deps: CreateOpencodeSkillTargetDeps = 
       const existing = removeCliMarkerBlock(await readTextFile(filePath));
       await writeFileAtomically(filePath, upsertMarkerBlock(existing, renderMemmySkillBootstrapManifest(manifest)));
       await replaceMemmySkillDirectory(rootDirectory, manifest);
+      await replaceMemmyProjectSkillDirectory(rootDirectory);
     },
 
     async uninstall(_targetId) {
@@ -64,13 +76,11 @@ export function createOpencodeSkillTarget(deps: CreateOpencodeSkillTargetDeps = 
 
       const filePath = join(root, TARGET_FILE_NAME);
       const existing = await readTextFile(filePath);
-      const next = removeMarkerBlock(removeCliMarkerBlock(existing));
-      if (next !== existing) await writeFileAtomically(filePath, next);
+      if (existing.includes(START_MARKER)) {
+        await writeFileAtomically(filePath, removeMarkerBlock(existing));
+      }
       await removeMemmySkillDirectory(root);
-    },
-
-    async isLegacySkillInstalled() {
-      return (await readTextFile(join(rootDirectory, TARGET_FILE_NAME))).includes(LEGACY_CLI_START_MARKER);
+      await removeMemmyProjectSkillDirectory(root);
     },
 
     async isInstalled(_targetId) {
@@ -90,8 +100,28 @@ export function createOpencodeSkillTarget(deps: CreateOpencodeSkillTargetDeps = 
       return config.plugin_integrity === assetRevision(installed);
     },
 
-    async isPluginInstalled() {
-      return pathExists(join(rootDirectory, PLUGIN_DIRECTORY_NAME, PLUGIN_FILE_NAME));
+    async writeProjectSkillBootstrap() {
+      await mkdir(rootDirectory, { recursive: true });
+      const filePath = join(rootDirectory, TARGET_FILE_NAME);
+      await writeFileAtomically(filePath, upsertMemmyProjectBootstrapBlock(await readTextFile(filePath)));
+    },
+
+    async removeProjectSkillBootstrap() {
+      const root = await resolveExistingDirectory(rootDirectory);
+      if (!root) {
+        return;
+      }
+
+      const filePath = join(root, TARGET_FILE_NAME);
+      const existing = await readTextFile(filePath);
+      if (!existing.includes(MEMMY_PROJECT_BOOTSTRAP_START_MARKER)) {
+        return;
+      }
+      await writeFileAtomically(filePath, removeMemmyProjectBootstrapBlock(existing));
+    },
+
+    async isProjectSkillBootstrapCurrent() {
+      return (await readTextFile(join(rootDirectory, TARGET_FILE_NAME))).includes(renderMemmyProjectBootstrapBlock());
     },
 
     async installPlugin(_targetId) {
@@ -122,6 +152,7 @@ export function createOpencodeSkillTarget(deps: CreateOpencodeSkillTargetDeps = 
         )
       );
       await replaceMemmySkillDirectory(rootDirectory, manifest);
+      await replaceMemmyProjectSkillDirectory(rootDirectory);
       // Publish the revision only after every managed file was installed.
       await writeFileAtomically(configPath, `${JSON.stringify({ ...config,
         plugin_revision: pluginRevision(assets), plugin_integrity: assetRevision(assets)
@@ -140,9 +171,11 @@ export function createOpencodeSkillTarget(deps: CreateOpencodeSkillTargetDeps = 
       await rm(join(root, COMMAND_DIRECTORY_NAME, RESUME_COMMAND_FILE_NAME), { force: true });
       const filePath = join(root, TARGET_FILE_NAME);
       const existing = await readTextFile(filePath);
-      const next = removeMarkerBlock(removeCliMarkerBlock(existing));
-      if (next !== existing) await writeFileAtomically(filePath, next);
+      if (existing.includes(START_MARKER)) {
+        await writeFileAtomically(filePath, removeMarkerBlock(existing));
+      }
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
     }
   };
 }
@@ -208,11 +241,11 @@ function upsertMarkerBlock(existing: string, manifest: SkillManifest): string {
 }
 
 function removeMarkerBlock(existing: string): string {
-  return existing.replace(new RegExp(createMarkerBlockPattern(START_MARKER), "gm"), "");
+  return existing.replace(createMarkerBlockPattern(START_MARKER), "");
 }
 
 function removeCliMarkerBlock(existing: string): string {
-  return existing.replace(new RegExp(createMarkerBlockPattern(LEGACY_CLI_START_MARKER, LEGACY_CLI_END_MARKER), "gm"), "");
+  return existing.replace(createMarkerBlockPattern(LEGACY_CLI_START_MARKER, LEGACY_CLI_END_MARKER), "");
 }
 
 function renderMarkerBlock(manifest: SkillManifest): string {
@@ -220,7 +253,7 @@ function renderMarkerBlock(manifest: SkillManifest): string {
 }
 
 function createMarkerBlockPattern(startMarker: string, endMarker = END_MARKER): RegExp {
-  return new RegExp(`${escapeRegExp(startMarker)}\\r?\\n[\\s\\S]*?${escapeRegExp(endMarker)}(?:\\r?\\n)?`, "m");
+  return new RegExp(`${escapeRegExp(startMarker)}\\n[\\s\\S]*?${escapeRegExp(endMarker)}\\n?`, "m");
 }
 
 async function writeFileAtomically(filePath: string, content: string): Promise<void> {

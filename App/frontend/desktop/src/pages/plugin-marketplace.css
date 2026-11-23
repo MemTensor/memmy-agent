@@ -24,17 +24,17 @@
 }
 
 .plugin-marketplace-tabs [role="tab"]:hover {
-  background: color-mix(in srgb, var(--color-action-sky) 6%, var(--color-background-paper));
+  background: color-mix(in srgb, var(--color-text-ink) 6%, var(--color-background-paper));
 }
 
 .plugin-marketplace-tabs [aria-selected="true"] {
-  background: var(--color-nav-active-bg);
-  color: color-mix(in srgb, var(--color-action-sky-hover) 60%, var(--color-text-ink));
+  background: color-mix(in srgb, var(--color-text-ink) 9%, var(--color-background-paper));
+  color: var(--color-text-ink);
   font-weight: 600;
 }
 
 .plugin-marketplace-tabs [role="tab"]:focus-visible {
-  outline: 2px solid var(--color-action-sky);
+  outline: 2px solid var(--color-text-ink);
   outline-offset: 2px;
 }
 
@@ -64,37 +64,10 @@
 }
 
 .extension-catalog-search {
-  display: flex;
   flex: 1 1 230px;
-  align-items: center;
-  gap: 8px;
   max-width: 300px;
-  min-width: 0;
-  height: 34px;
   margin-left: auto;
-  padding: 0 10px;
-  box-sizing: border-box;
-  border: 1px solid var(--border-content-panel);
-  border-radius: var(--radius-input);
-  background: var(--color-background-paper);
-  color: color-mix(in srgb, var(--color-text-ink) 50%, transparent);
 }
-.extension-catalog-search svg { flex: none; }
-.extension-catalog-search input {
-  width: 100%;
-  min-width: 0;
-  height: 100%;
-  border: 0;
-  outline: 0;
-  margin: 0;
-  padding: 0;
-  background: transparent;
-  color: var(--color-text-ink);
-  font: inherit;
-  font-size: 12px;
-}
-.extension-catalog-search input::placeholder { color: color-mix(in srgb, var(--color-text-ink) 45%, transparent); }
-.extension-catalog-search:focus-within { border-color: var(--color-action-sky); }
 .extension-catalog-category { display: flex; align-items: center; gap: 6px; font-size: 12px; color: color-mix(in srgb, var(--color-text-ink) 60%, transparent); }
 .extension-catalog-category select {
   height: 34px;
@@ -119,26 +92,38 @@
 
 .plugin-marketplace-section { container-type: inline-size; }
 
+.memory-state-box.extension-catalog-empty-state,
 .plugin-marketplace-empty-state {
   box-sizing: border-box;
   display: flex;
+  flex-direction: column;
   width: 100%;
-  min-height: 88px;
+  min-height: 160px;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  margin: 14px 0 0;
-  padding: 16px 24px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 30%, transparent);
-  border-radius: 10px;
-  background: var(--color-background-paper);
-  color: color-mix(in srgb, var(--color-text-ink) 52%, transparent);
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 24px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
   font-size: 13px;
   line-height: 20px;
   text-align: center;
 }
 
-.plugin-marketplace-empty-state svg { flex: none; color: color-mix(in srgb, var(--color-text-ink) 32%, transparent); }
+.extension-catalog-empty-state p { margin: 0; }
+.extension-catalog-empty-state__icon {
+  display: inline-flex;
+  width: 42px;
+  height: 42px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-text-ink) 4%, var(--color-background-paper));
+  color: color-mix(in srgb, var(--color-text-ink) 42%, transparent);
+}
 
 .plugin-marketplace-grid {
   display: grid;

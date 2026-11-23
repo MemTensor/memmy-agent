@@ -32,7 +32,6 @@ export type ToolExecutionContext = {
   outputLocation?: OutputDelivery;
   /** Set only when this call declared output_paths: report work that outlives the call. */
   trackOutputProducer?: (isRunning: () => boolean) => void;
-
 };
 
 const JSON_TYPE_MAP: Record<string, (value: any) => boolean> = {

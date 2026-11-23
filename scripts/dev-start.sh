@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MEMMY_AGENT_DIR="$ROOT_DIR/App/memmy-agent"
 DESKTOP_DIR="$ROOT_DIR/App/shell/desktop"
 MEMORY_CLI_ENTRY="$ROOT_DIR/Memory/dist/src/cli/index.js"
+PROJECT_CLI_ENTRY="$ROOT_DIR/App/backend/dist/src/cli/memmy-project.js"
 NPM_DEPENDENCY_STAMP="${MEMMY_NPM_DEPENDENCY_STAMP:-$ROOT_DIR/node_modules/.memmy-dev-dependency-fingerprint}"
 MEMMY_CONFIG_PATH="${MEMMY_CONFIG:-$HOME/.memmy/config.yaml}"
 MEMMY_WORKSPACE_IS_EXPLICIT=0
@@ -388,6 +389,7 @@ is_managed_user_cli_target() {
   case "$name" in
     memmy-memory) expected_suffix="Memory/dist/src/cli/index.js" ;;
     memmy) expected_suffix="App/memmy-agent/dist/main.js" ;;
+    memmy-project) expected_suffix="App/backend/dist/src/cli/memmy-project.js" ;;
     *) return 1 ;;
   esac
 
@@ -769,6 +771,13 @@ NODE
   install_user_cli_link "memmy" "$MEMMY_AGENT_DIR/dist/main.js"
   "$(user_cli_path "memmy")" --version >/dev/null
   log "memmy command is ready in $MEMMY_BIN_DIR"
+
+  # The project CLI is built with the desktop backend.
+  if [[ -f "$PROJECT_CLI_ENTRY" ]]; then
+    install_user_cli_link "memmy-project" "$PROJECT_CLI_ENTRY"
+  else
+    log "memmy-project is not built yet; the next dev-start links it"
+  fi
 
   if config_has_agent_model; then
     log "preserving existing model catalog; non-interactive onboard refresh is not required"

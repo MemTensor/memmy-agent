@@ -57,21 +57,20 @@ export function selectSlashPluginCommands(targets: PluginCommandTarget[]): Plugi
 }
 
 
-/** A scenario card together with the plugin that contributed it. */
+/** A scenario together with the plugin that contributed it. */
 export interface PluginScenarioTarget extends PluginScenarioContribution {
   pluginId: string;
 }
 
 
 /**
- * Collects the legal scenario cards for the empty home screen.
+ * Collects legal scenarios for the empty home screen's recommendations.
  *
- * Only the legal plugin contributes these cards, and only while the account
- * can use it. Office and every other plugin stay off this row. Without that
- * permission the home screen falls back to the three generic commands.
+ * Only active legal scenarios are available, and only while the account can use
+ * the plugin. Other plugins do not affect the home recommendations.
  *
  * @param plugins Installed plugins.
- * @returns Legal scenario cards, or an empty list when the plugin cannot be used.
+ * @returns Legal scenarios, or an empty list when the plugin cannot be used.
  */
 export function collectPluginScenarios(plugins: InstalledPlugin[]): PluginScenarioTarget[] {
   return plugins

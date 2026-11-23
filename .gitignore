@@ -26,6 +26,7 @@ artifacts/literature-review-*.json
 .env.*
 !.env.example
 App/backend/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs
+App/backend/src/adapters/outbound/skill-writer/project-hook/memmy-project-runtime.mjs
 Memory/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs
 
 # Office rendering executables and libraries are provisioned during packaging.

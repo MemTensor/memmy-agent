@@ -41,6 +41,7 @@ const requiredFiles = [
   "dist/runtime/memmy-agent/node_modules/@memmy/local-api-contracts/dist/index.js",
   "dist/runtime/memmy-agent/node_modules/@memmy/knowledge/dist/index.js",
   "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/workspace-bridge/memmy-workspace-bridge.mjs",
+  "node_modules/@memmy/backend/dist/src/adapters/outbound/skill-writer/project-hook/memmy-project-runtime.mjs",
 ];
 if (platform === "darwin") requiredFiles.push("dist/native/memmy-pip.node", "dist/native/menu-bar-appearance.node");
 if (platform === "win32") {

@@ -77,7 +77,7 @@ describe("HttpPluginRegistry", () => {
     const fetchFn = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(release), {
       headers: { "content-type": "application/json" }
     }));
-    const registry = createHttpPluginRegistry({ baseUrl: "https://registry.example", fetchFn: fetchFn as typeof fetch });
+    const registry = createHttpPluginRegistry({ baseUrl: "https://registry.example", fetchFn });
     await expect(registry.resolve(release.manifest.id, "1.0.0")).resolves.toEqual(release);
     expect(String(fetchFn.mock.calls[0]?.[0])).toBe(
       "https://registry.example/api/v1/plugins/com.example.review?version=1.0.0"
