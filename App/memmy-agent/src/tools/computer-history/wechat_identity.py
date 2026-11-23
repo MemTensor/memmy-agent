@@ -51,8 +51,8 @@ def display_name(username, profiles, self_id=None):
     return username
 
 
-def describe_message(table, sender_id, self_id, profiles, usernames):
-    chat_username = username_by_message_table(usernames).get(table[4:] if table.startswith("Msg_") else "")
+def describe_message(table, sender_id, self_id, profiles, usernames_by_table):
+    chat_username = usernames_by_table.get(table[4:] if table.startswith("Msg_") else "")
     known_self = bool(sender_id and self_id)
     return {
         "chatKind": chat_kind(chat_username),

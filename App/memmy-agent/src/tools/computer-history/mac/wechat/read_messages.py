@@ -440,7 +440,7 @@ def scan(root, keys, sqlcipher, cursor, limit, baseline, since=None):
                     remember_profile(profiles, row.get("user_name"))
             except RuntimeError:
                 pass
-            usernames = list(profiles)
+            usernames_by_table = identity.username_by_message_table(profiles)
             for table in tables(db):
                 identity_key = db_path.name + ":" + table
                 previous = int(cursor.get(identity_key, 0))
@@ -459,7 +459,7 @@ def scan(root, keys, sqlcipher, cursor, limit, baseline, since=None):
                     sender = (db.query("SELECT user_name FROM Name2Id WHERE rowid=" + str(int(row["real_sender_id"])))
                               if row["real_sender_id"] is not None else [])
                     sender_id = sender[0]["user_name"] if len(sender) == 1 else None
-                    described = identity.describe_message(table, sender_id, self_id, profiles, usernames)
+                    described = identity.describe_message(table, sender_id, self_id, profiles, usernames_by_table)
                     table_messages.append({
                         "database": db_path.name, "table": table,
                         "localId": int(row["local_id"]),
