@@ -40,6 +40,8 @@ static void *const kMenuBarAppearanceContext = (void *)&kMenuBarAppearanceContex
 @property(nonatomic, weak) NSStatusBarButton *button;
 @property(nonatomic, copy) NSString *lastMatch;
 @property(nonatomic) BOOL observing;
+@property(nonatomic) BOOL appearanceCheckPending;
+@property(nonatomic) NSUInteger observationGeneration;
 @property(nonatomic) napi_threadsafe_function callback;
 @end
 
@@ -52,12 +54,17 @@ static void *const kMenuBarAppearanceContext = (void *)&kMenuBarAppearanceContex
     [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
     return;
   }
-  NSString *match = AppearanceMatch(self.button.effectiveAppearance);
-  if (match == self.lastMatch || [match isEqualToString:self.lastMatch]) return;
-  self.lastMatch = match;
-  napi_threadsafe_function callback = self.callback;
+  if (!self.observing || self.appearanceCheckPending) return;
+  self.appearanceCheckPending = YES;
+  const NSUInteger generation = self.observationGeneration;
   dispatch_async(dispatch_get_main_queue(), ^{
-    if (callback) napi_call_threadsafe_function(callback, nullptr, napi_tsfn_nonblocking);
+    if (!self.observing || generation != self.observationGeneration) return;
+    self.appearanceCheckPending = NO;
+    // AppKit temporarily changes appearance while drawing status-item snapshots.
+    NSString *match = AppearanceMatch(self.button.effectiveAppearance);
+    if (match == self.lastMatch || [match isEqualToString:self.lastMatch]) return;
+    self.lastMatch = match;
+    if (self.callback) napi_call_threadsafe_function(self.callback, nullptr, napi_tsfn_nonblocking);
   });
 }
 
@@ -79,6 +86,8 @@ static void *const kMenuBarAppearanceContext = (void *)&kMenuBarAppearanceContex
 }
 
 - (void)unwatch {
+  self.observationGeneration += 1;
+  self.appearanceCheckPending = NO;
   if (!self.observing) return;
   NSStatusBarButton *button = self.button;
   self.observing = NO;
