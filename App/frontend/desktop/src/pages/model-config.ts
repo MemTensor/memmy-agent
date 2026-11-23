@@ -193,7 +193,7 @@ export const IMAGE_DEFAULT_ENDPOINTS: Record<ImageProtocol, string> = {
 };
 
 export const IMAGE_DEFAULT_MODEL_IDS: Record<ImageProtocol, string> = {
-  openai: "gpt-image-2",
+  openai: "gpt-image-2.6-flare",
   gemini: "imagen-4.0-generate-001",
   zhipu: "cogview-4",
   qwen: "qwen-image-2.0-pro",

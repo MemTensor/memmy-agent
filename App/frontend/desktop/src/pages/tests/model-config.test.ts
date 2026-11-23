@@ -213,10 +213,11 @@ describe("model config helpers", () => {
   });
 
   it("OpenAI 生图默认模型是 OpenAI 仍在提供的模型", () => {
-    // OpenAI retired gpt-image-1 on 2026-10-23; the replacement is gpt-image-2.
+    // OpenAI retired gpt-image-1 on 2026-10-23 and shuts gpt-image-2 down on 2027-02-10,
+    // naming gpt-image-2.6-flare or -sunburst.
     const openaiDefaults = createImageGenProviderConfig("openai", "", "", "", "");
     expect(openaiDefaults.endpoint).toBe("https://api.openai.com/v1");
-    expect(openaiDefaults.model).toBe("gpt-image-2");
+    expect(openaiDefaults.model).toBe("gpt-image-2.6-flare");
   });
 
   it("生图测试表单值携带所选协议", () => {
