@@ -10,6 +10,7 @@ import {
 } from "../../../../src/tools/computer-history/mac/summary-writer.js";
 import { buildSixHourSummary } from "../../../../src/tools/computer-history/mac/rollup.js";
 import { estimatePromptTokens } from "../../../../src/utils/helpers.js";
+import type { LLMRuntime } from "../../../../src/utils/llm-runtime.js";
 
 const summary = [
   "---",
@@ -49,6 +50,42 @@ function runtime(content: string) {
 }
 
 describe("segment narrative", () => {
+  it.each(["known", "unknown", "small-window", "unavailable"])("preserves narrative input budgeting with a prepared task snapshot: %s", async (kind) => {
+    const chatWithRetry = vi.fn(async (_args: any) => ({ content: '{"title":"t","description":"d","body":"b"}' }));
+    const provider = { chatWithRetry } as any;
+    const prepare = vi.fn(async (): Promise<LLMRuntime> => {
+      if (kind === "unavailable") throw new Error("Catalog unavailable");
+      return { provider, model: "gpt-4o", modelCapabilities: {
+        mode: kind === "unknown" ? "provider-fallback" : "catalog",
+        maxTokens: 4096, taskMaxTokens: 1800, reasoningEffort: "none",
+        ...(kind !== "unknown" ? { contextWindowTokens: kind === "small-window" ? 8192 : 128000 } : {})
+      } };
+    });
+    const onError = vi.fn();
+    const evidence = Array.from({ length: 500 }, (_, i) => `${i}: 用户阅读文档并讨论项目实现细节与测试结果。`).join("\n");
+    const result = await writeSegmentNarrative(() => ({ provider, model: "gpt-4o", prepare }), {
+      applications: ["Notes"], evidence, window: "10min", onError,
+      priorSummaries: ["此前讨论项目方案与验证结果。".repeat(200), "此前记录配置更新与问题处理。".repeat(200)]
+    });
+    expect(prepare).toHaveBeenCalledExactlyOnceWith({ maxTokens: 1800, thinkingEnabled: false });
+    if (kind === "unavailable") {
+      expect(result).toBeNull();
+      expect(chatWithRetry).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledOnce();
+    } else {
+      expect(result).toEqual({ title: "t", description: "d", body: "b" });
+      const args = chatWithRetry.mock.calls[0][0];
+      expect(args.modelCapabilities).toBe((await prepare.mock.results[0].value).modelCapabilities);
+      expect(args.maxTokens).toBe(1800);
+      expect(estimatePromptTokens(args.messages)).toBeLessThanOrEqual(MAX_NARRATIVE_INPUT_TOKENS);
+      const original = runtime('{"title":"t","description":"d","body":"b"}');
+      await writeSegmentNarrative(original.resolver, {
+        applications: ["Notes"], evidence, window: "10min",
+        priorSummaries: ["此前讨论项目方案与验证结果。".repeat(200), "此前记录配置更新与问题处理。".repeat(200)]
+      });
+      expect(args.messages).toEqual((original.chatWithRetry.mock.calls[0][0] as any).messages);
+    }
+  });
   it.each(["zh-CN", "en-US", "ja-JP", "fr-FR", "zh-Hant"])("generates %s directly for both windows in the existing single request", async (language) => {
     for (const window of ["10min", "6h"] as const) {
       const { resolver, chatWithRetry } = runtime('{"title":"t","description":"d","body":"b"}');

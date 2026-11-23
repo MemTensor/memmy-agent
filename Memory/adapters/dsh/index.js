@@ -1,3 +1,4 @@
+import { readAdapterConnection } from "../connection.js";
 import Schema from "@deepseek-ai/schemastery";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
@@ -12,14 +13,15 @@ export const Config = Schema.object({
   recallTimeoutMs: Schema.number().min(100).max(3000).default(3000)
 });
 
-const endpoint = (process.env.MEMMY_MEMORY_URL || "http://127.0.0.1:18960").replace(/\/$/, "");
 
 async function request(path, profileId, body, timeout = 3000) {
   const headers = { "content-type": "application/json", "x-memmy-profile-id": profileId };
-  if (process.env.MEMMY_MEMORY_TOKEN) headers.authorization = `Bearer ${process.env.MEMMY_MEMORY_TOKEN}`;
+  const { endpoint, token } = await readAdapterConnection(import.meta.url);
+  if (token) headers.authorization = `Bearer ${token}`;
   const response = await fetch(`${endpoint}/api/v1${path}`, {
     method: body === undefined ? "GET" : "POST",
     headers,
+    redirect: "error",
     body: body === undefined ? undefined : JSON.stringify({ ...body, source: "dsh" }),
     signal: AbortSignal.timeout(timeout)
   });

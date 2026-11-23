@@ -10,7 +10,7 @@ import {
   ToolCallRequest,
 } from "../../../src/providers/base.js";
 
-// Keep fallback coverage tied to an actual text-only model; agent_chat accepts images.
+// Capabilities are supplied explicitly by each fixture, never inferred from model names.
 const TEXT_ONLY_ACCOUNT_MODEL = "deepseek-v4-pro";
 
 function imageMessage(url = "data:image/png;base64,one", mediaPath = "/media/one.png") {
@@ -34,6 +34,7 @@ function modelContext(
     endpointId: "chat",
     protocol: "openai-chat-completions" as const,
     model,
+    inputModalities: ["text", "image"] as const,
     source,
     ownerAccountId: source === "account" ? "account-1" : null,
     capability: "agent" as const,
@@ -138,6 +139,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages,
       provider,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       actualModelContext: modelContext(),
     }));
 
@@ -272,6 +274,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       provider,
       model: "deepseek-v4-pro",
       actualModelContext: modelContext("byok", "deepseek-v4-pro", "custom"),
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
     }));
 
     expect(result.response).toMatchObject({
@@ -293,6 +296,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages: [imageMessage()],
       provider,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
     }));
 
     expect(result.response.errorCategory).toBe("image_input_unsupported");
@@ -328,6 +332,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages,
       provider,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       actualModelContext: modelContext(),
     }));
 
@@ -352,6 +357,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages: [imageMessage()],
       provider,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       actualModelContext: modelContext("byok"),
       injectionCallback,
     }));
@@ -381,6 +387,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages: [imageMessage()],
       provider,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       actualModelContext: modelContext(),
     }));
 
@@ -410,6 +417,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages: [imageMessage()],
       provider,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       actualModelContext: modelContext(),
       injectionCallback,
     }));
@@ -473,6 +481,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       provider,
       tools,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       maxIterations: 3,
       actualModelContext: modelContext(),
     }));
@@ -511,6 +520,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       provider,
       tools,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       maxIterations: 3,
       actualModelContext: modelContext(),
       injectionCallback: async () => {
@@ -560,6 +570,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       provider,
       tools,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       maxIterations: 1,
       maxIterationsFinalPrompt: "Give the final answer now.",
       actualModelContext: modelContext(),
@@ -591,6 +602,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       provider,
       tools,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       maxIterations: 1,
       maxIterationsFinalPrompt: "Give the final answer now.",
       actualModelContext: modelContext(),
@@ -662,6 +674,7 @@ describe("AgentRunner account image-to-text fallback", () => {
       initialMessages: [imageMessage()],
       provider,
       model: TEXT_ONLY_ACCOUNT_MODEL,
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       actualModelContext: modelContext(),
       abortSignal: controller.signal,
     }));

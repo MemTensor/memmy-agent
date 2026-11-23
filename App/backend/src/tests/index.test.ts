@@ -13,6 +13,7 @@ import { createLocalBackend, readMemoryLayerConfig, type CreateLocalBackendOptio
 import { createAppStateStore } from "../infrastructure/app-state-store/index.js";
 import { createMockCloudClient } from "./support/mock-cloud-client.js";
 import { createMockMemoryClient } from "./support/mock-memory-client.js";
+import { readModelCapabilityCatalog, writeModelCapabilityCatalog } from "../infrastructure/model-capability-catalog/index.js";
 
 const mcpBridgeWrites = vi.hoisted(() => ({
   beforePatch: undefined as ((serverName: string) => void | Promise<void>) | undefined,
@@ -167,6 +168,92 @@ afterEach(async () => {
 });
 
 describe("local api", () => {
+  it.each([
+    { hasLocal: false, cloudFails: false, credential: null },
+    { hasLocal: false, cloudFails: false, credential: "catalog-test-credential" },
+    { hasLocal: false, cloudFails: false, credential: "expired-credential" },
+    { hasLocal: true, cloudFails: false, credential: null },
+    { hasLocal: true, cloudFails: true, credential: null },
+    { hasLocal: false, cloudFails: true, credential: null }
+  ])("synchronizes the model catalog independently of login and continues after failure: %j", async ({ hasLocal, cloudFails, credential }) => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-catalog-startup-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const filePath = join(tempDir, "models.json");
+    const catalog = {
+      catalogVersion: 21,
+      models: { "gpt-4o": { inputModalities: ["text" as const, "image" as const], contextWindowTokens: 128000, maxTokens: 16384 } }
+    };
+    if (hasLocal) await writeModelCapabilityCatalog(catalog, filePath);
+    const store = createAppStateStore({ databasePath });
+    try {
+      if (credential) store.repositories.accountSession.upsert({
+        uuid: "catalog-test-account",
+        cloudUuid: credential,
+        profile: {
+          userId: "catalog-test-user", nickname: "Catalog test", email: "catalog@example.test",
+          phoneNumber: null, avatarUrl: null, planType: "free", hasFinishedGuide: true,
+          region: null, registeredAt: null, rawProfile: {}
+        }
+      });
+    } finally {
+      store.close();
+    }
+    const getModelCapabilityCatalog = vi.fn<CloudClient["getModelCapabilityCatalog"]>(async () => {
+      if (cloudFails) throw new Error("Cloud unavailable");
+      return { status: "updated", catalog: { ...catalog, catalogVersion: 22 } };
+    });
+    backend = await createLocalBackend({
+      databasePath,
+      memmyConfigPath: join(tempDir, "config.yaml"),
+      modelCapabilityCatalogPath: filePath,
+      runtimeConfigPath: join(tempDir, "runtime.json"),
+      localToken: "test-token",
+      memoryClient: createMockMemoryClient(),
+      cloudClient: { ...createMockCloudClient(), getModelCapabilityCatalog }
+    });
+    await vi.waitFor(() => expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({
+      ...(hasLocal ? { catalogVersion: 21 } : {})
+    }));
+    await vi.waitFor(async () => expect(await readModelCapabilityCatalog(filePath)).toEqual(
+      cloudFails ? hasLocal ? catalog : null : { ...catalog, catalogVersion: 22 }
+    ));
+    const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/bootstrap`, {
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+    expect(response.status).toBe(200);
+    const modelView = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-config`, {
+      headers: { "x-memmy-local-token": "test-token" }
+    });
+    expect(modelView.status).toBe(200);
+    const view = await modelView.json() as { capabilityCatalog?: unknown };
+    if (cloudFails && !hasLocal) expect(view).not.toHaveProperty("capabilityCatalog");
+    else expect(view.capabilityCatalog).toEqual(cloudFails ? catalog : { ...catalog, catalogVersion: 22 });
+    expect(YAML.parse(readFileSync(join(tempDir, "config.yaml"), "utf8"))).not.toHaveProperty("catalogVersion");
+    const rejectedRefresh = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-catalog/refresh`, { method: "POST" });
+    expect(rejectedRefresh.status).toBe(401);
+    if (!cloudFails) {
+      const refreshed = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-catalog/refresh`, {
+        method: "POST", headers: { "x-memmy-local-token": "test-token" }
+      });
+      expect(refreshed.status).toBe(200);
+      expect(await refreshed.json()).toEqual({ status: "synced", hasValidCatalog: true, catalogVersion: 22 });
+      expect(getModelCapabilityCatalog).toHaveBeenCalledTimes(2);
+      if (credential) {
+        const logout = await fetch(`${backend.runtimeConfig.baseUrl}/api/account/logout`, {
+          method: "POST", headers: { "x-memmy-local-token": "test-token" }
+        });
+        expect(logout.status).toBe(200);
+        const afterLogout = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/model-catalog/refresh`, {
+          method: "POST", headers: { "x-memmy-local-token": "test-token" }
+        });
+        expect(afterLogout.status).toBe(200);
+        expect(await afterLogout.json()).toEqual({ status: "synced", hasValidCatalog: true, catalogVersion: 22 });
+        expect(getModelCapabilityCatalog).toHaveBeenLastCalledWith({ catalogVersion: 22 });
+        expect(getModelCapabilityCatalog).toHaveBeenCalledTimes(3);
+      }
+    }
+  });
+
   it("requires an explicit Memmy config path instead of using the user's home directory", async () => {
     const previousMemmyConfig = process.env.MEMMY_CONFIG;
     delete process.env.MEMMY_CONFIG;
@@ -184,6 +271,57 @@ describe("local api", () => {
       ).rejects.toThrow("memmyConfigPath or MEMMY_CONFIG is required");
     } finally {
       restoreOptionalEnv("MEMMY_CONFIG", previousMemmyConfig);
+    }
+  });
+
+  it("recovers a refused permission after a failed save response and backend restart", async () => {
+    // Startup now reconciles the plugin catalog; keep this permission test offline.
+    const realFetch = globalThis.fetch;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname === "/api/v1/plugins") return Promise.resolve(Response.json([]));
+      return realFetch(input, init);
+    });
+    try {
+      tempDir = mkdtempSync(join(tmpdir(), "memmy-backend-refusal-restart-"));
+      const databasePath = join(tempDir, "app.sqlite");
+      const memmyConfigPath = join(tempDir, "config.yaml");
+      const initial = createAppStateStore({ databasePath });
+      initial.repositories.bootstrap.updateOnboarding({ scanPermission: "scan_only" });
+      initial.close();
+      const baseClient = createMockMemoryClient();
+      const options = {
+        databasePath, memmyConfigPath,
+        runtimeConfigPath: join(tempDir, "runtime.json"),
+        localToken: "test-token",
+        cloudClient: createMockCloudClient(),
+        memoryClient: {
+          ...baseClient,
+          async reloadConfig(input: Parameters<MemoryClient["reloadConfig"]>[0]) {
+            if (input?.reason === "scan_permission_saved") throw new Error("simulated Memory offline");
+            return baseClient.reloadConfig(input);
+          }
+        }
+      };
+      backend = await createLocalBackend(options);
+      const response = await fetch(`${backend.runtimeConfig.baseUrl}/api/app/onboarding`, {
+        method: "PATCH", headers: { "x-memmy-local-token": "test-token", "content-type": "application/json" },
+        body: JSON.stringify({ scanPermission: "none", currentStep: "product_tour_required" })
+      });
+      expect(response.status).toBe(500);
+      expect(YAML.parse(readFileSync(memmyConfigPath, "utf8")).memmyMemory.agentAccess).toMatchObject({
+        scanPermission: "none", autoScanKnownAgents: false, watchFileChanges: false
+      });
+      await backend.close();
+      backend = await createLocalBackend({ ...options, memoryClient: baseClient });
+      const restored = createAppStateStore({ databasePath });
+      try {
+        expect(restored.repositories.bootstrap.getOnboardingState()).toMatchObject({
+          scanPermission: "none", currentStep: "scan_permission_required"
+        });
+      } finally { restored.close(); }
+    } finally {
+      fetchMock.mockRestore();
     }
   });
 
@@ -702,6 +840,43 @@ describe("local api", () => {
       baseUrl: "http://127.0.0.1:18960",
       timeoutMs: 20_000
     });
+  });
+
+  it("ignores empty credential aliases instead of hiding the active service token", () => {
+    expect(readMemoryLayerConfig({ MEMMY_MEMORY_URL: "http://127.0.0.1:18960", MEMMY_MEMORY_LAYER_TOKEN: " ", MEMMY_MEMORY_TOKEN: "", MEMORY_SERVICE_TOKEN: "configured-token" })).toMatchObject({ token: "configured-token" });
+  });
+
+  it.each(["MEMMY_MEMORY_LAYER_URL", "MEMMY_MEMORY_URL", "MEMORY_SERVICE_URL"])("uses only matching credentials for %s", (urlKey) => {
+    tempDir = mkdtempSync(join(tmpdir(), "memory-origin-"));
+    const configPath = join(tempDir, "config.yaml");
+    writeFileSync(configPath, "memmyMemory: { storage: { endpoint: 'https://NEW.test:443', token: new-token } }");
+    const env = {
+      MEMMY_CONFIG: configPath,
+      [urlKey]: "https://new.test/",
+      MEMORY_SERVICE_TOKEN: "old-token",
+      ...(urlKey !== "MEMORY_SERVICE_URL" ? { MEMORY_SERVICE_URL: "https://old.test" } : {}),
+      MEMMY_MEMORY_LAYER_TOKEN: "",
+      MEMMY_MEMORY_TOKEN: ""
+    };
+    expect(readMemoryLayerConfig(env)?.token).toBe(urlKey === "MEMORY_SERVICE_URL" ? "old-token" : "new-token");
+    // A token without its own URL belongs to the file origin, not whichever URL won precedence.
+    expect(readMemoryLayerConfig({ MEMMY_CONFIG: configPath, MEMMY_MEMORY_URL: "http://other.test", MEMMY_MEMORY_LAYER_TOKEN: "unpaired-file-token" })?.token).toBe("");
+    expect(readMemoryLayerConfig({ ...env, MEMMY_MEMORY_LAYER_URL: "https://layer.test", MEMMY_MEMORY_LAYER_TOKEN: "layer-token" })?.token).toBe("layer-token");
+  });
+
+  it("rereads initialized and rotated file credentials while rejecting cross-origin fallback", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memory-token-refresh-"));
+    const configPath = join(tempDir, "config.yaml");
+    const env = { MEMMY_CONFIG: configPath, MEMMY_MEMORY_LAYER_URL: "http://memory.test" };
+    expect(readMemoryLayerConfig(env)?.token).toBe("");
+    for (const token of ["initialized", "rotated"]) {
+      writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint: "http://MEMORY.test:80/", token } } }));
+      expect(readMemoryLayerConfig(env)?.token).toBe(token);
+    }
+    for (const endpoint of ["https://memory.test", "http://other.test", "http://memory.test:81"]) {
+      writeFileSync(configPath, JSON.stringify({ memmyMemory: { storage: { endpoint, token: "unrelated" } } }));
+      expect(readMemoryLayerConfig(env)?.token).toBe("");
+    }
   });
 
   it("accepts Memory service URL aliases for the writable Memory Layer client", () => {

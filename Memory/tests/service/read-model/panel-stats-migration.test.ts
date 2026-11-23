@@ -1,5 +1,5 @@
-import {afterEach,expect,it} from 'vitest';
-import {mkdtempSync,mkdirSync,writeFileSync,existsSync,rmSync} from 'node:fs';
+import {afterAll,afterEach,beforeAll,expect,it} from 'vitest';
+import {copyFileSync,mkdtempSync,mkdirSync,writeFileSync,existsSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
@@ -8,8 +8,19 @@ import {openCacheFixture} from '../../fixtures/panel-cache-fixture.js';
 import {panelSafetyToken} from '../../../src/storage/panel-security.js';
 import {loadStatistics,saveStatistics} from '../../../src/service/panel/stats-worker-store.js';
 import {PanelMemoryBudget} from '../../../src/service/panel/memory-budget.js';
+let schemaRoot:string;let schemaPath:string;let schemaVersion:number;
+beforeAll(()=>{
+ schemaRoot=mkdtempSync(join(tmpdir(),'panel-stats-schema-'));schemaPath=join(schemaRoot,'empty.sqlite');
+ const source=new MemoryDb({path:schemaPath});
+ try {schemaVersion=source.schemaVersion().version;source.db.pragma('wal_checkpoint(TRUNCATE)');} finally {source.close();}
+});
+afterAll(()=>{if(schemaRoot)rmSync(schemaRoot,{recursive:true,force:true});});
 const close:Array<()=>void>=[];afterEach(()=>close.splice(0).reverse().forEach(fn=>fn()));
-function fixture(){const root=mkdtempSync(join(tmpdir(),'panel-json-'));close.push(()=>rmSync(root,{recursive:true,force:true}));const path=root+'/memory.sqlite';const db=new MemoryDb({path});close.push(()=>db.close());const reader=openCacheFixture(path);close.push(()=>reader.close());
+function fixture(){const root=mkdtempSync(join(tmpdir(),'panel-json-'));close.push(()=>rmSync(root,{recursive:true,force:true}));const path=root+'/memory.sqlite';copyFileSync(schemaPath,path);const db=new MemoryDb({path});close.push(()=>db.close());
+ expect(db.schemaVersion().version).toBe(schemaVersion);
+ expect(db.db.prepare('SELECT count(*) FROM memories').pluck().get()).toBe(0);
+ expect(db.db.prepare('SELECT count(*) FROM source_changes').pluck().get()).toBe(0);
+ const reader=openCacheFixture(path);close.push(()=>reader.close());
  const key=JSON.stringify([{},null,'UTC']),dir=path+'.panel-statistics';mkdirSync(dir);
  const file=dir+'/overview-'+createHash('sha256').update(key).digest('hex')+'.json';
  const snapshot={data:{count:3},safety:panelSafetyToken(db.db),revision:'2:999',day:'2026-11-03',generatedAt:'2026-11-03T00:00:00Z'};

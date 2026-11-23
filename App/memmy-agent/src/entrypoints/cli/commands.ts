@@ -1162,6 +1162,7 @@ export async function gateway({
     cronService: cron,
     projectStore,
   });
+  loop.startL3UserProjectSync?.();
   reportStartupStage("agent-loop-created");
   if (loop.sessions instanceof SessionManager) {
     loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, canonicalWorkspace);

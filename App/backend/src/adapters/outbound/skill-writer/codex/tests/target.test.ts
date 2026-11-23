@@ -1,3 +1,4 @@
+import "../../tests/isolated-target-home.js";
 /** Target tests. */
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -151,7 +152,7 @@ describe("codex skill target", () => {
     await expect(target.isInstalledHookCurrent?.()).resolves.toBe(true);
   });
 
-  it("installs the project hook beside the memory hook and trusts its own events", async () => {
+  it("serializes project and memory hook installation and trusts their own events", async () => {
     const { rootDirectory, memmyConfigPath } = createFixture();
     const trustCalls: Array<{ hookCommand: string; events?: readonly string[] }> = [];
     const target = createCodexSkillTarget({
@@ -162,8 +163,7 @@ describe("codex skill target", () => {
       }
     });
 
-    await target.installPlugin?.("codex");
-    await target.installProjectHook?.();
+    await Promise.all([target.installPlugin?.("codex"), target.installProjectHook?.()]);
     await target.installProjectHook?.();
 
     const config = readHooksFile(rootDirectory);
@@ -206,6 +206,27 @@ describe("codex skill target", () => {
     expect(existsSync(join(hookDirectory, "memmy-project-config.json"))).toBe(false);
     expect(readFileSync(join(rootDirectory, "hooks.json"), "utf8")).toBe(before);
     await expect(target.isProjectHookInstalled?.()).resolves.toBe(false);
+  });
+
+  it("preserves later user edits when project hook trust fails", async () => {
+    const { rootDirectory, memmyConfigPath } = createFixture();
+    const hooksFilePath = join(rootDirectory, "hooks.json");
+    const laterContent = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "user-edit" }] }] } });
+    const target = createCodexSkillTarget({
+      rootDirectory,
+      memmyConfigPath,
+      trustHooks: async () => {
+        writeFileSync(hooksFilePath, laterContent);
+        throw new Error("project trust failed");
+      }
+    });
+
+    await expect(target.installProjectHook?.()).rejects.toThrow("rollback preserved conflicting user edits");
+
+    expect(readFileSync(hooksFilePath, "utf8")).toBe(laterContent);
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-project-hook.mjs"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-project-runtime.mjs"))).toBe(false);
+    expect(existsSync(join(rootDirectory, "hooks", "memmy-project-config.json"))).toBe(false);
   });
 
   it("removes only the project hook entries from hooks.json", async () => {

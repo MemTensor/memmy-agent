@@ -36,9 +36,31 @@ async function run(scan: ReturnType<typeof create>, sourceId = "fixture", mode: 
 }
 const state = (root: string) => JSON.parse(readFileSync(join(root, "state.json"), "utf8"));
 const stub = (overrides = {}) => ({ withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory: vi.fn((input: { requestId: string }) => ({ id: input.requestId, duplicate: false })),
-  enqueuePendingImportSummaries: vi.fn(), ...overrides }) as unknown as MemoryService;
+  retryFailedMemoryProcessingOnScan: vi.fn(() => false), enqueuePendingImportSummaries: vi.fn(), ...overrides }) as unknown as MemoryService;
 
 describe("backend scan behavior preserved in Memory", () => {
+  it.each([
+    { mode: "initial_subset", duplicate: true, recoveryCalls: 1 },
+    { mode: "full", duplicate: true, recoveryCalls: 1 },
+    { mode: "incremental", duplicate: true, recoveryCalls: 0 },
+    { mode: "initial_subset", duplicate: false, recoveryCalls: 0 },
+    { mode: "full", duplicate: false, recoveryCalls: 0 },
+    { mode: "incremental", duplicate: false, recoveryCalls: 0 }
+  ] as const)("requests recovery only for explicit duplicate scans: $mode, duplicate=$duplicate", async ({ mode, duplicate, recoveryCalls }) => {
+    const root = fixture.createTestRoot();
+    const service = stub({ addMemory: vi.fn(() => ({ id: "existing-memory", duplicate })) });
+    const scan = create(root, service, [adapter(turn("one"))]);
+    expect((await run(scan, "fixture", mode)).error).toBeNull();
+    expect(service.addMemory).toHaveBeenCalledOnce();
+    expect(service.retryFailedMemoryProcessingOnScan).toHaveBeenCalledTimes(recoveryCalls);
+    if (recoveryCalls) {
+      expect(service.retryFailedMemoryProcessingOnScan).toHaveBeenCalledWith("existing-memory", {
+        source: "fixture", namespace: { source: "fixture", profileId: "default" }
+      });
+    }
+    expect(state(root).sources.fixture).toMatchObject({ messageCount: 2, latestSeenAt: turn("one")[1]!.createdAt });
+  });
+
   it("keeps real Pi history counts and memory rows stable across scans and restart", async () => {
     const { root, service, db } = fixture.createTestService();
     const sessions = join(root, "pi"); mkdirSync(sessions);
@@ -92,8 +114,10 @@ describe("backend scan behavior preserved in Memory", () => {
     await scan.dispose(); fail = false;
     const next = create(root, service, [source]);
     expect((await run(next, "fixture", "full")).error).toBeNull();
+    expect(service.retryFailedMemoryProcessingOnScan).toHaveBeenCalledTimes(2);
     expect(state(root).sources.fixture.messageCount).toBe(4);
     expect((await run(next)).error).toBeNull();
+    expect(service.retryFailedMemoryProcessingOnScan).toHaveBeenCalledTimes(2);
     expect(state(root).sources.fixture.messageCount).toBe(4);
   });
 
@@ -129,6 +153,7 @@ describe("backend scan behavior preserved in Memory", () => {
     expect(state(root).sources.fixture).toMatchObject({ messageCount: 4, recoveryPending: false });
     expect((await run(scan)).error).toBeNull();
     expect(modes).toEqual([true, true, false]);
+    expect(service.retryFailedMemoryProcessingOnScan).toHaveBeenCalledTimes(2);
     expect(state(root).sources.fixture.messageCount).toBe(4);
   });
 

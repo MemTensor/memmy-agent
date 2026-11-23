@@ -13,10 +13,13 @@ import {
   ScanResultPageSchema,
   OkResponseSchema,
   AddMemoryOutputSchema,
+  AgentSkillReconcileOutputSchema,
+  SkillArchiveStateOutputSchema,
   ApiErrorBodySchema,
   CloseSessionOutputSchema,
   CompleteTurnOutputSchema,
   SourceTurnCompleteOutputSchema,
+  L3ScanSessionsFreezeResponseSchema,
   DeleteMemoryOutputSchema,
   EmbeddingInferenceOutputSchema,
   DeletePanelTaskOutputSchema,
@@ -38,6 +41,7 @@ import {
   RetryMemoryProcessingOutputSchema,
   WorkerRunOutputSchema
 } from "@memmy/local-api-contracts";
+import { randomUUID } from "node:crypto";
 import { z, type ZodType } from "zod";
 import { MemoryLayerError, MemoryLayerNetworkError } from "./errors.js";
 import { buildMemoryLayerUrl, MEMORY_LAYER_PATHS } from "./memory-layer-endpoints.js";
@@ -59,6 +63,8 @@ export interface MemoryLayerConfig {
 export interface CreateHttpMemoryClientOptions {
   /** Fetch impl. */
   fetchImpl?: typeof fetch;
+  /** Refresh credentials for the pinned service before sending each request. */
+  resolveToken?: () => string | undefined;
 }
 
 type PathKey = keyof typeof MEMORY_LAYER_PATHS;
@@ -99,13 +105,14 @@ export function createHttpMemoryClient(
       async () => {
         const timeoutSignal = AbortSignal.timeout(requestOptions.timeoutMs ?? config.timeoutMs);
         const hasBody = requestOptions.body !== undefined;
+        const token = options.resolveToken ? options.resolveToken() : config.token;
         const response = await fetchWithMappedNetworkErrors(fetchImpl, url, {
           method,
           headers: {
             ...(hasBody ? { "content-type": "application/json" } : {}),
             "x-memmy-time-zone": normalizeTimeZoneOffset(requestOptions.context?.timeZone),
             ...(requestOptions.context?.userId ? { "x-memmy-user-id": requestOptions.context.userId } : {}),
-            authorization: `Bearer ${config.token}`
+            ...(token ? { authorization: `Bearer ${token}` } : {})
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
           signal: combineAbortSignals(timeoutSignal, requestOptions.signal ?? requestOptions.context?.signal)
@@ -125,19 +132,21 @@ export function createHttpMemoryClient(
           throw new MemoryLayerError("memory_scan_upgrade_required", 503,
             "The running Memory service does not support unified scanning. Update and restart that service, then try again.");
         }
-        if (response.status >= 500) {
-          throw new MemoryLayerError("memory_layer_unavailable", 503, "memory layer 5xx");
-        }
-
         const rawBody = await response.json().catch(() => undefined);
         const parsed = ApiErrorBodySchema.safeParse(rawBody);
         if (parsed.success) {
-          throw new MemoryLayerError(parsed.data.error.code, response.status, parsed.data.error.message);
+          throw new MemoryLayerError(
+            parsed.data.error.code,
+            response.status,
+            parsed.data.error.message,
+            undefined,
+            parsed.data.error.requestId
+          );
         }
         throw new MemoryLayerError(
           response.status >= 500 ? "memory_layer_unavailable" : "internal",
-          response.status,
-          "memory layer returned an unrecognized error response",
+          response.status >= 500 ? 503 : response.status,
+          response.status >= 500 ? "memory layer 5xx" : "memory layer returned an unrecognized error response",
           rawBody
         );
       },
@@ -156,6 +165,7 @@ export function createHttpMemoryClient(
 
   return {
     agentSources: {
+      connectionState: (sourceId) => request("GET", "agentSourceConnectionState", z.object({ connectionState: z.enum(["connected", "disconnected"]).nullable(), connectionEvent: z.object({ id: z.string().min(1), revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(), state: z.enum(["connected", "disconnected"]), kind: z.enum(["skill", "plugin"]).optional() }).optional() }), { params: { sourceId }, maxRetries: 0 }),
       list: () => request("GET", "agentSources", MemoryAgentSourceListSchema),
       start: (input) => request("POST", "agentSourceScan", AgentSourceScanJobResponseSchema, { body: input, maxRetries: 0 }),
       status: () => request("GET", "agentSourceStatus", MemoryAgentSourceScanStateSchema),
@@ -217,6 +227,12 @@ export function createHttpMemoryClient(
       return request("POST", "completeSourceTurn", SourceTurnCompleteOutputSchema, { body: input, context });
     },
 
+    async freezeScanSessions(source, sessionIds, context) {
+      // The L3 envelope resolves the owner the same way the source turns that opened these Sessions did.
+      const body = { requestId: randomUUID(), adapterId: `agent-source:${source}`, source, sessionIds };
+      return request("POST", "freezeScanSessions", L3ScanSessionsFreezeResponseSchema, { body, context });
+    },
+
     async search(input, context) {
       return request("POST", "search", SearchOutputSchema, { body: input, context });
     },
@@ -231,6 +247,22 @@ export function createHttpMemoryClient(
 
     async addMemory(input, context) {
       return request("POST", "addMemory", AddMemoryOutputSchema, { body: input, context });
+    },
+
+    async reconcileAgentSkills(input, context) {
+      return request("POST", "reconcileAgentSkills", AgentSkillReconcileOutputSchema, {
+        body: input,
+        context,
+        ...(input.connectionState !== undefined || input.disconnected === true ? { maxRetries: 0 } : {})
+      });
+    },
+
+    async archiveSkill(skillId, context) {
+      return request("POST", "archiveSkill", SkillArchiveStateOutputSchema, { body: { skillId }, context });
+    },
+
+    async reactivateSkill(skillId, context) {
+      return request("POST", "reactivateSkill", SkillArchiveStateOutputSchema, { body: { skillId }, context });
     },
 
     async getMemory(input, context) {

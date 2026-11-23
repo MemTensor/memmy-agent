@@ -61,6 +61,8 @@ export interface AgentSourceRepository {
   removeSource(sourceId: string): void;
   setStatus(sourceId: string, status: AgentSourceStatus): void;
   setConnectionState(sourceId: string, status: AgentSourceStatus, autoInjectSuppressed: boolean): void;
+  setSuppressedRevision?(sourceId: string, revision: number | null): void;
+  getSuppressedRevision?(sourceId: string): number | null;
   isAutoInjectSuppressed(sourceId: string): boolean;
   setLastScannedAt(sourceId: string, scannedAt: string): void;
   getScanWatermark(sourceId: string): AgentSourceScanWatermark | null;
@@ -171,14 +173,38 @@ export function createAgentSourceRepository(
 
     setConnectionState(sourceId, status, autoInjectSuppressed) {
       db.prepare(
-        "UPDATE account_agent_sources SET status = ?, auto_inject_suppressed = ?, updated_at = ? WHERE uuid = ? AND source_id = ?"
+        `UPDATE account_agent_sources
+         SET status = ?,
+             auto_inject_suppressed = ?,
+             suppressed_revision = CASE WHEN ? = 0 THEN NULL ELSE suppressed_revision END,
+             updated_at = ?
+         WHERE uuid = ? AND source_id = ?`
       ).run(
         status,
+        autoInjectSuppressed ? 1 : 0,
         autoInjectSuppressed ? 1 : 0,
         new Date().toISOString(),
         INSTALLATION_SCAN_SCOPE_UUID,
         sourceId
       );
+    },
+
+    setSuppressedRevision(sourceId, revision) {
+      db.prepare(
+        "UPDATE account_agent_sources SET suppressed_revision = ?, updated_at = ? WHERE uuid = ? AND source_id = ?"
+      ).run(
+        revision,
+        new Date().toISOString(),
+        INSTALLATION_SCAN_SCOPE_UUID,
+        sourceId
+      );
+    },
+
+    getSuppressedRevision(sourceId) {
+      const row = db.prepare(
+        "SELECT suppressed_revision FROM account_agent_sources WHERE uuid = ? AND source_id = ?"
+      ).get(INSTALLATION_SCAN_SCOPE_UUID, sourceId) as { suppressed_revision: number | null } | undefined;
+      return typeof row?.suppressed_revision === "number" ? row.suppressed_revision : null;
     },
 
     isAutoInjectSuppressed(sourceId) {
@@ -277,6 +303,10 @@ export function createAgentSourceRepository(
 
 /** Validates ensure agent source scope. */
 function ensureAgentSourceScope(db: DatabaseSync): void {
+  const columns = db.prepare("PRAGMA table_info(account_agent_sources)").all() as Array<{ name?: string }>;
+  if (columns.length > 0 && !columns.some((column) => column.name === "suppressed_revision")) {
+    db.exec("ALTER TABLE account_agent_sources ADD COLUMN suppressed_revision INTEGER");
+  }
   const now = new Date().toISOString();
   db.prepare(
     `INSERT OR IGNORE INTO cloud_accounts (

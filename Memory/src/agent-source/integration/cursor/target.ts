@@ -5,6 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { createNodeHookCommand } from "../hook-command.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
 import {
+  pathExists,
   removeMemmyResumeSkillDirectory,
   removeMemmySkillDirectory,
   replaceMemmyResumeSkillDirectory,
@@ -57,6 +58,15 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
 
     async isInstalled(_targetId) {
       return (await readTextFile(join(cursorRootDirectory, "skills", "memmy-memory", "SKILL.md"))).includes("name: memmy-memory");
+    },
+
+    async isPluginInstalled() {
+      if (await pathExists(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, HOOK_SCRIPT_FILE_NAME))
+        || await pathExists(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME))) return true;
+      const config = await readJsonConfig(join(cursorRootDirectory, HOOKS_FILE_NAME));
+      const hooks = isRecord(config.hooks) ? config.hooks : {};
+      return Object.values(hooks).some((entries) => Array.isArray(entries) &&
+        entries.some(isMemmyResumeHook));
     },
 
     async installPlugin(_targetId) {

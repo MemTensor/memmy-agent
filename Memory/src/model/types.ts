@@ -7,6 +7,8 @@ export interface LlmMessage {
 
 export interface LlmCompletionOptions {
   operation: string;
+  /** Stable business conversation identity, also used by background workers. */
+  sessionId?: string;
   thinkingMode?: "inherit" | "enabled" | "disabled";
   temperature?: number;
   maxTokens?: number;
@@ -18,6 +20,8 @@ export interface LlmCompletionOptions {
   // Replaces the summary role's default input budget for this call only. The
   // caller is expected to have fitted its messages to this budget already.
   inputTokenBudget?: number;
+  /** Reject even parseable JSON when the provider reports truncated output. */
+  requireCompleteJson?: boolean;
 }
 
 export interface LlmClient {

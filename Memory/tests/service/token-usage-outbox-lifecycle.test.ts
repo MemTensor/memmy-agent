@@ -131,6 +131,7 @@ describe("MemoryService token usage outbox lifecycle", () => {
     ));
     installBudgetWriteFailure(db);
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       workerStartupFallbackMs: 0,
       workerPostHealthDelayMs: 0

@@ -1,3 +1,5 @@
+import { isImportedSkillObservation } from "../service/import/memory-import-pipeline.js";
+import type { AgentSkillReconcileRequest } from "../service/import/agent-skill-library.js";
 import {localPanelRequest} from "../service/panel/local-read.js";
 import { assertLocalAgentSourceRequest, isAgentSourceScanPath, routeAgentSourceScan } from "./agent-source-api.js";
 import {PanelLogsInputSchema} from "../contracts/memory-runtime.js";
@@ -12,6 +14,9 @@ import {
 } from "../agent-source/runtime.js";
 import {
   EmbeddingInferenceInputSchema,
+  L3UserProjectsReplaceRequestSchema,
+  L3FailedBatchesRetryRequestSchema,
+  L3ScanSessionsFreezeRequestSchema,
   L3WorldModelBoundaryRequestSchema,
   L3WorldModelRequestEnvelopeSchema,
   OpenSessionInputSchema
@@ -38,7 +43,6 @@ import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
 import { withoutWorkerSchedulerContext } from "../service/worker/worker-scheduler.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
-import { stableHash } from "../utils/id.js";
 import { resolveTimeZone } from "../utils/time.js";
 import { readDesktopAnalyticsIdentity } from "./desktop-analytics-identity.js";
 import {
@@ -71,6 +75,7 @@ const workerLogger = createMemoryLogger("worker");
 export const API_ROUTES = [
   "GET /health",
   "GET /api/v1/health",
+  "GET /api/v1/auth/check",
   "POST /api/v1/admin/reload-config",
   "GET /api/v1/admin/memory-token-budget",
   "POST /api/v1/admin/shutdown",
@@ -81,6 +86,9 @@ export const API_ROUTES = [
   "GET /api/v1/sessions/:sessionId/l3-world-model-trace-head",
   "POST /api/v1/sessions/:sessionId/l3-world-model-boundary",
   "GET /api/v1/l3-world-model/sessions/:sessionId/context",
+  "POST /api/v1/l3/user-projects",
+  "POST /api/v1/l3/failed-batches/retry",
+  "POST /api/v1/l3/scan-sessions/freeze",
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/source-turns/complete",
@@ -88,6 +96,7 @@ export const API_ROUTES = [
   "POST /api/v1/models/embedding/infer",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
+  "POST /api/v1/agent-skills/reconcile",
   "POST /api/v1/evidence/sync",
   "POST /api/v1/evidence/status",
   "POST /api/v1/evidence/skills/suggest",
@@ -225,7 +234,12 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         return;
       }
       const viewerRequest = isViewerApiRequest(request, url);
-      if (viewerRequest) assertLocalViewerRequest(request, url);
+      // Node fetch also sends Sec-Fetch-Mode: cors. That header alone does not
+      // identify a browser or require a loopback Host for authenticated clients.
+      const browserLogRead = request.method === "GET" && url.pathname === "/api/v1/memory/logs" &&
+        (request.headers.origin !== undefined || request.headers["sec-fetch-site"] !== undefined ||
+          request.headers["sec-fetch-dest"] !== undefined);
+      if (viewerRequest || browserLogRead) assertLocalViewerRequest(request, url);
       if (viewerRequest && request.method === "GET" && url.pathname === "/api/v1/events") {
         streamViewerEvents({
           service: options.service,
@@ -237,10 +251,13 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         }, request, response, url);
         return;
       }
-      const principal = {
-        ...(viewerRequest ? viewerPrincipal() : authenticate(request, url, options)),
-        timeZone: requestTimeZone(request, options.timeZone)
-      };
+      const timeZone = requestTimeZone(request, options.timeZone);
+      const authenticated = viewerRequest ? undefined : authenticate(request, url, options);
+      if (request.method === "GET" && url.pathname === "/api/v1/auth/check") {
+        if (authenticated?.kind !== "local") throw new MemoryServiceError("unauthorized", "local service token required");
+        writeJson(response, 200, { authenticated: true, authVersion: 1 });
+        return;
+      }
       const body = await readJson(request);
       if (viewerRequest) {
         const viewerResult = await routeViewerRequest({
@@ -248,7 +265,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           configPath: options.configPath,
           routes: API_ROUTES,
           scheduleWorker: autoWorker.schedule,
-          timeZone: principal.timeZone,
+          timeZone,
           viewerCli: options.viewerCli,
           restartService: options.onRestartRequested,
           agentSources
@@ -268,6 +285,13 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
           return;
         }
       }
+      // Viewer-only routes returned above. Shared UI operations are explicit;
+      // all other service routes must authenticate the request's credentials.
+      const principal = {
+        ...(authenticated ?? (isSharedViewerRoute(request.method, url.pathname)
+          ? viewerPrincipal() : authenticate(request, url, options))),
+        timeZone
+      };
       if (isAgentSourceScanPath(url.pathname)) {
         assertLocalAgentSourceRequest(request, principal.kind);
         const scanResult = await routeAgentSourceScan(agentSources, request.method, url, body);
@@ -300,7 +324,7 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         durationMs: Date.now() - startedAt
       });
     } catch (error) {
-      const status = error instanceof MemoryServiceError ? statusForCode(error.code) : 500;
+      const status = error instanceof MemoryServiceError ? error.status : 500;
       const fields = {
         requestId,
         method: request.method,
@@ -621,6 +645,7 @@ async function routeRequest(
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
     requireAdminWrite(principal);
     const request = asObject(body, "admin.reload-config") as MemoryReloadConfigRequest;
+    await agentSources.reconcileScanPermission?.();
     const result = service.reloadConfig({
       requestId: typeof request.requestId === "string" ? request.requestId : undefined,
       adapterId: typeof request.adapterId === "string" ? request.adapterId : undefined,
@@ -714,6 +739,52 @@ async function routeRequest(
     return result;
   }
 
+  if (method === "POST" && path === "/api/v1/l3/user-projects") {
+    requireMemoryWrite(principal);
+    const parsed = L3UserProjectsReplaceRequestSchema.safeParse(
+      strictEnvelopeWithPrincipal(asObject(body, "l3.user-projects"), principal)
+    );
+    if (!parsed.success) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        parsed.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ")
+      );
+    }
+    return service.replaceL3UserProjects(parsed.data);
+  }
+
+  if (method === "POST" && path === "/api/v1/l3/failed-batches/retry") {
+    requireMemoryWrite(principal);
+    const parsed = L3FailedBatchesRetryRequestSchema.safeParse(
+      strictEnvelopeWithPrincipal(asObject(body, "l3.failed-batches.retry"), principal)
+    );
+    if (!parsed.success) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        parsed.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ")
+      );
+    }
+    const retried = service.retryFailedL3Batches(parsed.data);
+    if (retried.requeued > 0) autoWorker.schedule();
+    return retried;
+  }
+
+  if (method === "POST" && path === "/api/v1/l3/scan-sessions/freeze") {
+    requireMemoryWrite(principal);
+    const parsed = L3ScanSessionsFreezeRequestSchema.safeParse(
+      strictEnvelopeWithPrincipal(asObject(body, "l3.scan-sessions.freeze"), principal)
+    );
+    if (!parsed.success) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        parsed.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ")
+      );
+    }
+    const frozen = service.freezeScanSessions(parsed.data);
+    if (frozen.batches > 0) autoWorker.schedule();
+    return frozen;
+  }
+
   const l3Context = match(path, /^\/api\/v1\/l3-world-model\/sessions\/([^/]+)\/context$/);
   if (method === "GET" && l3Context) {
     requireMemoryRead(principal);
@@ -785,7 +856,7 @@ async function routeRequest(
       toolCalls: request.toolCalls, toolResults: request.toolResults, artifacts: request.artifacts,
       sourceMemoryIds: request.sourceMemoryIds, usage: request.usage, status: request.status,
       tags: request.tags, userMemoryCorrection: request.userMemoryCorrection
-    }, signal);
+    }, signal, autoWorker.schedule);
     const result = request.channel === "hook"
       ? await trackStoredExternalSourceTurnCapture(
         pluginRuntimeAnalytics,
@@ -850,6 +921,9 @@ async function routeRequest(
     requireMemoryRead(principal);
     const request = requestWithPrincipal<MemorySearchRequest>(body, "memory.search", principal);
     requireStringField(request, "query", "memory.search");
+    if (request.recordEvent !== undefined && typeof request.recordEvent !== "boolean") {
+      throw new MemoryServiceError("invalid_argument", "memory.search recordEvent must be a boolean");
+    }
     const publicRequest: MemorySearchRequest = {
       requestId: request.requestId,
       adapterId: request.adapterId,
@@ -868,6 +942,7 @@ async function routeRequest(
         ? Math.max(0, Math.trunc(request.contextBudget))
         : undefined,
       includeInjectedContext: typeof request.includeInjectedContext === "boolean" ? request.includeInjectedContext : undefined,
+      recordEvent: request.recordEvent,
       verbose: request.verbose === true
     };
     return publicSearchResponse(await trackExternalToolCall(
@@ -919,18 +994,26 @@ async function routeRequest(
       sourceSkillVersion: typeof request.sourceSkillVersion === "string" ? request.sourceSkillVersion : undefined,
       sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined
     };
-    const idempotency = memoryAddIdempotency(publicRequest, path);
     const result = await trackStoredExternalMemoryAdd(
       pluginRuntimeAnalytics,
       { ...request, layer: publicRequest.layer },
-      () =>
-        service.idempotent("memory.add", idempotency.request, idempotency.fingerprint, () =>
-          service.addMemory(publicRequest)
-        ),
+      () => isImportedSkillObservation(publicRequest)
+        ? service.addMemory(publicRequest)
+        : service.idempotent("memory.add", publicRequest, { path, request: publicRequest }, () =>
+            service.addMemory(publicRequest)
+          ),
     );
     if (!publicRequest.deferProcessing) {
       autoWorker.schedule();
     }
+    return result;
+  }
+
+  if (method === "POST" && path === "/api/v1/agent-skills/reconcile") {
+    requireMemoryWrite(principal);
+    const request = agentSkillReconcileRequest(requestWithPrincipal<RequestEnvelope & Record<string, unknown>>(body, "agent-skills.reconcile", principal));
+    const result = service.reconcileAgentSkills(request);
+    autoWorker.schedule();
     return result;
   }
 
@@ -1026,7 +1109,7 @@ async function routeRequest(
       timeZone: principal.timeZone,
       includeRawText: url.searchParams.get("includeRawText") === "true",
       includeAudit: url.searchParams.get("includeAudit") === "true"
-    });
+    }, { includeApiLogs: canReadRawLogs(principal) });
   }
 
   if (method === "DELETE" && path === "/api/v1/admin/data") {
@@ -1122,7 +1205,7 @@ async function routeRequest(
   }
 
   if (method === "GET" && path === "/api/v1/memory/logs") {
-    requirePanelRead(principal);
+    if (!canReadRawLogs(principal)) throw new MemoryServiceError("forbidden", "raw logs require administrator access");
     return service.apiLogs({
       tools: parseApiLogTools(url.searchParams.get("tools")),
       sourceAgent: url.searchParams.get("sourceAgent") ?? undefined,
@@ -1188,6 +1271,21 @@ async function routeRequest(
     return publicDeletePanelTaskResponse(service.deletePanelTask(id, request, localPanel));
   }
 
+  // The desktop App archives and reactivates skills with its service token,
+  // so these two viewer routes are also served here.
+  if (method === "POST" && (path === "/api/v1/skills/archive" || path === "/api/v1/skills/reactivate")) {
+    requireMemoryWrite(principal);
+    const operation = path.endsWith("/archive") ? "skill.archive" : "skill.reactivate";
+    const request = envelopeWithPrincipal(asObject(body, operation), principal) as MemoryGovernanceRequest & { skillId?: unknown };
+    requireStringField(request, "skillId", operation);
+    const { skillId, ...envelope } = request;
+    if (operation === "skill.archive") return service.archiveMemory(skillId as string, envelope);
+    const result = service.reactivateSkill(skillId as string, envelope);
+    // Reactivating can queue an embedding for a version that was never embedded.
+    autoWorker.schedule();
+    return result;
+  }
+
   const memoryDelete = match(path, /^\/api\/v1\/memory\/([^/]+)$/);
   if (method === "DELETE" && memoryDelete) {
     requireMemoryWrite(principal);
@@ -1199,49 +1297,6 @@ async function routeRequest(
   }
 
   throw new MemoryServiceError("not_found", `${method} ${path} is not registered`);
-}
-
-function memoryAddIdempotency(
-  request: MemoryAddRequest,
-  path: string
-): { request: RequestEnvelope; fingerprint: unknown } {
-  const sourceAgentId = request.sourceAgentId?.trim();
-  const sourceSkillId = request.sourceSkillId?.trim();
-  const sourceContentHash = request.sourceContentHash?.trim();
-  const isAgentSourceSkill =
-    request.layer === "Skill" &&
-    Boolean(request.requestId) &&
-    Boolean(sourceAgentId) &&
-    Boolean(sourceSkillId) &&
-    Boolean(sourceContentHash) &&
-    request.adapterId === `agent-source:${sourceAgentId}`;
-
-  if (!isAgentSourceSkill) {
-    return {
-      request,
-      fingerprint: { path, request }
-    };
-  }
-
-  const identity = {
-    namespace: request.namespace,
-    sourceAgentId,
-    sourceSkillId,
-    sourceContentHash
-  };
-  return {
-    request: {
-      adapterId: request.adapterId,
-      // Version the key so legacy full-request fingerprints cannot keep
-      // conflicting after volatile Skill metadata changes.
-      requestId: `agent-source-skill:v2:${stableHash(identity)}`,
-      namespace: request.namespace
-    },
-    fingerprint: {
-      path,
-      skill: identity
-    }
-  };
 }
 
 function publicOpenSessionResponse(result: unknown): Record<string, unknown> {
@@ -1463,7 +1518,7 @@ function writeViewerAsset(
 
 function writeError(response: ServerResponse, error: unknown, requestId?: string): void {
   if (error instanceof MemoryServiceError) {
-    writeJson(response, statusForCode(error.code), {
+    writeJson(response, error.status, {
       error: {
         code: error.code,
         message: error.message,
@@ -1525,7 +1580,7 @@ function authenticate(
       scopes: scoped.scopes ?? ["memory:read", "memory:write"]
     };
   }
-  if (!localToken && (!auth || auth.allowAnonymous === true)) {
+  if (!localToken && auth?.allowAnonymous === true) {
     return {
       kind: "anonymous",
       namespace: namespaceFromRequest(request, url),
@@ -1533,6 +1588,12 @@ function authenticate(
     };
   }
   throw new MemoryServiceError("unauthorized", "invalid memory service token", 401, requestIdFromHeaders(request));
+}
+
+function isSharedViewerRoute(method: string, path: string): boolean {
+  if (method === "DELETE" && (path === "/api/v1/admin/data" || /^\/api\/v1\/panel\/tasks\/[^/]+$/.test(path))) return true;
+  // The Viewer opens and deletes individual memories and reads /memory/logs.
+  return (method === "GET" || method === "DELETE") && /^\/api\/v1\/memory\/[^/]+$/.test(path);
 }
 
 function viewerPrincipal(): AuthPrincipal {
@@ -1605,6 +1666,12 @@ function requirePanelRead(principal: AuthPrincipal): void {
   requireAnyScope(principal, ["panel:read", "panel:write", "memory:read", "memory:write", "admin:read", "admin:write"]);
 }
 
+function canReadRawLogs(principal: AuthPrincipal): boolean {
+  if (principal.kind === "local" || principal.kind === "viewer") return true;
+  return principal.kind === "scoped" && (principal.scopes.includes("*") ||
+    hasScope(principal, "admin:read") || hasScope(principal, "admin:write"));
+}
+
 function requireAdminWrite(principal: AuthPrincipal): void {
   requireAnyScope(principal, ["admin:write"]);
 }
@@ -1625,6 +1692,62 @@ function hasScope(principal: AuthPrincipal, scope: string): boolean {
   }
   const [domain] = scope.split(":");
   return principal.scopes.includes(`${domain}:*`);
+}
+
+/** Keeps only the documented reconcile fields; unknown fields are dropped. */
+function agentSkillReconcileRequest(request: RequestEnvelope & Record<string, unknown>): AgentSkillReconcileRequest {
+  const text = (value: unknown): string | undefined => typeof value === "string" ? value : undefined;
+  const flag = (value: unknown): boolean | undefined => typeof value === "boolean" ? value : undefined;
+  const records = (value: unknown, field: string): Record<string, unknown>[] => {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.some((item) => !item || typeof item !== "object" || Array.isArray(item))) {
+      throw new MemoryServiceError("invalid_argument", `agent-skills.reconcile ${field} must be an array of objects`);
+    }
+    return value as Record<string, unknown>[];
+  };
+  const required = (item: Record<string, unknown>, key: string, field: string, allowEmpty = false): string => {
+    const value = text(item[key]);
+    if (value === undefined || (!allowEmpty && value.length === 0)) throw new MemoryServiceError("invalid_argument", `agent-skills.reconcile ${field}.${key} is required`);
+    return value;
+  };
+  const sourceAgentId = text(request.sourceAgentId);
+  if (!sourceAgentId?.trim()) throw new MemoryServiceError("invalid_argument", "agent-skills.reconcile requires sourceAgentId");
+  return {
+    requestId: request.requestId,
+    adapterId: request.adapterId,
+    namespace: request.namespace,
+    timeZone: request.timeZone,
+    sourceAgentId,
+    complete: request.complete === true,
+    disconnected: request.disconnected === true,
+    connectionState: request.connectionState === "connected" || request.connectionState === "disconnected" ? request.connectionState : undefined,
+    connectionKind: request.connectionKind === "skill" || request.connectionKind === "plugin" ? request.connectionKind : undefined,
+    ...(text(request.connectionEventId)?.trim() ? { connectionEventId: text(request.connectionEventId)!.trim() } : {}),
+    registrationsComplete: request.registrationsComplete === true,
+    skills: records(request.skills, "skills").map((item) => ({
+      sourceSkillId: required(item, "sourceSkillId", "skills"),
+      sourceSkillPath: required(item, "sourceSkillPath", "skills"),
+      title: required(item, "title", "skills"),
+      content: required(item, "content", "skills", true),
+      contentHash: required(item, "contentHash", "skills"),
+      modifiedAt: required(item, "modifiedAt", "skills"),
+      version: text(item.version),
+      description: text(item.description),
+      disableModelInvocation: flag(item.disableModelInvocation),
+      allowImplicitInvocation: flag(item.allowImplicitInvocation),
+      policyError: text(item.policyError),
+      frontmatterError: text(item.frontmatterError),
+      hasSupportingFiles: flag(item.hasSupportingFiles)
+    })),
+    ...(request.registrations === undefined ? {} : {
+      registrations: records(request.registrations, "registrations").map((item) => ({
+        sourceSkillId: required(item, "sourceSkillId", "registrations"),
+        sourceSkillPath: required(item, "sourceSkillPath", "registrations"),
+        name: required(item, "name", "registrations"),
+        pluginId: text(item.pluginId)
+      }))
+    })
+  };
 }
 
 function asObject(body: unknown, routeName: string): Record<string, unknown> {

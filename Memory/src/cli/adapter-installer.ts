@@ -46,7 +46,7 @@ async function installOpenClaw(source: string, root: string, options: AdapterIns
   if (!existsSync(openClawRoot) && !options.explicit) return result("openclaw", target, false, false, options);
   if (!existsSync(openClawRoot) && options.explicit) throw new Error(`openclaw is not installed: ${openClawRoot}`);
   if (!options.dryRun) {
-    await replaceDirectory(source, target);
+    await installAdapterDirectory(source, target, options.runtime.configPath);
     const configPath = join(openClawRoot, "openclaw.json");
     const current = existsSync(configPath) ? await readFile(configPath, "utf8") : "{}\n";
     let next = applyEdits(current, modify(current, ["plugins", "slots", "memory"], "memmy-memory", { formattingOptions: { insertSpaces: true, tabSize: 2 } }));
@@ -63,7 +63,7 @@ async function installHermes(source: string, root: string, options: AdapterInsta
   if (!existsSync(hermesRoot) && !options.explicit) return result("hermes", target, false, false, options);
   if (!existsSync(hermesRoot) && options.explicit) throw new Error(`hermes is not installed: ${hermesRoot}`);
   if (!options.dryRun) {
-    await replaceDirectory(source, target);
+    await installAdapterDirectory(source, target, options.runtime.configPath);
     const configPath = join(hermesRoot, "config.yaml");
     const parsed = existsSync(configPath) ? parseYaml(await readFile(configPath, "utf8")) : {};
     const config = record(parsed);
@@ -79,16 +79,21 @@ async function installDsh(source: string, root: string, options: AdapterInstallO
   if (!existsSync(dshRoot) && !options.explicit) return result("dsh", target, false, false, options);
   if (!existsSync(dshRoot) && options.explicit) throw new Error(`dsh is not installed: ${dshRoot}`);
   if (!options.dryRun) {
-    const installed = spawnSync("dsh", ["plugin", "--profile", options.dshProfile ?? "web", "add", source], { encoding: "utf8", windowsHide: true });
+    const packagePath = join(target, "memmy-memory-adapter");
+    await installAdapterDirectory(source, packagePath, options.runtime.configPath);
+    const installed = spawnSync("dsh", ["plugin", "--profile", options.dshProfile ?? "web", "add", packagePath], { encoding: "utf8", windowsHide: true });
     if (installed.status !== 0) throw new Error(`failed to install DSH adapter: ${installed.stderr?.trim() || installed.stdout?.trim() || installed.error?.message}`);
   }
   return result("dsh", target, true, true, options);
 }
 
-async function replaceDirectory(source: string, target: string): Promise<void> {
+async function installAdapterDirectory(source: string, target: string, configPath?: string): Promise<void> {
   await mkdir(dirname(target), { recursive: true });
   const staged = `${target}.staging-${process.pid}-${Date.now()}`;
   await cp(source, staged, { recursive: true });
+  if (configPath) {
+    await writeAtomic(join(staged, "memmy-memory-config.json"), JSON.stringify({ memmy_config_path: configPath }));
+  }
   const previous = `${target}.previous-${process.pid}-${Date.now()}`;
   if (existsSync(target)) await rename(target, previous);
   try {

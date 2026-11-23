@@ -62,21 +62,22 @@ it("preserves configuration failure and manual retry across a real database reop
   expect(retry.accepted).toBe(true);
 });
 
-it("does not recreate permanently invalid imported summaries on restart", async () => {
+it("keeps generic request failures manual-only across restarts", async () => {
   const llm = createBatchReflectionLlm([]);
   llm.completeJson = async () => { throw new ModelHttpError("invalid input", "test", 400, undefined, "invalid request body"); };
   const { db, service } = fixture.createTestService({ llm });
   const namespace = { source: "codex", profileId: "permanent", userId: "permanent-restart" };
   const item = addAgentSourceImport(service, namespace, "permanent invalid summary input", "permanent-restart");
   await service.runWorkerOnce(1);
-  expect(service.memoryProcessingStatus([item.id], { namespace }).items[0]).toMatchObject({ state: "failed", retryAction: "none" });
+  expect(service.memoryProcessingStatus([item.id], { namespace }).items[0]).toMatchObject({ state: "failed", retryAction: "retry", autoRetryScheduled: false });
+  expect(new Repositories(db.db).processing.get(item.id)?.retryAction).toBe("none");
   const before = new Repositories(db.db).runtime.listJobs("dead_letter").filter((job) => job.targetMemoryId === item.id);
   expect(before).toHaveLength(1);
   await service.stop(); db.close();
   const reopened = new MemoryDb({ path: db.path });
   const nextService = fixture.createTestMemoryService({ db: reopened, mode: "dev", llm });
   expect(nextService.reconcileWorkerStartup(100).enqueuedImportSummaries).toBe(0);
-  expect(nextService.memoryProcessingStatus([item.id], { namespace }).items[0]).toMatchObject({ state: "failed", retryAction: "none" });
+  expect(nextService.memoryProcessingStatus([item.id], { namespace }).items[0]).toMatchObject({ state: "failed", retryAction: "retry", autoRetryScheduled: false });
   expect((await nextService.runWorkerOnce(1)).leased).toBe(0);
   expect(new Repositories(reopened.db).runtime.listJobs("dead_letter").filter((job) => job.targetMemoryId === item.id)).toHaveLength(1);
 });

@@ -99,13 +99,14 @@ describe("BYOK custom model image input", () => {
       provider,
       model: "deepseek-v4-pro",
       actualModelContext: byokContext("deepseek-v4-pro"),
+      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
     }));
 
     expect(provider.calls).toHaveLength(0);
     expect(result.finalContent).toBe("Current model does not support image input.");
   });
 
-  it("still blocks images for an unknown account-managed model", async () => {
+  it("lets the Provider validate images for an unknown account-managed model", async () => {
     const provider = new ByokProvider();
 
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
@@ -113,10 +114,11 @@ describe("BYOK custom model image input", () => {
       provider,
       model: "unlisted-account-model",
       actualModelContext: accountContext("unlisted-account-model"),
+      modelCapabilities: { mode: "catalog" },
     }));
 
-    expect(provider.calls).toHaveLength(0);
-    expect(result.finalContent).toBe("Current model does not support image input.");
+    expect(provider.calls).toHaveLength(1);
+    expect(result.finalContent).toBe("described the image");
   });
 
   it("blocks images when a Custom model declares text-only input", async () => {

@@ -5,6 +5,7 @@ const timingFiles = [
   "tests/embedding-maintenance.test.ts",
   "tests/service/worker/worker-provider-lane-fairness.test.ts"
 ];
+const excludes = [...configDefaults.exclude, "**/dist/**"];
 
 export default defineConfig({
   root: fileURLToPath(new URL(".", import.meta.url)),
@@ -14,8 +15,8 @@ export default defineConfig({
       {
         test: {
           name: "memory-parallel",
-          include: configDefaults.include.map(pattern => `tests/${pattern}`),
-          exclude: [...configDefaults.exclude, ...timingFiles],
+          include: configDefaults.include.flatMap(pattern => [`tests/${pattern}`, `src/${pattern}`]),
+          exclude: [...excludes, ...timingFiles],
           sequence: { groupOrder: 0 }
         }
       },
@@ -23,8 +24,7 @@ export default defineConfig({
         test: {
           name: "memory-timing-sensitive",
           include: timingFiles,
-          exclude: [...configDefaults.exclude],
-          // Isolate file-level CPU/I/O contention, retaining each test's own concurrency and budgets.
+          exclude: excludes,
           fileParallelism: false,
           sequence: { groupOrder: 1 }
         }

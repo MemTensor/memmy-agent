@@ -1,3 +1,4 @@
+import "../../tests/isolated-target-home.js";
 /** Target tests. */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -230,6 +231,52 @@ describe("opencode skill target", () => {
     }
   });
 
+  it("searches with verbose results and formats snippet-only hits", async () => {
+    const { rootDirectory } = createFixture();
+    const target = createOpencodeSkillTarget({
+      rootDirectory,
+      memmyConfigPath: join(rootDirectory, "missing-memmy-config.yaml")
+    });
+    await target.installPlugin?.("opencode");
+    const hooks = await loadPluginHooks(rootDirectory);
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const targetUrl = url instanceof Request ? new URL(url.url) : url instanceof URL ? url : new URL(String(url));
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
+      requests.push({ path: targetUrl.pathname, body });
+      if (targetUrl.pathname === "/api/v1/sessions/open") return jsonResponse({ sessionId: "memmy-tool-session" });
+      if (targetUrl.pathname === "/api/v1/memory/search") {
+        if (body.verbose !== true) return jsonResponse({ injectedContext: "service context only" });
+        return jsonResponse({
+          injectedContext: "service context",
+          debug: { hits: [{ id: "memory-1", memoryLayer: "L1", title: "OpenCode memory", snippet: "Recovered from snippet" }] }
+        });
+      }
+      return jsonResponse({}, 404);
+    }) as typeof fetch;
+
+    try {
+      const result = await hooks.tool.memmy_memory_search.execute(
+        { query: "memmy", layers: ["L1"] },
+        { sessionID: "tool-session", agent: "build" }
+      );
+      expect(requests.find((request) => request.path === "/api/v1/memory/search")?.body).toMatchObject({
+        query: "memmy",
+        layers: ["L1"],
+        source: "opencode",
+        verbose: true,
+        sessionId: "memmy-tool-session"
+      });
+      expect(result).toContain("Recovered from snippet");
+      expect(result).toContain("[L1] OpenCode memory (memory-1)");
+      expect(result).not.toContain("No relevant Memmy memories found.");
+    } finally {
+      globalThis.fetch = originalFetch;
+      await hooks.dispose();
+    }
+  });
+
   it("handles the OpenCode resume command and injects the selected episode", async () => {
     const { rootDirectory } = createFixture();
     const memmyConfigPath = join(rootDirectory, "memmy-config.yaml");
@@ -346,6 +393,11 @@ interface PluginPart {
 }
 
 interface OpencodePluginHooks {
+  tool: {
+    memmy_memory_search: {
+      execute(args: { query: string; layers?: string[] }, context: { sessionID: string }): Promise<string>;
+    };
+  };
   "chat.message": (
     input: { sessionID: string; messageID: string; agent: string },
     output: { message: { id: string }; parts: PluginPart[] }
@@ -509,3 +561,27 @@ function createManifest(targetId: string): SkillManifest {
 function readTargetFile(rootDirectory: string): string {
   return readFileSync(join(rootDirectory, "AGENTS.md"), "utf8");
 }
+
+
+describe("legacy instruction cleanup through direct target entrypoints", () => {
+  it.each(["skill", "plugin"] as const)("removes every recognized block through %s removal", async (kind) => {
+    const { rootDirectory } = createFixture();
+    const target = createOpencodeSkillTarget({ rootDirectory, memmyConfigPath: join(rootDirectory, "memmy.json") });
+    const files = ["AGENTS.md"];
+    for (const fileName of files) {
+      const filePath = join(rootDirectory, fileName);
+      mkdirSync(join(filePath, ".."), { recursive: true });
+      const old = "<!-- memmy-memory cli : start -->\nold CLI\n<!-- memmy-memory cli : end -->\n";
+      const current = "<!-- memmy:start v=1 -->\ncurrent instructions\n<!-- memmy:end v=1 -->\n";
+      writeFileSync(filePath, `User before.\n${old}${old.replaceAll("\n", "\r\n")}${current}${current.replaceAll("\n", "\r\n")}User after.\n`);
+    }
+    const remove = () => kind === "plugin" ? target.uninstallPlugin!(target.targetId) : target.uninstall(target.targetId);
+    await remove();
+    await remove();
+    for (const fileName of files) {
+      expect(readFileSync(join(rootDirectory, fileName), "utf8")).toBe("User before.\nUser after.\n");
+    }
+    expect(await target.isInstalled(target.targetId)).toBe(false);
+    expect(await target.isLegacySkillInstalled?.()).toBe(false);
+  });
+});

@@ -1,8 +1,6 @@
 /** Codex hook trust persistence through the Codex app-server protocol. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, join, normalize } from "node:path";
+import { canonicalCodexPath, resolveCodexExecutable } from "@memmy/agent-source-core";
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 10_000;
 const APP_SERVER_CLOSE_TIMEOUT_MS = 1_000;
@@ -55,6 +53,12 @@ interface CodexAppServerClient {
   request(method: string, params: Record<string, unknown>): Promise<unknown>;
   notify(method: string, params: Record<string, unknown>): void;
   close(): Promise<void>;
+}
+
+/** Resolve before the installer writes any hook files. */
+export function prepareCodexHookTrust(codexHomeDirectory: string): TrustMemmyCodexHooks {
+  const codexExecutable = resolveCodexExecutable({ codexHomeDirectory });
+  return (options) => trustMemmyCodexHooks({ ...options, codexExecutable });
 }
 
 /** Trusts only the user-level Memmy hooks that Codex discovered from hooks.json. */
@@ -130,12 +134,12 @@ function selectMemmyHooks(
   hookCommand: string,
   events: ReadonlySet<string>
 ): CodexHookMetadata[] {
-  const sourcePath = normalize(hooksFilePath);
+  const sourcePath = canonicalCodexPath(hooksFilePath);
   const selected = hooks.filter((hook) =>
     hook.source === "user" &&
     !hook.isManaged &&
     hook.handlerType === "command" &&
-    normalize(hook.sourcePath) === sourcePath &&
+    canonicalCodexPath(hook.sourcePath) === sourcePath &&
     hook.command === hookCommand &&
     events.has(hook.eventName)
   );
@@ -164,7 +168,7 @@ function parseHookMetadata(value: unknown): CodexHookMetadata | null {
 }
 
 function createCodexAppServerClient(options: TrustMemmyCodexHooksOptions): CodexAppServerClient {
-  const executable = options.codexExecutable ?? resolveCodexExecutable(options.codexHomeDirectory);
+  const executable = resolveCodexExecutable({ codexHomeDirectory: options.codexHomeDirectory, executable: options.codexExecutable });
   const args = options.appServerArguments ?? ["app-server", "--stdio"];
   const child = spawn(executable, args, {
     cwd: options.codexHomeDirectory,
@@ -290,30 +294,6 @@ function handleResponseLine(line: string, pending: Map<number, PendingRequest>):
     return;
   }
   request.resolve(message.result);
-}
-
-function resolveCodexExecutable(codexHomeDirectory: string): string {
-  const executableName = process.platform === "win32" ? "codex.exe" : "codex";
-  const candidates = [join(codexHomeDirectory, "plugins", ".plugin-appserver", executableName)];
-  if (process.platform === "darwin") {
-    // The desktop process may not inherit the shell PATH where ChatGPT exposes Codex CLI.
-    const codexCliPath = join("Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex");
-    candidates.push(
-      join("/Applications", "ChatGPT.app", codexCliPath),
-      join(homedir(), "Applications", "ChatGPT.app", codexCliPath)
-    );
-  }
-
-  return candidates.find(isExecutableFile) ?? executableName;
-}
-
-function isExecutableFile(filePath: string): boolean {
-  try {
-    accessSync(filePath, constants.X_OK);
-    return statSync(filePath).isFile() && basename(filePath).toLowerCase().startsWith("codex");
-  } catch {
-    return false;
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

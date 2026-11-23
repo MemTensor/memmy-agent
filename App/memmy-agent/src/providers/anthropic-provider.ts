@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { anthropicRequestModelId } from "@memmy/local-api-contracts";
 import { createProviderAbortError, isProviderAbortError, LLMProvider, LLMResponse, providerAbortOptions, ToolCallRequest } from "./base.js";
 import { classifyQuotaExhaustion } from "./provider-error-classifier.js";
 import { parseToolArguments } from "./tool-json.js";
@@ -139,7 +140,7 @@ export class AnthropicProvider extends LLMProvider {
   }
 
   static stripPrefix(model: string): string {
-    return model.startsWith("anthropic/") ? model.slice("anthropic/".length) : model;
+    return anthropicRequestModelId(model);
   }
 
   static omitsTemperature(model: string): boolean {
@@ -359,10 +360,16 @@ export class AnthropicProvider extends LLMProvider {
     reasoningEffort?: string | null;
     toolChoice?: string | Record<string, any> | null;
     supportsCaching?: boolean;
+    modelCapabilities?: import("./turn-model-capabilities.js").TurnModelCapabilities;
   }): Record<string, any> {
-    const maxTokens = Math.max(1, args.maxTokens ?? this.generation.maxTokens);
+    const requestedMaxTokens = LLMProvider.requestMaxTokens(args, this.generation) ?? this.extraBody?.max_tokens;
+    if (!Number.isSafeInteger(requestedMaxTokens) || requestedMaxTokens < 1) throw new Error("Anthropic requires an explicitly configured maxTokens when model capability limits are unavailable");
+    const taskMaxTokens = args.modelCapabilities?.taskMaxTokens;
+    const maxTokens = taskMaxTokens !== undefined
+      ? Math.min(requestedMaxTokens, this.extraBody?.max_tokens ?? requestedMaxTokens)
+      : requestedMaxTokens;
     const temperature = args.temperature ?? this.generation.temperature;
-    const reasoningEffort = args.reasoningEffort ?? this.generation.reasoningEffort;
+    const reasoningEffort = LLMProvider.requestReasoningEffort(args, this.generation);
     const toolChoice = args.toolChoice ?? null;
     const modelName = AnthropicProvider.stripPrefix(args.model ?? this.defaultModel);
     let [system, messages, tools] = [
@@ -374,7 +381,7 @@ export class AnthropicProvider extends LLMProvider {
       [system, messages, tools] = AnthropicProvider.applyCacheControl(system, messages, tools);
     }
 
-    const thinkingEnabled = Boolean(reasoningEffort) && String(reasoningEffort).toLowerCase() !== "none";
+    const thinkingEnabled = args.modelCapabilities?.thinkingEnabled ?? (Boolean(reasoningEffort) && String(reasoningEffort).toLowerCase() !== "none");
     const omitTemperature = AnthropicProvider.omitsTemperature(modelName);
     const kwargs: Record<string, any> = {
       model: modelName,
@@ -391,6 +398,15 @@ export class AnthropicProvider extends LLMProvider {
       const budget = effort === "low" ? 1024 : effort === "high" ? Math.max(8192, maxTokens) : 4096;
       kwargs.thinking = { type: "enabled", budget_tokens: budget };
       kwargs.max_tokens = Math.max(maxTokens, budget + 4096);
+      if (args.modelCapabilities) {
+        const totalLimit = Math.min(args.modelCapabilities.maxTokens ?? Infinity, this.extraBody?.max_tokens ?? Infinity);
+        const thinkingBudget = taskMaxTokens !== undefined
+          ? Math.min(budget, totalLimit - maxTokens)
+          : Math.min(budget, maxTokens - 1);
+        if (thinkingBudget < 1024) throw new Error("Anthropic thinking requires maxTokens greater than its minimum thinking budget");
+        kwargs.thinking.budget_tokens = thinkingBudget;
+        kwargs.max_tokens = taskMaxTokens !== undefined ? thinkingBudget + maxTokens : maxTokens;
+      }
       if (!omitTemperature) kwargs.temperature = 1.0;
     } else if (!omitTemperature) {
       kwargs.temperature = temperature;
@@ -402,7 +418,14 @@ export class AnthropicProvider extends LLMProvider {
       if (tc) kwargs.tool_choice = tc;
     }
 
+    const taskTotal = kwargs.max_tokens;
+    const taskThinking = kwargs.thinking;
     if (this.extraBody) Object.assign(kwargs, this.extraBody);
+    if (taskMaxTokens !== undefined) {
+      // Extra fields must not overwrite the task's validated total and required thinking budget.
+      kwargs.max_tokens = taskTotal;
+      if (thinkingEnabled) kwargs.thinking = taskThinking;
+    }
     if (omitTemperature) delete kwargs.temperature;
     return kwargs;
   }

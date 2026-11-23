@@ -13,6 +13,7 @@ import {
   applicationsFromMarkdown,
   applyNarrative,
   compactEventEvidence,
+  RETENTION_EVIDENCE_VERSION,
   isNarrated,
   writeSegmentNarrative,
   type WeChatNameMap,
@@ -143,6 +144,8 @@ export interface ComputerHistorySnapshot {
     /** Why the last summary kept its mechanical wording, if it did. */
     narrationError: string | null;
     narrationErrorCategory?: "quota_exhausted" | null;
+    /** Raw files remain available while their durable archive needs recovery. */
+    retentionDeferred?: boolean;
     modelSource?: "account" | "byok" | null;
     permissions?: HistoryPermissions;
     captureHealth?: ComputerHistoryCaptureHealth;
@@ -223,6 +226,7 @@ const CAPTURE_ISSUE_CODES = new Set([
 
 interface RetainedSegmentEvidence {
   version: 1;
+  projectionVersion?: number;
   segmentId: string;
   rawBytes: number;
   rawMtimeMs: number;
@@ -503,6 +507,8 @@ export class ComputerHistoryDemoService {
   }>();
   private narrationError: string | null = null;
   private narrationErrorCategory: "quota_exhausted" | null = null;
+  private retentionDeferred = false;
+  private readonly verifiedRetentionSources = new Map<string, string>();
   private modelSource: "account" | "byok" | null = null;
   /** Coalesce open-segment narration without suppressing later input versions. */
   private readonly narratedOpenSegments = new Set<string>();
@@ -949,12 +955,23 @@ export class ComputerHistoryDemoService {
       if (this.observationState === "running") this.startWeChatPolling();
       if (this.llmRuntime) this.retrySummariesInBackground();
     } else {
-      this.weChatConsent.revoke();
-      this.clearWeChatPolling();
+      this.disableWeChatChatAccess();
     }
     this.weChatError = null;
     this.weChatReadFailures = 0;
     return this.snapshot();
+  }
+
+  /** Revocation persists across restart and invalidates in-flight reads/setup. */
+  private disableWeChatChatAccess(): void {
+    this.clearWeChatPolling();
+    this.weChatConsent.revoke();
+    const connection = this.weChatConnectionChild;
+    this.weChatConnectionChild = null;
+    connection?.kill("SIGINT");
+    this.weChatPhase = null;
+    this.weChatError = null;
+    this.weChatReadFailures = 0;
   }
 
   /** User-initiated setup: the helper reports phases while it restores WeChat. */
@@ -996,6 +1013,7 @@ export class ComputerHistoryDemoService {
     this.weChatConnectionChild = child;
     let pending = "";
     const readStatus = (line: string) => {
+      if (this.weChatConnectionChild !== child || !this.weChatConsent.read().enabled) return;
       try {
         const status = JSON.parse(line) as { event?: unknown; category?: unknown; detail?: unknown };
         const failedPhase = this.weChatPhase;
@@ -1058,12 +1076,15 @@ export class ComputerHistoryDemoService {
     return this.snapshot();
   }
 
+  private activeWeChatReader: WeChatMessageBatchReader | null = null;
+
   private async pollWeChatMessages(): Promise<void> {
     if (this.weChatPollInFlight || this.weChatConnectionChild || this.observationState !== "running" || !this.segment
       || !this.weChatConsent.read().enabled) return;
     const reader = this.weChatReader();
     if (!reader) return;
     this.weChatPollInFlight = true;
+    this.activeWeChatReader = reader;
     const generation = this.weChatPollGeneration;
     try {
       // The durable cursor decides first connection versus resume. Recorder
@@ -1084,6 +1105,7 @@ export class ComputerHistoryDemoService {
     } catch (error) {
       if (generation === this.weChatPollGeneration) this.recordWeChatReadFailure(error);
     } finally {
+      if (this.activeWeChatReader === reader) this.activeWeChatReader = null;
       this.weChatPollInFlight = false;
     }
   }
@@ -1116,6 +1138,7 @@ export class ComputerHistoryDemoService {
 
   private clearWeChatPolling(): void {
     this.weChatPollGeneration += 1;
+    this.activeWeChatReader?.cancel();
     if (this.weChatPollTimer) clearInterval(this.weChatPollTimer);
     this.weChatPollTimer = null;
   }
@@ -1406,6 +1429,7 @@ export class ComputerHistoryDemoService {
         error: this.observationError,
         narrationError: this.narrationError,
         narrationErrorCategory: this.narrationErrorCategory,
+        retentionDeferred: this.retentionDeferred,
         modelSource: this.modelSource,
         ...(this.permissions ? { permissions: this.permissions } : {}),
         captureHealth: this.captureHealth(),
@@ -2481,6 +2505,11 @@ export class ComputerHistoryDemoService {
       if (transitioning) return this.snapshot();
       throw new ComputerHistoryApiError(409, "Computer History is not running");
     }
+    // Explicitly switching History off also switches its optional reader off.
+    // App shutdown preserves preferences for the next launch.
+    if (!this.shuttingDown && (this.weChatConsent.read().enabled || this.weChatConnectionChild)) {
+      this.disableWeChatChatAccess();
+    }
     const segment = this.segment;
     this.observationState = "stopping";
     this.clearLiveSummaryTimer();
@@ -2600,13 +2629,23 @@ export class ComputerHistoryDemoService {
         if (prepared && readFrontmatterValue(prepared, "capture_complete") === "true"
           && Number(readFrontmatterValue(prepared, "summary_input_bytes")) === stat.size
           && checkpoint?.rawBytes === stat.size && checkpoint.rawMtimeMs === stat.mtimeMs
-          && readFrontmatterValue(prepared, "summary_input_sha256") === checkpoint.rawSha256) continue;
+          && readFrontmatterValue(prepared, "summary_input_sha256") === checkpoint.rawSha256) {
+          if (this.retentionCheckpointMatches(directory)) continue;
+          // The raw source is unchanged, but an upgrade may extract more
+          // evidence. Refresh only its archive; keep ready summaries and any
+          // in-flight narration intact. Never expire raw using an old projection.
+          const source = fs.readFileSync(eventsFile);
+          if (hashBytes(source) === checkpoint.rawSha256) {
+            this.persistRetentionCheckpoint(entry.name, eventsFile, source, stat, completeRawEvidence(source));
+            continue;
+          }
+        }
         let metadata: Record<string, unknown> = {};
         try { metadata = JSON.parse(readText(path.join(directory, "metadata.json")) ?? "{}") ?? {}; } catch { /* Legacy segment. */ }
         // Legacy metadata has no open/closed state or byte marker. A completed
         // summary is safe to retain only if the stream ended before it was
         // written, rather than reopening after an earlier recording_stopped.
-        if (checkpoint && prepared && !readFrontmatterValue(prepared, "summary_input_bytes")
+        if (this.retentionCheckpointMatches(directory) && checkpoint && prepared && !readFrontmatterValue(prepared, "summary_input_bytes")
           && readFrontmatterValue(prepared, "status") === "completed"
           && metadata.state !== "open"
           && recordingEnded(fs.readFileSync(eventsFile, "utf8"))
@@ -2621,10 +2660,10 @@ export class ComputerHistoryDemoService {
         };
         this.invalidateSummary(historyFile);
         const error = this.writeSegmentSummary(segment, standing && isNarrated(standing) ? staging : historyFile, true);
-        if (error) this.setNarrationError(error);
+        if (error) this.retentionDeferred = true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-          this.setNarrationError(error instanceof Error ? error.message : String(error));
+          this.retentionDeferred = true;
         }
       }
     }
@@ -2651,17 +2690,7 @@ export class ComputerHistoryDemoService {
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       atomicWriteText(destination, pending);
       if (closed) {
-        const currentStat = fs.statSync(segment.eventsFile);
-        if (currentStat.size !== source.length || currentStat.mtimeMs !== sourceStat.mtimeMs) {
-          throw new Error("Computer History raw evidence changed while finalizing; retaining the event stream");
-        }
-        const checkpointFile = this.retentionCheckpointPath(`${segment.id}-10min-summary`);
-        if (!checkpointFile) throw new Error("Computer History retention source has an invalid segment identifier");
-        const checkpoint: RetainedSegmentEvidence = { version: 1, segmentId: segment.id,
-          rawBytes: source.length, rawMtimeMs: sourceStat.mtimeMs, rawSha256: hashBytes(source),
-          evidenceSha256: hashText(retained!), evidence: retained! };
-        atomicWriteText(checkpointFile, `${JSON.stringify(checkpoint)}\n`);
-        this.retentionCache.delete(checkpointFile);
+        this.persistRetentionCheckpoint(segment.id, segment.eventsFile, source, sourceStat, retained!);
         let metadata = {};
         try { metadata = JSON.parse(readText(segment.metadataFile) ?? "{}"); } catch { /* Legacy segment. */ }
         atomicWriteText(segment.metadataFile, `${JSON.stringify({ ...metadata, startedAt: segment.startedAt, state: "closed" }, null, 2)}\n`);
@@ -2670,6 +2699,22 @@ export class ComputerHistoryDemoService {
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
+  }
+
+  private persistRetentionCheckpoint(segmentId: string, eventsFile: string, source: Buffer,
+    sourceStat: fs.Stats, evidence: string): void {
+    const currentStat = fs.statSync(eventsFile);
+    if (currentStat.size !== source.length || currentStat.mtimeMs !== sourceStat.mtimeMs) {
+      throw new Error("Computer History raw evidence changed while finalizing; retaining the event stream");
+    }
+    const file = this.retentionCheckpointPath(`${segmentId}-10min-summary`);
+    if (!file) throw new Error("Computer History retention source has an invalid segment identifier");
+    const checkpoint: RetainedSegmentEvidence = { version: 1, projectionVersion: RETENTION_EVIDENCE_VERSION, segmentId,
+      rawBytes: source.length, rawMtimeMs: sourceStat.mtimeMs, rawSha256: hashBytes(source),
+      evidenceSha256: hashText(evidence), evidence };
+    atomicWriteText(file, `${JSON.stringify(checkpoint)}\n`);
+    this.retentionCache.delete(file);
+    this.retentionCheckpointMatches(path.dirname(eventsFile));
   }
 
   private retentionCheckpointPath(historyId: string): string | null {
@@ -2698,18 +2743,37 @@ export class ComputerHistoryDemoService {
     } catch { return null; }
   }
 
+  /** Shared by recovery and deletion; always verify the persisted archive. */
+  private retentionCheckpointMatches(directory: string, verifyPersisted = false): boolean {
+    try {
+      const rawFile = path.join(directory, "events.jsonl");
+      const checkpointFile = this.retentionCheckpointPath(`${path.basename(directory)}-10min-summary`);
+      if (!checkpointFile) return false;
+      const rawStat = fs.statSync(rawFile);
+      const checkpointStat = fs.statSync(checkpointFile);
+      const signature = `${rawStat.size}:${rawStat.mtimeMs}:${rawStat.ctimeMs}:${checkpointStat.size}:${checkpointStat.mtimeMs}:${checkpointStat.ctimeMs}`;
+      if (!verifyPersisted && this.verifiedRetentionSources.get(directory) === signature) return true;
+      const raw = fs.readFileSync(rawFile);
+      const checkpoint = this.readRetentionCheckpoint(`${path.basename(directory)}-10min-summary`, true);
+      const valid = !!checkpoint && checkpoint.projectionVersion === RETENTION_EVIDENCE_VERSION
+        && checkpoint.rawBytes === raw.length && checkpoint.rawSha256 === hashBytes(raw)
+        && checkpoint.evidence === completeRawEvidence(raw);
+      if (valid) this.verifiedRetentionSources.set(directory, signature);
+      else this.verifiedRetentionSources.delete(directory);
+      return valid;
+    } catch { return false; }
+  }
+
   private canExpireRaw(directory: string): boolean {
     const eventsFile = path.join(directory, "events.jsonl");
     if (!fs.existsSync(eventsFile)) return true;
     try {
       const raw = fs.readFileSync(eventsFile);
-      const evidence = completeRawEvidence(raw);
+      completeRawEvidence(raw);
       if (!segmentHasActivity(eventsFile)) return true;
-      const checkpoint = this.readRetentionCheckpoint(`${path.basename(directory)}-10min-summary`, true);
-      if (checkpoint && checkpoint.rawBytes === raw.length && checkpoint.rawSha256 === hashBytes(raw)
-        && checkpoint.evidence === evidence) return true;
+      if (this.retentionCheckpointMatches(directory, true)) return true;
     } catch { /* Keep incomplete or unreadable evidence. Never expose its contents. */ }
-    this.setNarrationError("Computer History raw retention is deferred until complete evidence is safely persisted");
+    this.retentionDeferred = true;
     return false;
   }
 
@@ -3186,6 +3250,7 @@ export class ComputerHistoryDemoService {
    * still being written to.
    */
   private cleanupExpiredRecordings(): void {
+    this.retentionDeferred = false;
     if (!fs.existsSync(this.recordingDirectory)) return;
     this.recoverInterruptedSegments();
     const cutoff = Date.now() - RAW_RETENTION_MS;

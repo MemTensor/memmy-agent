@@ -81,7 +81,7 @@ export function createCodexSourceAdapter(deps: CreateCodexSourceAdapterDeps = {}
           options.onProgress?.({ sourceId: descriptor.sourceId, phase: "redact", current: emittedMessages, total: emittedMessages + 1 });
           emittedMessages += 1;
           options.onProgress?.({ sourceId: descriptor.sourceId, phase: "emit", current: emittedMessages, total: emittedMessages });
-          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot, titles.get(rawMessage.conversationId) ?? null);
+          yield toConversationMessage(descriptor.sourceId, rawMessage, session.workspacePath, session.gitRoot, session.externalImport, titles.get(rawMessage.conversationId) ?? null);
         }
       }
 
@@ -95,8 +95,12 @@ function toConversationMessage(
   rawMessage: RawCodexMessage,
   workspacePath: string | null,
   gitRoot: string | null,
-  sessionTitle: string | null
+  externalImport?: { sourcePath: string; contentHash?: string; importedThreadId: string },
+  sessionTitle: string | null = null
 ): ConversationMessage {
+  const sourceTurn = isRecord(rawMessage.rawMeta.sourceTurn) && externalImport
+    ? { ...rawMessage.rawMeta.sourceTurn, externalImport }
+    : rawMessage.rawMeta.sourceTurn;
   return {
     messageId: rawMessage.messageId,
     sourceId,
@@ -108,7 +112,11 @@ function toConversationMessage(
     gitRoot,
     ordinal: rawMessage.ordinal,
     ...(sessionTitle ? { sessionTitle } : {}),
-    rawMeta: rawMessage.rawMeta
+    rawMeta: {
+      ...rawMessage.rawMeta,
+      ...(externalImport ? { externalImport } : {}),
+      ...(sourceTurn ? { sourceTurn } : {})
+    }
   };
 }
 
@@ -124,4 +132,8 @@ function limitReached(count: number, maxMessages: number | undefined): boolean {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

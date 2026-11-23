@@ -20,13 +20,15 @@ const UPDATABLE_HOOK_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex
 
 export interface AgentSourceAutoInjectService {
   runOnce(): Promise<AgentSourceAutoInjectResult>;
+  reconcilePermission?(): Promise<void>;
 }
 
 export interface CreateAgentSourceAutoInjectServiceOptions {
   agentSources: Pick<AgentSourceService, "list" | "installSkill" | "installPlugin" | "isInstalledHookCurrent">
-    & Partial<Pick<AgentSourceService, "uninstallSkill" | "uninstallPlugin">>;
+    & Partial<Pick<AgentSourceService, "uninstallSkill" | "uninstallPlugin" | "isAutomaticConnectionAllowed">>;
   permissionManager: Pick<PermissionManager, "canWriteAgentSkill">;
   getScanPreferences: () => ScanPreferences;
+  isScanAllowed?: () => boolean;
   isAutoInjectSuppressed?: (sourceId: string) => boolean;
 }
 
@@ -35,8 +37,11 @@ export function createAgentSourceAutoInjectService(
   options: CreateAgentSourceAutoInjectServiceOptions
 ): AgentSourceAutoInjectService {
   let running = false;
+  let generation = 0;
+  let completion: Promise<void> | undefined;
 
   return {
+    async reconcilePermission() { generation += 1; await completion; },
     async runOnce() {
       if (running) {
         return {
@@ -49,26 +54,56 @@ export function createAgentSourceAutoInjectService(
       }
 
       running = true;
+      let finish!: () => void;
+      completion = new Promise<void>(resolve => { finish = resolve; });
+      const ownGeneration = generation;
+      const isCurrent = () => ownGeneration === generation && options.isScanAllowed?.() !== false;
+      const assertCurrent = () => { if (!isCurrent()) throw new Error("Automatic integration permission revoked"); };
+      const isSourceAllowed = async (sourceId: string) => options.agentSources.isAutomaticConnectionAllowed
+        ? options.agentSources.isAutomaticConnectionAllowed(sourceId)
+        : !options.isAutoInjectSuppressed?.(sourceId);
+      const confirmInstalled = async (sourceId: string, kind: "plugin" | "skill", assertAllowed: () => void) => {
+        let authorityError: unknown;
+        try {
+          assertAllowed();
+          if (await isSourceAllowed(sourceId)) { assertAllowed(); return true; }
+        }
+        catch (error) { authorityError = error; }
+        try {
+          if (kind === "plugin") {
+            if (!options.agentSources.uninstallPlugin) throw new Error("Cannot clean up an automatic integration");
+            await options.agentSources.uninstallPlugin(sourceId, { installType: "auto_inject" });
+          } else {
+            if (!options.agentSources.uninstallSkill) throw new Error("Cannot clean up an automatic integration");
+            await options.agentSources.uninstallSkill(sourceId, { installType: "auto_inject" });
+          }
+        } catch (cleanupError) {
+          throw new AggregateError([authorityError, cleanupError].filter(Boolean), "Automatic integration could not be confirmed. Cleanup failed. Retry removal.");
+        }
+        if (authorityError) throw authorityError;
+        return false;
+      };
+      const assertInstallAllowed = () => { assertCurrent(); if (!options.getScanPreferences().autoInjectSkill) throw new Error("Automatic integration disabled"); };
       try {
+        if (!isCurrent()) return { ok: true, skipped: true, reason: "auto_inject_disabled", installed: [], failed: [] };
         const sources = await options.agentSources.list();
         const installed: string[] = [];
         const failed: Array<{ sourceId: string; reason: string }> = [];
 
         for (const source of sources) {
+          if (!isCurrent()) break;
           if (!isUpdatableInstalledHook(source)) continue;
-          if (options.isAutoInjectSuppressed?.(source.sourceId)) continue;
-          if (!(await options.permissionManager.canWriteAgentSkill({ agentSourceId: source.sourceId }))) {
-            continue;
-          }
-
           try {
-            if (await options.agentSources.isInstalledHookCurrent(source.sourceId)) continue;
-            await options.agentSources.installPlugin(source.sourceId, { installType: "auto_inject" });
-            if (options.isAutoInjectSuppressed?.(source.sourceId)) {
-              if (!options.agentSources.uninstallPlugin) throw new Error("Cannot clean up an auto-updated source removed during installation");
-              await options.agentSources.uninstallPlugin(source.sourceId, { installType: "auto_inject" });
+            if (!(await isSourceAllowed(source.sourceId))) continue;
+            if (!(await options.permissionManager.canWriteAgentSkill({ agentSourceId: source.sourceId }))) {
               continue;
             }
+
+            if (await options.agentSources.isInstalledHookCurrent(source.sourceId)) continue;
+            assertCurrent();
+            if (!(await isSourceAllowed(source.sourceId))) continue;
+            await options.agentSources.installPlugin(source.sourceId, { installType: "auto_inject" }, assertCurrent);
+            if (!(await confirmInstalled(source.sourceId, "plugin", assertCurrent))) continue;
             installed.push(source.sourceId);
           } catch (error) {
             failed.push({
@@ -90,35 +125,29 @@ export function createAgentSourceAutoInjectService(
         }
 
         for (const source of sources) {
+          if (!isCurrent()) break;
           const checkDshUpdate = source.sourceId === "deepseek_harness" && source.status === "plugin_installed";
           if (!AUTO_INJECT_AGENT_SOURCE_IDS.has(source.sourceId) || !source.builtin || !source.available
             || (source.status !== "not_connected" && !checkDshUpdate)) {
             continue;
           }
-          if (options.isAutoInjectSuppressed?.(source.sourceId)) continue;
-
-          if (!(await options.permissionManager.canWriteAgentSkill({ agentSourceId: source.sourceId }))) {
-            continue;
-          }
 
           try {
-            if (checkDshUpdate && (await options.agentSources.isInstalledHookCurrent(source.sourceId)
-              || options.isAutoInjectSuppressed?.(source.sourceId))) continue;
-            if (HOOK_OR_PLUGIN_AGENT_SOURCE_IDS.has(source.sourceId)) {
-              await options.agentSources.installPlugin(source.sourceId, { installType: "auto_inject" });
-            } else {
-              await options.agentSources.installSkill(source.sourceId, { installType: "auto_inject" });
-            }
-            if (options.isAutoInjectSuppressed?.(source.sourceId)) {
-              if (HOOK_OR_PLUGIN_AGENT_SOURCE_IDS.has(source.sourceId)) {
-                if (!options.agentSources.uninstallPlugin) throw new Error("Cannot clean up an auto-injected source removed during installation");
-                await options.agentSources.uninstallPlugin(source.sourceId, { installType: "auto_inject" });
-              } else {
-                if (!options.agentSources.uninstallSkill) throw new Error("Cannot clean up an auto-injected source removed during installation");
-                await options.agentSources.uninstallSkill(source.sourceId);
-              }
+            if (!(await isSourceAllowed(source.sourceId))) continue;
+            if (!(await options.permissionManager.canWriteAgentSkill({ agentSourceId: source.sourceId }))) {
               continue;
             }
+
+            if (checkDshUpdate && (await options.agentSources.isInstalledHookCurrent(source.sourceId)
+              || options.isAutoInjectSuppressed?.(source.sourceId))) continue;
+            assertInstallAllowed();
+            if (!(await isSourceAllowed(source.sourceId))) continue;
+            if (HOOK_OR_PLUGIN_AGENT_SOURCE_IDS.has(source.sourceId)) {
+              await options.agentSources.installPlugin(source.sourceId, { installType: "auto_inject" }, assertInstallAllowed);
+            } else {
+              await options.agentSources.installSkill(source.sourceId, { installType: "auto_inject" }, assertInstallAllowed);
+            }
+            if (!(await confirmInstalled(source.sourceId, HOOK_OR_PLUGIN_AGENT_SOURCE_IDS.has(source.sourceId) ? "plugin" : "skill", assertInstallAllowed))) continue;
             installed.push(source.sourceId);
           } catch (error) {
             failed.push({
@@ -136,6 +165,8 @@ export function createAgentSourceAutoInjectService(
         };
       } finally {
         running = false;
+        finish();
+        completion = undefined;
       }
     }
   };

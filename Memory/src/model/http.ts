@@ -3,6 +3,16 @@ import type { ActualModelContext } from "../contracts/index.js";
 
 const logger = createMemoryLogger("model-http");
 
+export type ModelErrorCategory =
+  | "authentication_required"
+  | "permission_denied"
+  | "quota_exhausted"
+  | "rate_limited"
+  | "invalid_model_request"
+  | "provider_server_error";
+
+export type ProviderBusinessEnvelope = "memmy_account";
+
 export class ModelHttpError extends Error {
   override readonly name = "ModelHttpError";
 
@@ -12,7 +22,9 @@ export class ModelHttpError extends Error {
     readonly httpStatus: number,
     readonly errorCode: string | undefined,
     readonly detail: string,
-    readonly actualModelContext?: Readonly<ActualModelContext>
+    readonly actualModelContext?: Readonly<ActualModelContext>,
+    readonly errorType?: string,
+    readonly errorCategory?: ModelErrorCategory
   ) {
     super(message);
   }
@@ -29,6 +41,7 @@ export async function postJsonWithRetry<T>(
     timeoutMs: number;
     maxRetries: number;
     actualModelContext?: Readonly<ActualModelContext>;
+    businessEnvelope?: ProviderBusinessEnvelope;
   }
 ): Promise<T> {
   let lastError: unknown;
@@ -47,15 +60,17 @@ export async function postJsonWithRetry<T>(
           signal: controller.signal
         });
         const text = await response.text();
-        const failure = parseProviderFailure(text);
+        const failure = parseProviderFailure(text, input.businessEnvelope);
         if (!response.ok || failure.isBusinessError) {
           throw new ModelHttpError(
-            formatHttpFailure(input.provider, response, text),
+            formatHttpFailure(input.provider, response, text, failure.message),
             input.provider,
             response.status,
             failure.errorCode,
             failure.detail,
-            input.actualModelContext
+            input.actualModelContext,
+            failure.errorType,
+            failure.errorCategory
           );
         }
         return parseJsonResponse<T>(input.provider, response, text);
@@ -112,6 +127,7 @@ function sleep(ms: number): Promise<void> {
 
 function isRetryableModelRequestError(error: unknown): boolean {
   if (error instanceof ModelHttpError) {
+    if (error.errorCategory === "quota_exhausted") return false;
     return error.httpStatus === 408 || error.httpStatus === 429 || error.httpStatus >= 500;
   }
   return error instanceof TypeError || (error instanceof Error && error.name === "AbortError");
@@ -136,7 +152,7 @@ function parseJsonResponse<T>(provider: string, response: Response, text: string
   }
 }
 
-function formatHttpFailure(provider: string, response: Response, text: string): string {
+function formatHttpFailure(provider: string, response: Response, text: string, providerMessage?: string): string {
   const prefix = `${provider} HTTP ${response.status}`;
   const trimmed = text.trim();
   if (!trimmed) {
@@ -145,59 +161,100 @@ function formatHttpFailure(provider: string, response: Response, text: string): 
   if (looksLikeHtml(response, trimmed)) {
     return `${prefix}: endpoint returned HTML instead of JSON; check the configured model endpoint`;
   }
-  const providerMessage = extractProviderErrorMessage(trimmed);
   return `${prefix}: ${clip(providerMessage ?? compact(trimmed), 800)}`;
 }
 
-function extractProviderErrorMessage(text: string): string | undefined {
-  return parseProviderFailure(text).message;
-}
-
-function parseProviderFailure(text: string): {
+function parseProviderFailure(text: string, businessEnvelope?: ProviderBusinessEnvelope): {
   detail: string;
   errorCode?: string;
+  errorType?: string;
+  errorCategory?: ModelErrorCategory;
   isBusinessError: boolean;
   message?: string;
 } {
   try {
     const parsed = JSON.parse(text) as {
       code?: unknown;
-      error?: string | { code?: unknown; message?: unknown };
+      memmy_code?: unknown;
+      type?: unknown;
+      error?: string | { code?: unknown; memmy_code?: unknown; type?: unknown; message?: unknown };
       message?: unknown;
     };
-    const rawCode = parsed.error && typeof parsed.error === "object"
-      ? parsed.error.code ?? parsed.code
-      : parsed.code;
+    const nestedError = parsed.error && typeof parsed.error === "object" ? parsed.error : undefined;
+    const memmyCode = businessEnvelope === "memmy_account"
+      ? nestedError?.memmy_code ?? parsed.memmy_code
+      : undefined;
+    const rawCode = memmyCode ?? (nestedError
+      ? nestedError.code ?? parsed.code
+      : parsed.code);
     const errorCode = typeof rawCode === "string" || typeof rawCode === "number"
       ? String(rawCode)
       : undefined;
+    const rawType = nestedError?.type ?? parsed.type;
+    const errorType = typeof rawType === "string" && rawType.trim() ? rawType.trim() : undefined;
     const normalizedCode = errorCode?.trim().toLowerCase();
-    const isQuotaCode = normalizedCode === "40309";
+    const isMemmyBusinessCode = businessEnvelope === "memmy_account" && normalizedCode !== undefined &&
+      normalizedCode !== "0" && normalizedCode !== "success";
+    const isLegacyQuotaCode = normalizedCode === "40309";
+    const errorCategory = classifyProviderFailure(errorCode, errorType, businessEnvelope);
     if (typeof parsed.error === "string" && parsed.error.trim()) {
-      return { detail: parsed.error, errorCode, isBusinessError: true, message: parsed.error.trim() };
+      return { detail: parsed.error, errorCode, errorType, errorCategory,
+        isBusinessError: true, message: parsed.error.trim() };
     }
-    if (parsed.error && typeof parsed.error === "object" && typeof parsed.error.message === "string") {
+    if (nestedError) {
+      const message = typeof nestedError.message === "string" && nestedError.message.trim()
+        ? nestedError.message.trim()
+        : undefined;
       return {
-        detail: parsed.error.message,
+        detail: typeof nestedError.message === "string" ? nestedError.message : text,
         errorCode,
+        errorType,
+        errorCategory,
         isBusinessError: true,
-        message: parsed.error.message.trim() || undefined
+        message
       };
     }
     if (typeof parsed.message === "string" && parsed.message.trim()) {
       const message = parsed.message.trim();
       const isMemoryEvolutionQuota = isMemoryEvolutionQuotaMessage(message);
+      const resolvedCategory = errorCategory ?? (isMemoryEvolutionQuota ? "quota_exhausted" : undefined);
       return {
         detail: parsed.message,
         errorCode: errorCode ?? (isMemoryEvolutionQuota ? "40309" : undefined),
-        isBusinessError: isQuotaCode || isMemoryEvolutionQuota,
+        errorType,
+        errorCategory: resolvedCategory,
+        isBusinessError: isMemmyBusinessCode || isLegacyQuotaCode || isMemoryEvolutionQuota,
         message
       };
     }
-    return { detail: text, errorCode, isBusinessError: isQuotaCode };
+    return { detail: text, errorCode, errorType, errorCategory,
+      isBusinessError: isMemmyBusinessCode || isLegacyQuotaCode };
   } catch {
     return { detail: text, isBusinessError: false };
   }
+}
+
+function classifyProviderFailure(
+  errorCode: string | undefined,
+  errorType: string | undefined,
+  businessEnvelope: ProviderBusinessEnvelope | undefined
+): ModelErrorCategory | undefined {
+  const code = errorCode?.trim().toLowerCase().replace(/[\s_-]/gu, "");
+  const type = errorType?.trim().toLowerCase().replace(/[\s_-]/gu, "");
+  if (code === "40308" || code === "40309" || code === "insufficientquota" || type === "insufficientquota") {
+    return "quota_exhausted";
+  }
+  // Other categories come only from the Memmy gateway's own numeric codes. OpenAI-style
+  // types are not enough: OpenAI answers a bad key or an unknown model with
+  // invalid_request_error, and the gateway passes upstream errors through unchanged, so
+  // the type alone would hide configuration and input-length failures.
+  if (businessEnvelope !== "memmy_account") return undefined;
+  if (code === "40100") return "authentication_required";
+  if (code === "40101") return "permission_denied";
+  if (code === "40300") return "rate_limited";
+  if (code !== undefined && /^400\d\d$/u.test(code)) return "invalid_model_request";
+  if (code !== undefined && /^500\d\d$/u.test(code)) return "provider_server_error";
+  return undefined;
 }
 
 function isMemoryEvolutionQuotaMessage(message: string): boolean {

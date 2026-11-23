@@ -93,7 +93,7 @@ export function readEmbeddingMaintenanceStats(
   const snapshot = repos.db.transaction(() => {
     const readAt = new Date().toISOString();
     const entries = [
-      ...repos.vectors.maintenanceEntries(),
+      ...eligibleMaintenanceEntries(repos, repos.vectors.maintenanceEntries()),
       ...repos.userMemories.embeddingMaintenanceEntries(request.userId)
     ];
     const dimension = resolveDimension(entries, request);
@@ -153,7 +153,7 @@ export function readEmbeddingMaintenanceTargets(
 }
 
 export function readEmbeddingUpgradeCandidates(repos: Repositories): EmbeddingMaintenanceEntry[] {
-  return repos.db.transaction(() => repos.vectors.provenanceUpgradeEntries())();
+  return repos.db.transaction(() => eligibleMaintenanceEntries(repos, repos.vectors.provenanceUpgradeEntries()))();
 }
 
 function readTargetProgress(
@@ -163,7 +163,7 @@ function readTargetProgress(
   const memoryTargets = request.targets.filter(target => target.kind === "memory");
   const userTargets = request.targets.filter(target => target.kind === "user_memory");
   const entries = [
-    ...repos.vectors.maintenanceEntriesForTargets(memoryTargets),
+    ...eligibleMaintenanceEntries(repos, repos.vectors.maintenanceEntriesForTargets(memoryTargets)),
     ...repos.userMemories.embeddingMaintenanceEntriesByIds(request.userId, userTargets.map(target => target.id))
   ];
   const byKey = new Map(entries.map(entry => [targetKey(entry), entry]));
@@ -429,4 +429,11 @@ export function targetKey(
   target: Pick<EmbeddingMaintenanceReaderTarget, "kind" | "id" | "vectorField">
 ): string {
   return `${target.kind}:${target.id}:${target.vectorField ?? "vec"}`;
+}
+
+/** Keep source-disconnected or unverified imported Skills out of reader planning too. */
+function eligibleMaintenanceEntries(repos: Repositories, entries: EmbeddingMaintenanceEntry[]): EmbeddingMaintenanceEntry[] {
+  const ids = entries.filter(entry => entry.vectorField === "vec").map(entry => entry.id);
+  const ineligible = ids.length ? repos.ineligibleImportedSkillVectorIds(ids) : new Set<string>();
+  return entries.filter(entry => !ineligible.has(entry.id));
 }

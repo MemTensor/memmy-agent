@@ -299,6 +299,16 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
     void viewStatus.reloadCurrent().catch(() => undefined);
   }
 
+  async function setSkillArchived(id: string, archived: boolean) {
+    if (demoEnabled) return;
+    const action = archived ? props.client?.archiveSkill : props.client?.reactivateSkill;
+    if (!props.client || !action) throw new Error(t("memory.clientNotReady"));
+    await action.call(props.client, id);
+    clearMemoryPanelCache();
+    openSkill(id);
+    void refresh(page, { useCache: false }).catch(() => undefined);
+  }
+
   async function approveObservedSkill(id: string) {
     if (!props.client?.approveObservedSkill) throw new Error(t("memory.clientNotReady"));
     if (!canRead()) return;
@@ -359,6 +369,7 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       client={props.client}
       onOpenSkill={openSkill}
       onDeleteSkill={deleteSkill}
+      onSetSkillArchived={setSkillArchived}
       onApproveObservedSkill={approveObservedSkill}
       onUpdateObservedSkill={updateObservedSkill}
       onCloseSkill={closeSkill}
@@ -379,6 +390,7 @@ export interface SkillsSubPageViewProps {
   onRefresh: () => void | Promise<void>;
   onOpenSkill: (skillId: string) => void;
   onDeleteSkill: (id: string) => Promise<void>;
+  onSetSkillArchived?: (id: string, archived: boolean) => Promise<void>;
   onApproveObservedSkill?: (id: string) => Promise<void>;
   onUpdateObservedSkill?: (id: string, body: string, expectedVersion: number) => Promise<void>;
   onCloseSkill: () => void;
@@ -455,6 +467,7 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
         detail={props.detail ?? ("detail" in props.state ? props.state.detail : null)}
         onClose={props.onCloseSkill}
         onDelete={props.onDeleteSkill}
+        onSetArchived={props.onSetSkillArchived}
         onApprove={props.onApproveObservedSkill}
         onUpdate={props.onUpdateObservedSkill}
         onOpenMemoryReference={props.onOpenMemoryReference}
@@ -476,6 +489,7 @@ function SkillDrawer(props: {
   detail: SkillDetailState;
   onClose: () => void;
   onDelete: (id: string) => Promise<void>;
+  onSetArchived?: (id: string, archived: boolean) => Promise<void>;
   onApprove?: (id: string) => Promise<void>;
   onUpdate?: (id: string, body: string, expectedVersion: number) => Promise<void>;
   onOpenMemoryReference: OpenMemoryReference;
@@ -623,9 +637,45 @@ function SkillDrawer(props: {
             />
           )}
         </div>
-        {readyDetail && <MemoryDrawerDeleteAction onDelete={() => props.onDelete(readyDetail.detail.item.id)} />}
+        {readyDetail && (
+          <MemoryDrawerDeleteAction
+            onDelete={() => props.onDelete(readyDetail.detail.item.id)}
+            secondaryAction={props.onSetArchived ? (
+              <SkillArchiveButton
+                archived={readyDetail.detail.item.status === "archived"}
+                onToggle={(archived) => props.onSetArchived!(readyDetail.detail.item.id, archived)}
+              />
+            ) : undefined}
+          />
+        )}
       </aside>
     </div>
+  );
+}
+
+/** Archives an active Skill or reactivates an archived one. */
+function SkillArchiveButton(props: { archived: boolean; onToggle: (archived: boolean) => Promise<void> }) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        className="memory-delete-cancel-button"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          setError(null);
+          void props.onToggle(!props.archived)
+            .catch((toggleError) => setError(toErrorMessage(toggleError)))
+            .finally(() => setBusy(false));
+        }}
+      >
+        {t(props.archived ? "memory.skills.reactivate" : "memory.skills.archive")}
+      </button>
+      {error ? <span className="memory-delete-action__error">{error}</span> : null}
+    </>
   );
 }
 

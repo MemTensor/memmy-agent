@@ -5,9 +5,10 @@ import {
 } from "./base.js";
 import {
   coversInputModalities,
-  getModelInputModalities,
   requiredInputModalities,
 } from "./model-input-capabilities.js";
+import { resolveTurnModelCapabilities } from "./turn-model-capabilities.js";
+import { CloudModelCapabilitySchema } from "@memmy/local-api-contracts";
 
 const PRIMARY_FAILURE_THRESHOLD = 3;
 const PRIMARY_COOLDOWN_MS = 60_000;
@@ -37,6 +38,10 @@ const FALLBACK_ERROR_TOKENS = [
 const MISSING = Symbol("missing");
 
 type FallbackPreset = {
+  explicitTokenSettings?: { maxTokens?: number; contextWindowTokens?: number };
+  custom?: boolean;
+  thinking?: import("@memmy/local-api-contracts").CloudModelThinkingConfig;
+  inputModalities?: readonly string[] | null;
   model: string;
   maxTokens?: number | null;
   temperature?: number | null;
@@ -105,14 +110,14 @@ export class FallbackProvider extends LLMProvider {
   }
 
   async chat(args: any): Promise<LLMResponse> {
-    if (!this.hasFallbacks) {
+    if (!this.hasFallbacks || args.modelCapabilities?.mode === "provider-fallback") {
       return annotateExecution(await this.primary.chat(args), this.primary, args.model);
     }
     return this.tryWithFallback((provider, nextArgs) => provider.chat(nextArgs), args, null);
   }
 
   async chatStream(args: any): Promise<LLMResponse> {
-    if (!this.hasFallbacks) {
+    if (!this.hasFallbacks || args.modelCapabilities?.mode === "provider-fallback") {
       return annotateExecution(await this.primary.chatStream(args), this.primary, args.model);
     }
     const hasStreamed = [false];
@@ -156,8 +161,19 @@ export class FallbackProvider extends LLMProvider {
     const required = requiredInputModalities(args.messages ?? []);
     for (const fallback of this.fallbackPresets) {
       if (hasStreamed?.[0]) break;
-      const supported = getModelInputModalities(fallback.model);
-      if (!coversInputModalities(supported, required)) continue;
+      const fallbackCapabilities = args.capabilityCatalogState ? Object.freeze({ ...resolveTurnModelCapabilities({
+        state: args.capabilityCatalogState,
+        model: fallback.model,
+        ...(fallback.custom ? { customConfig: {
+          ...fallback.explicitTokenSettings,
+          ...(fallback.inputModalities ? { inputModalities: CloudModelCapabilitySchema.shape.inputModalities.parse(fallback.inputModalities) } : {}),
+          ...(fallback.thinking ? { thinking: fallback.thinking } : {}),
+        } } : {}),
+        explicitGeneration: { ...fallback.explicitTokenSettings, reasoningEffort: fallback.reasoningEffort },
+      }), ...(args.modelCapabilities?.taskMaxTokens !== undefined ? { taskMaxTokens: args.modelCapabilities.taskMaxTokens } : {}) }) : undefined;
+      const supported = fallbackCapabilities ? fallbackCapabilities.inputModalities
+        : fallback.inputModalities ? CloudModelCapabilitySchema.shape.inputModalities.parse(fallback.inputModalities) : undefined;
+      if (supported && !coversInputModalities(supported, required)) continue;
       let fallbackProvider: LLMProvider;
       try {
         fallbackProvider = this.providerFactory(fallback);
@@ -166,12 +182,14 @@ export class FallbackProvider extends LLMProvider {
       }
 
       const original = {
+        modelCapabilities: args.modelCapabilities ?? MISSING,
         model: Object.prototype.hasOwnProperty.call(args, "model") ? args.model : MISSING,
         maxTokens: Object.prototype.hasOwnProperty.call(args, "maxTokens") ? args.maxTokens : MISSING,
         temperature: Object.prototype.hasOwnProperty.call(args, "temperature") ? args.temperature : MISSING,
         reasoningEffort: Object.prototype.hasOwnProperty.call(args, "reasoningEffort") ? args.reasoningEffort : MISSING,
       };
       args.model = fallback.model;
+      if (fallbackCapabilities) args.modelCapabilities = fallbackCapabilities;
       args.maxTokens = fallback.maxTokens ?? null;
       args.temperature = fallback.temperature ?? null;
       const reasoning = fallback.reasoningEffort ?? null;
@@ -189,6 +207,7 @@ export class FallbackProvider extends LLMProvider {
         if (response.errorCategory === "image_input_unsupported") return response;
         lastResponse = response;
       } finally {
+        restoreArg(args, "modelCapabilities", original.modelCapabilities);
         restoreArg(args, "model", original.model);
         restoreArg(args, "maxTokens", original.maxTokens);
         restoreArg(args, "temperature", original.temperature);

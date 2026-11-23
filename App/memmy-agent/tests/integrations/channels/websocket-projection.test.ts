@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { GoalRuntime } from "../../../src/core/agent-runtime/goal-runtime.js";
 import { MessageBus } from "../../../src/core/runtime-messages/index.js";
 import { Session, SessionManager } from "../../../src/core/session/manager.js";
 import {
@@ -75,6 +76,94 @@ afterEach(() => {
 });
 
 describe("WebSocket projected sessions", () => {
+  it.each(["weixin", "telegram", "cli", "websocket"])("preserves %s Goal elapsed time across GUI pause and resume", async (sourceChannel) => {
+    const { manager, workspace, bus, channel, connection, sent } = fixture();
+    const canonicalKey = `${sourceChannel}:goal-clock`;
+    projectedSession(manager, workspace, canonicalKey);
+    const chatId = toGuiChatId(canonicalKey);
+    channel.attachConnection(connection, chatId);
+    const runtime = new GoalRuntime({ sessions: manager, bus });
+    channel.goalControlHandler = (request) => runtime.control(request);
+    const goal = await runtime.create({
+      sessionKey: canonicalKey,
+      objective: "Calculate 123 * 456",
+      route: { channel: sourceChannel, chatId: "goal-clock" },
+      turnId: "first-turn",
+    });
+    const deliverGoalEvents = async () => {
+      await runtime.flushEffects(canonicalKey);
+      let message;
+      while ((message = bus.outbound.getNowait())) {
+        expect(message.channel).toBe("websocket");
+        await channel.send(message);
+      }
+    };
+    await deliverGoalEvents();
+    await channel.hydrateAfterSubscribe(chatId);
+    sent.length = 0;
+
+    for (const [index, latencyMs, expectedSeconds] of [[1, 13_000, 13], [2, 2_000, 15]] as const) {
+      const turnId = index === 1 ? "first-turn" : "second-turn";
+      if (index === 2) {
+        await channel.dispatchEnvelope(connection, "goal-client", {
+          type: "goal_control", chat_id: chatId, goal_id: goal.goalId,
+          request_id: "00000000-0000-4000-8000-000000000003", action: "resume",
+        });
+        runtime.registerLease(canonicalKey, goal.goalId, turnId);
+        await deliverGoalEvents();
+        expect(sent.filter((event) => event.event === "goal_state").at(-1)?.goal_state)
+          .toMatchObject({ status: "active", time_used_seconds: 13 });
+        expect(sent.at(-1)).toMatchObject({ event: "goal_control_result", ok: true });
+        sent.length = 0;
+      }
+      runtime.setCallbacks({
+        cancelActiveTasks: async () => {
+          await runtime.settleTurn({
+            sessionKey: canonicalKey, turnId, goalId: goal.goalId,
+            usage: {}, latencyMs, stopReason: "cancelled", errorCategory: null,
+          });
+          runtime.releaseTurn(canonicalKey, turnId);
+          return 1;
+        },
+      });
+      await channel.dispatchEnvelope(connection, "goal-client", {
+        type: "goal_control", chat_id: chatId, goal_id: goal.goalId,
+        request_id: `00000000-0000-4000-8000-00000000000${index}`, action: "pause",
+      });
+      await deliverGoalEvents();
+      const states = sent.filter((event) => event.event === "goal_state");
+      expect(states).toHaveLength(2);
+      expect(states.at(-1)).toMatchObject({
+        chat_id: chatId,
+        goal_state: { goal_id: goal.goalId, status: "paused", time_used_seconds: expectedSeconds },
+      });
+      expect(sent.at(-1)).toMatchObject({ event: "goal_control_result", ok: true });
+      sent.length = 0;
+    }
+    await runtime.clear(canonicalKey, goal.goalId);
+    await deliverGoalEvents();
+    expect(sent.filter((event) => event.event === "goal_state")).toMatchObject([
+      { chat_id: chatId, goal_state: { goal_id: null, status: null } },
+    ]);
+  });
+
+  it.each(["websocket", "email"])("does not add a redundant or unsupported GUI route for %s", async (routeChannel) => {
+    const { manager, workspace, bus } = fixture();
+    const canonicalKey = routeChannel === "websocket" ? "weixin:gui-goal" : "email:hidden-goal";
+    projectedSession(manager, workspace, canonicalKey);
+    const chatId = routeChannel === "websocket" ? toGuiChatId(canonicalKey) : "hidden-goal";
+    const runtime = new GoalRuntime({ sessions: manager, bus });
+    await runtime.create({
+      sessionKey: canonicalKey, objective: "Check Goal routing",
+      route: { channel: routeChannel, chatId }, turnId: "create-turn",
+    });
+    await runtime.flushEffects(canonicalKey);
+    expect(bus.outbound.getNowait()).toMatchObject({
+      channel: routeChannel, chatId, metadata: { goalStateSync: true },
+    });
+    expect(bus.outbound.size).toBe(0);
+  });
+
   it("lists native GUI, allowed IM, and terminal sessions through the standard summary", () => {
     const { manager, workspace, channel } = fixture();
     projectedSession(manager, workspace, "websocket:native", "Native");

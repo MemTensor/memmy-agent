@@ -1,6 +1,90 @@
 import { describe, expect, it, vi } from "vitest";
 import { createHttpCloudClient } from "./http-cloud-client.js";
 
+describe("verification request resilience", () => {
+  it.each(["phone", "email"] as const)("preserves %s gateway timeout status", async channel => {
+    const client = createHttpCloudClient({ baseUrl: "https://cloud.test", fetchImpl: async () => new Response("Gateway Timeout", { status: 504 }) });
+    await expect(channel === "phone"
+      ? client.sendPhoneCode({ phoneNumber: "13800138000", zhEnv: true })
+      : client.sendEmailCode({ email: "test@example.com", zhEnv: false }))
+      .rejects.toMatchObject({ status: 504, code: "internal" });
+  });
+
+  it("preserves a timeout while reading the response body", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createHttpCloudClient({ baseUrl: "https://cloud.test", fetchImpl: async (_url, init) => {
+        return new Response(new ReadableStream({ start(controller) {
+          init!.signal!.addEventListener("abort", () => controller.error(new DOMException("aborted body", "AbortError")), { once: true });
+        } }));
+      } });
+      // AbortSignal uses a native timer; trigger its signal through a controlled replacement.
+      const controller = new AbortController();
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+      try {
+        const pending = client.sendPhoneCode({ phoneNumber: "13800138000", zhEnv: true });
+        const assertion = expect(pending).rejects.toMatchObject({ name: "TimeoutError" });
+        controller.abort(new DOMException("timed out", "TimeoutError"));
+        await assertion;
+      } finally {
+        timeout.mockRestore();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("gives code delivery and login 10 seconds without changing ordinary cloud requests", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => new Response(JSON.stringify({
+      code: 0,
+      data: String(url).endsWith("/login")
+        ? { id: "test-user", uuid: "test-credential", phoneNumber: "13800138000" }
+        : true
+    })));
+    try {
+      const client = createHttpCloudClient({ baseUrl: "https://cloud.test", fetchImpl });
+      await client.sendPhoneCode({ phoneNumber: "13800138000", zhEnv: true });
+      await client.sendEmailCode({ email: "test@example.com", zhEnv: false });
+      await client.login({ phoneNumber: "13800138000", verificationCode: "123456", loginSource: "Memmy" });
+      await client.logout({ uuid: "test-credential" });
+
+      expect(timeout.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([10_000, 10_000, 10_000, 5_000]);
+      expect(fetchImpl).toHaveBeenCalledTimes(4);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("keeps a longer configured authentication timeout", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const client = createHttpCloudClient({
+        baseUrl: "https://cloud.test", timeoutMs: 30_000,
+        fetchImpl: async () => new Response(JSON.stringify({ code: 0, data: true }))
+      });
+      await client.sendPhoneCode({ phoneNumber: "13800138000", zhEnv: true });
+      expect(timeout).toHaveBeenCalledWith(30_000);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it.each([429, 200])("preserves phone verification throttling for HTTP %s", async (status) => {
+    const client = createHttpCloudClient({
+      baseUrl: "https://cloud.test",
+      fetchImpl: async () => new Response(JSON.stringify({ code: 40301, message: "请求过于频繁，请稍后重试", data: null }), { status })
+    });
+    await expect(client.sendPhoneCode({ phoneNumber: "13800138000", zhEnv: true })).rejects.toMatchObject({ code: "rate_limited" });
+  });
+
+  it("does not automatically resend after the connection is lost", async () => {
+    const fetchImpl = vi.fn(async () => { throw new TypeError("fetch failed"); });
+    const client = createHttpCloudClient({ baseUrl: "https://cloud.test", fetchImpl });
+    await expect(client.sendPhoneCode({ phoneNumber: "13800138000", zhEnv: true })).rejects.toThrow("fetch failed");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("invitation cloud APIs", () => {
   it("login 透传邀请码并解析一次性邀请结果", async () => {
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {

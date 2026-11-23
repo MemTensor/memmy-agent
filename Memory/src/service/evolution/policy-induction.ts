@@ -1,4 +1,8 @@
+import { revisionInputHash } from "./episode-revision.js";
+import { initialPolicyContributions, readPolicyContributions, revisePolicySources, type PolicySourceValues } from "./episode-contributions.js";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import { l2SupportRelation } from "./l2-content-revision.js";
+import { l2SharesComparisonScope } from "./l2-comparison-scope.js";
 import {
   L2_INDUCTION_PROMPT,
   buildPolicyDraft,
@@ -13,8 +17,8 @@ import {
   tracePolicySimilarity
 } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
-import type { LlmClient } from "../../model/types.js";
-import type { EvolutionJobRecord } from "../../storage/repositories.js";
+import type { Embedder, LlmClient } from "../../model/types.js";
+import type { EvolutionJobRecord, Repositories } from "../../storage/repositories.js";
 import { kindFromMemory } from "../../storage/repositories.js";
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
@@ -22,6 +26,9 @@ import { stableHash } from "../../utils/id.js";
 import { clip } from "../../utils/text.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
+
+import { upsertL2Candidate } from "./l2-candidate-service.js";
+import { UnifiedL2ExtractionPipeline } from "./l2-extraction-pipeline.js";
 
 export type PolicyDraft = ReturnType<typeof buildPolicyDraft> & {
   expectedOutcome?: string;
@@ -45,85 +52,12 @@ type PolicyLifecycleStatus =
   | "superseded"
   | "archived";
 
-type CandidatePoolRecord = {
-  sourceMemoryId: string;
-  candidateKey: string;
-  createdAt?: string;
-  updatedAt?: string;
-  status?: string;
-  sourceEpisodeId?: string;
-};
-
-type PolicyTraceLink = {
-  l1MemoryId: string;
-  l2MemoryId: string;
-};
-
-type ReposPort = {
-  transaction<T>(fn: () => T): T;
-  memories: {
-    get(id: string): MemoryRow | undefined;
-    getByKey(memoryLayer: "L2", memoryKey: string): MemoryRow | undefined;
-    list(filter: Record<string, unknown>, limit?: number): MemoryRow[];
-    getMany(ids: string[]): MemoryRow[];
-    update(memory: MemoryRow): MemoryRow;
-  };
-  runtime: {
-    resolveL1Source(id: string): { episodeId?: string; rawTurnId?: string } | undefined;
-    pruneCandidatePool(now: string): number;
-    listPendingCandidatePool(input: {
-      userId?: string;
-      now?: string;
-      limit?: number;
-    }): CandidatePoolRecord[];
-    upsertCandidatePoolTrace(input: {
-      id: string;
-      userId: string;
-      sessionId?: string;
-      sourceMemoryId: string;
-      candidateKey: string;
-      candidateValue: string;
-      score: number;
-      evidence: unknown;
-      createdAt: string;
-      updatedAt: string;
-      expiresAt?: string | null;
-    }): void;
-    markCandidatePoolPromoted(input: {
-      userId?: string;
-      candidateKey: string;
-      sourceMemoryIds: string[];
-      policyId: string;
-      at: string;
-    }): void;
-    listTracePolicyLinks(input: {
-      userId?: string;
-      l1MemoryId?: string;
-      l2MemoryId?: string;
-      limit?: number;
-    }): PolicyTraceLink[];
-    insertTracePolicyLink(input: {
-      userId: string;
-      l1MemoryId: string;
-      l2MemoryId: string;
-      relation?: string;
-      strength?: number;
-      createdAt?: string;
-    }): string;
-    appendEpisodeDerivedMemory(
-      episodeId: string,
-      layer: "L1" | "L2" | "L3" | "Skill",
-      memoryId: string,
-      at: string
-    ): void;
-  };
-};
-
 export interface PolicyInductionDeps {
   config: MemmyConfig;
-  repos: ReposPort;
+  repos: Repositories;
   nowIso: () => string;
   skillLlm: LlmClient;
+  embedder: Embedder;
   traceMeta(memory: MemoryRow | null | undefined): TraceMeta | null;
   projectIdFromMemory(memory: MemoryRow): string | undefined;
   profileIdFromMemory(memory: MemoryRow): string | undefined;
@@ -149,12 +83,30 @@ export interface PolicyInductionDeps {
   }): void;
   namespaceIdFromMemory(memory: MemoryRow): string | undefined;
   onSkillRewardDrift(policy: PolicyMeta, at: string): void;
+  onPolicyRevised?(policyId: string, at: string): void;
 }
 
 export class PolicyInductionEngine {
   constructor(private readonly deps: PolicyInductionDeps) {}
 
   async induceL2(job: EvolutionJobRecord): Promise<void> {
+    if (this.deps.config.algorithm.l2Induction.mode === "unified") {
+      const source = this.l2InductionSourceForJob(job);
+      const trace = this.deps.traceMeta(source);
+      if (trace && trace.userId === job.userId && this.isTraceEligibleForL2(trace)) {
+        this.recordCandidatePoolTrace(trace, "", this.deps.nowIso());
+      }
+      // Lazily carry the current Episode's already queued ordinary sources across the mode switch.
+      const episodeId = job.episodeId ?? trace?.episodeId;
+      for (const row of this.deps.repos.runtime.listPendingCandidatePool({ userId: job.userId, limit: -1 })) {
+        const pendingTrace = this.deps.traceMeta(this.deps.repos.memories.get(row.sourceMemoryId));
+        if (!pendingTrace || pendingTrace.userId !== job.userId ||
+          (episodeId ? pendingTrace.episodeId !== episodeId : pendingTrace.id !== trace?.id)) continue;
+        if (this.isTraceEligibleForL2(pendingTrace)) this.recordCandidatePoolTrace(pendingTrace, "", this.deps.nowIso());
+      }
+      await new UnifiedL2ExtractionPipeline({ ...this.deps, recomputePolicyStats: this.recomputePolicyStats.bind(this) }).induce(job);
+      return;
+    }
     const source = this.l2InductionSourceForJob(job);
     if (!source) {
       const sourceMemoryId = typeof job.payload?.sourceMemoryId === "string"
@@ -260,6 +212,9 @@ export class PolicyInductionEngine {
         ? policyMetaFromMemory(existingPolicyMemory)
         : null;
 
+      const currentRawPolicy = existingPolicyMemory?.properties.internal_info.policy;
+      const gainContributions = this.policyContributions(existingPolicy ?? { gain: 0, support: 0, schemaVersion: 1 },
+        isRecord(currentRawPolicy) ? currentRawPolicy : {}, bucket, this.l2GainReferenceTraces(bucket, sourceTrace.episodeId));
       const fallbackDraft = buildPolicyDraft({
         signature,
         evidenceTraces: bucket,
@@ -268,7 +223,7 @@ export class PolicyInductionEngine {
         minGain: this.deps.config.algorithm.l2Induction.minGain,
         archiveGain: this.deps.config.algorithm.l2Induction.archiveGain,
         tauSoftmax: this.deps.config.algorithm.l2Induction.tauSoftmax,
-        gainEmaAlpha: this.deps.config.algorithm.l2Induction.gainEmaAlpha,
+        gainEmaAlpha: 0,
         currentStatus: existingPolicy?.status === "active"
           ? "active"
           : existingPolicy?.status === "candidate"
@@ -276,8 +231,8 @@ export class PolicyInductionEngine {
             : existingPolicy
               ? "archived"
               : undefined,
-        currentGain: existingPolicy?.gain,
-        currentSupport: existingPolicy?.support
+        currentGain: gainContributions.lastGain,
+        currentSupport: 1
       });
 
       const enhancement = await this.enhancePolicyDraft(signature, promptEvidenceTraces, fallbackDraft);
@@ -361,6 +316,7 @@ export class PolicyInductionEngine {
           source_episode_ids: draft.sourceEpisodeIds,
           source_trace_ids: draft.sourceTraceIds,
           policy: {
+            gain_contributions: gainContributions,
             title: draft.title,
             trigger: draft.trigger,
             procedure: draft.procedure,
@@ -469,7 +425,11 @@ export class PolicyInductionEngine {
     return payloadSource ?? legacyTarget;
   }
 
-  associateL2(job: EvolutionJobRecord): void {
+  async associateL2(job: EvolutionJobRecord): Promise<void> {
+    if (this.deps.config.algorithm.l2Induction.mode === "unified") {
+      await this.induceL2(job);
+      return;
+    }
     const source = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
     if (!source) return;
     const trace = this.deps.traceMeta(source);
@@ -663,32 +623,49 @@ export class PolicyInductionEngine {
     if (!memory || memory.memoryLayer !== "L2") return undefined;
     const policy = policyMetaFromMemory(memory);
     if (!policy) return undefined;
+    const unifiedEvidence = this.deps.config.algorithm.l2Induction.mode === "unified" || policy.schemaVersion === 2
+      || policy.sourceFeedbackIds.length > 0;
 
-    const linkedTraceIds = new Set(
-      this.deps.repos.runtime
-        .listTracePolicyLinks({ l2MemoryId: policy.id, limit: 1000 })
-        .map((link) => link.l1MemoryId)
-    );
+    const links = this.deps.repos.runtime.listTracePolicyLinks({ l2MemoryId: policy.id, limit: 1000 });
+    const currentSupportLinks = links.filter((link) => link.relation === l2SupportRelation(memory));
+    const linkedTraceIds = new Set([
+      ...policy.sourceTraceIds,
+      ...(unifiedEvidence ? currentSupportLinks : links).map((link) => link.l1MemoryId)
+    ]);
 
     const allTraces = this.deps.repos.memories
-      .list({ memoryLayer: "L1", status: "activated" }, 1000)
+      .getMany([...linkedTraceIds])
       .map((memory) => this.deps.traceMeta(memory))
-      .filter((trace): trace is TraceMeta =>
-        Boolean(trace && this.isTraceEligibleForL2(trace))
-      );
+      .filter((trace): trace is TraceMeta => {
+        if (!trace) return false;
+        if (!unifiedEvidence) return this.isTraceEligibleForL2(trace);
+        // Source IDs alone retain same-owner evidence; an attributed current link is required to bridge owners.
+        const ownerMatches = trace.userId === memory.userId || (l2SharesComparisonScope(trace.memory, memory) &&
+          currentSupportLinks.some((link) => link.l1MemoryId === trace.id && link.l2MemoryId === memory.id && link.userId === trace.userId));
+        return ownerMatches && this.isPolicyEvidenceValid(trace, policy);
+      });
 
     const linkedTraces = allTraces.filter((trace) => linkedTraceIds.has(trace.id));
     const evidenceTraces = linkedTraces;
     if (evidenceTraces.length === 0) {
-      const archived = this.deps.repos.memories.update(updatePolicyStats(memory, {
+      const raw = isRecord(memory.properties.internal_info.policy) ? memory.properties.internal_info.policy : {};
+      const contributions = this.policyContributions(policy, raw, [], []);
+      const withdrawn = updatePolicyStats(memory, {
         support: 0,
-        gain: policy.gain,
-        rawGain: policy.gain,
+        gain: contributions.lastGain,
+        rawGain: contributions.lastRawGain,
         status: "quarantined",
         sourceEpisodeIds: [],
         sourceTraceIds: [],
         updatedAt: at
-      }));
+      });
+      withdrawn.properties.internal_info = { ...withdrawn.properties.internal_info,
+        policy: { ...(withdrawn.properties.internal_info.policy as Record<string, unknown>), gain_contributions: contributions } };
+      const archived = this.deps.repos.memories.update(withdrawn);
+      const withdrawnPolicy = policyMetaFromMemory(archived);
+      if (withdrawnPolicy && (policy.support !== 0 || policy.gain !== withdrawnPolicy.gain)) {
+        this.deps.onSkillRewardDrift(withdrawnPolicy, at);
+      }
       this.deps.enqueueChange({
         memoryId: archived.id,
         namespaceId: this.deps.namespaceIdFromMemory(archived),
@@ -705,29 +682,59 @@ export class PolicyInductionEngine {
       return archived;
     }
 
-    const gainReferenceTraces = this.l2GainReferenceTraces(evidenceTraces, triggerEpisodeId);
+    const rawPolicy = isRecord(memory.properties.internal_info.policy) ? memory.properties.internal_info.policy : {};
+    const evidenceAware = unifiedEvidence && (policy.schemaVersion === 2 || policy.sourceFeedbackIds.length > 0 || ["failure_avoidance", "repair_instruction", "preference", "verifier_feedback"].includes(policy.experienceType));
+    const successfulIds = new Set(stringArray(rawPolicy.successful_source_trace_ids));
+    const gainTraces = evidenceAware
+      ? evidenceTraces.filter((trace) => (policy.schemaVersion !== 2 || successfulIds.has(trace.id)) && trace.value > 0 && Boolean(trace.episodeId))
+      : evidenceTraces;
+    const successfulEpisodeCount = new Set(gainTraces.map((trace) => trace.episodeId).filter(Boolean)).size;
+    const gainReferenceTraces = this.l2GainReferenceTraces(gainTraces, triggerEpisodeId);
+    const gainInputVersion = revisionInputHash({
+      contentRevision: rawPolicy.content_revision ?? 1,
+      evidence: gainTraces.map(trace => [trace.id, trace.episodeId, trace.value]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      reference: gainReferenceTraces.map(trace => [trace.id, trace.episodeId, trace.value]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      alpha: this.deps.config.algorithm.l2Induction.gainEmaAlpha,
+      tau: this.deps.config.algorithm.l2Induction.tauSoftmax
+    });
+    const contributions = this.policyContributions(policy, rawPolicy, gainTraces, gainReferenceTraces);
+    const repeatedGainInput = rawPolicy.gain_input_version === gainInputVersion && contributions.lastGain === policy.gain;
     const stats = buildPolicyDraft({
       signature: policy.signature,
-      evidenceTraces,
+      evidenceTraces: gainTraces,
       allTraces: gainReferenceTraces,
       minSupport: this.deps.config.algorithm.l2Induction.minEpisodesForActivation,
       minGain: this.deps.config.algorithm.l2Induction.minGain,
       archiveGain: this.deps.config.algorithm.l2Induction.archiveGain,
       tauSoftmax: this.deps.config.algorithm.l2Induction.tauSoftmax,
-      gainEmaAlpha: this.deps.config.algorithm.l2Induction.gainEmaAlpha,
+      gainEmaAlpha: 0,
       currentStatus: policy.status === "active"
         ? "active"
         : policy.status === "archived"
           ? "archived"
           : "candidate",
-      currentGain: policy.gain,
-      currentSupport: policy.support
+      currentGain: contributions.lastGain,
+      currentSupport: 1
     });
 
+    if (evidenceAware) {
+      stats.support = new Set(evidenceTraces.map((trace) => trace.episodeId || trace.id)).size;
+      stats.sourceTraceIds = evidenceTraces.map((trace) => trace.id);
+      stats.sourceEpisodeIds = [...new Set(evidenceTraces.flatMap((trace) => trace.episodeId ? [trace.episodeId] : []))];
+      if (gainTraces.length === 0) {
+        stats.gain = contributions.lastGain;
+        stats.rawGain = contributions.lastRawGain;
+        stats.status = policy.schemaVersion !== 2 && policy.status === "active" ? "active" : "candidate";
+      }
+    }
+    const successEligible = rawPolicy.generation_method !== "rule_fallback" && successfulEpisodeCount > 0;
     const previous = memory;
-    const nextStatus: PolicyLifecycleStatus = policy.status === "active" && stats.status !== "active"
+    const calculatedStatus = policy.schemaVersion === 2 &&
+      (!successEligible || successfulEpisodeCount < Math.min(2, this.deps.config.algorithm.l2Induction.minEpisodesForActivation)) && stats.status === "active"
+      ? "candidate" : stats.status;
+    const nextStatus: PolicyLifecycleStatus = policy.status === "active" && calculatedStatus !== "active"
       ? "verification_required"
-      : stats.status;
+      : calculatedStatus;
     const next = updatePolicyStats(memory, {
       support: stats.support,
       gain: stats.gain,
@@ -738,6 +745,29 @@ export class PolicyInductionEngine {
       updatedAt: at
     });
 
+    if (evidenceAware) {
+      const eligibility = policy.schemaVersion === 2 ? {
+        skill_eligible: successEligible,
+        ...(successEligible ? {
+          experience_type: policy.experienceType === "success_pattern" ? "success_pattern" : "repair_validated",
+          evidence_polarity: policy.evidencePolarity === "negative" || policy.evidencePolarity === "mixed" ? "mixed" : "positive"
+        } : {})
+      } : {};
+      const counters = {
+        ...eligibility,
+        evidence_event_count: evidenceTraces.length,
+        successful_episode_count: successfulEpisodeCount,
+        pending_conflict_count: this.deps.repos.runtime.listTracePolicyLinks({ l2MemoryId: policy.id, limit: 10000 })
+          .filter((link) => link.relation === "refutes_pending").length,
+        gain_status: gainTraces.length ? "computed" : "not_computed"
+      };
+      next.info = { ...next.info, ...counters };
+      next.properties.info = { ...next.properties.info, ...counters };
+      next.properties.internal_info = { ...next.properties.internal_info, ...counters,
+        policy: { ...(next.properties.internal_info.policy as Record<string, unknown>), ...counters } };
+    }
+    next.properties.internal_info = { ...next.properties.internal_info,
+      policy: { ...(next.properties.internal_info.policy as Record<string, unknown>), gain_input_version: gainInputVersion, gain_contributions: contributions } };
     const saved = this.deps.repos.memories.update(next);
     for (const episodeId of stats.sourceEpisodeIds) {
       this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "L2", saved.id, at);
@@ -774,9 +804,27 @@ export class PolicyInductionEngine {
           createdAt: at
         });
       }
-      this.deps.onSkillRewardDrift(savedPolicy, at);
+      if (!repeatedGainInput) this.deps.onSkillRewardDrift(savedPolicy, at);
     }
     return saved;
+  }
+
+  private policyContributions(policy: Pick<PolicyMeta, "gain" | "support" | "schemaVersion">, rawPolicy: Record<string, unknown>,
+    evidence: TraceMeta[], reference: TraceMeta[]) {
+    const settings = this.deps.config.algorithm.l2Induction;
+    const previous = readPolicyContributions(rawPolicy.gain_contributions) ?? initialPolicyContributions(
+      policy.gain, policy.schemaVersion === 2 ? numberOr(rawPolicy.successful_episode_count, 0) : policy.support,
+      settings.gainEmaAlpha, settings.tauSoftmax);
+    const sources = new Map<string, PolicySourceValues>();
+    const supportIds = new Set(evidence.map(trace => trace.id));
+    const traces = new Map([...reference, ...evidence].map(trace => [trace.id, trace]));
+    for (const trace of traces.values()) {
+      const id = trace.episodeId || trace.id;
+      const source = sources.get(id) ?? { id, supportValues: [], referenceValues: [] };
+      (supportIds.has(trace.id) ? source.supportValues : source.referenceValues).push(trace.value);
+      sources.set(id, source);
+    }
+    return revisePolicySources(previous, [...sources.values()], policy.gain, settings.gainEmaAlpha, settings.tauSoftmax);
   }
 
   private l2GainReferenceTraces(evidenceTraces: TraceMeta[], triggerEpisodeId?: string): TraceMeta[] {
@@ -815,6 +863,12 @@ export class PolicyInductionEngine {
     signature: string,
     at: string
   ): void {
+    if (this.deps.config.algorithm.l2Induction.mode === "unified") {
+      upsertL2Candidate(this.deps.repos, {
+        sourceMemoryId: trace.id, userId: trace.userId, route: "ordinary", at
+      });
+      return;
+    }
     const id = l2CandidateIdFor(signature, trace.id);
     this.deps.repos.runtime.upsertCandidatePoolTrace({
       id,
@@ -850,7 +904,34 @@ export class PolicyInductionEngine {
       trace.memory.properties.internal_info.evidence_status !== "provisional" &&
       trace.memory.properties.internal_info.evidence_status !== "disputed" &&
       trace.value >= this.deps.config.algorithm.l2Induction.minTraceValue &&
-      Boolean(trace.vecSummary ?? trace.vecAction);
+      (this.deps.config.algorithm.l2Induction.mode === "unified" || Boolean(trace.vecSummary ?? trace.vecAction));
+  }
+
+  /** Admission gates do not invalidate already accepted special-route evidence. */
+  isPolicyEvidenceValid(trace: TraceMeta, policy: PolicyMeta): boolean {
+    if (trace.memory.deletedAt || trace.memory.status !== "activated") return false;
+    const raw = trace.rawTurnId ? this.deps.repos.runtime.getRawTurn(trace.rawTurnId) : undefined;
+    if (raw && (raw.deletedAt || raw.redactedAt || raw.userId !== trace.userId)) return false;
+    const rawPolicy = isRecord(policy.memory.properties.internal_info.policy) ? policy.memory.properties.internal_info.policy : {};
+    const admission = isRecord(rawPolicy.source_admissions) ? rawPolicy.source_admissions[trace.id] : undefined;
+    const recordedRewardOnly = isRecord(admission) && Array.isArray(admission.signals) && admission.signals.length > 0 &&
+      admission.signals.every(signal => isRecord(signal) && signal.sourceBasis === "implicit_failure_analysis" &&
+        !signal.feedbackId && !signal.repairId);
+    // Older unified rows can be attributed only when their entire recorded basis is task failure.
+    const legacyBases = stringArray(rawPolicy.source_basis);
+    const legacyRewardOnly = admission === undefined && policy.sourceFeedbackIds.length === 0 &&
+      stringArray(rawPolicy.source_repair_ids).length === 0 && legacyBases.length > 0 &&
+      legacyBases.every(basis => basis === "implicit_failure_analysis");
+    if (recordedRewardOnly || legacyRewardOnly) {
+      const episode = trace.episodeId ? this.deps.repos.runtime.getEpisode(trace.episodeId) : undefined;
+      if (!episode || episode.userId !== trace.userId || episode.status !== "closed" || episode.rewardDetail.skipped === true || typeof episode.rTask !== "number" ||
+          episode.rTask > this.deps.config.algorithm.negativeExperience.failureRTaskThreshold) return false;
+    }
+    const special = policy.sourceFeedbackIds.length > 0 || stringArray(rawPolicy.special_source_trace_ids).includes(trace.id) ||
+      ["failure_avoidance", "repair_instruction", "preference", "verifier_feedback"].includes(policy.experienceType);
+    if (policy.schemaVersion !== 2 && !special) return this.isTraceEligibleForL2(trace);
+    const info = trace.memory.properties.internal_info;
+    return info.evidence_status !== "provisional" && info.evidence_status !== "disputed";
   }
 
   private markCandidatePoolPromoted(
@@ -911,7 +992,7 @@ export function updatePolicyStats(memory: MemoryRow, input: {
     source_trace_ids: input.sourceTraceIds
   };
 
-  const body = currentPolicy
+  const body = currentPolicy?.schemaVersion === 2 ? memory.memoryValue : currentPolicy
     ? renderPolicyBody({
         title: currentPolicy.title,
         trigger: currentPolicy.trigger,

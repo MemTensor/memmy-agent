@@ -6,14 +6,18 @@ import {
   MemoryDb,
   MemoryService,
   type Embedder,
-  type LlmClient
+  type LlmClient,
+  type LlmMessage
 } from "../../src/index.js";
 import type { ActualModelContext } from "../../src/contracts/index.js";
 
 // Suites for legacy capture/retrieval behavior keep that mode explicit as the
 // production default changes. Enabled/default-on suites use production config.
+// That includes the old L3 World Model: the new L3 replaces it when on.
 export const LEGACY_TEST_CONFIG = { ...DEFAULT_MEMMY_CONFIG, algorithm: { ...DEFAULT_MEMMY_CONFIG.algorithm,
-  session: { ...DEFAULT_MEMMY_CONFIG.algorithm.session, turnJudge: false } } };
+  l2Induction: { ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction, mode: "legacy" as const },
+  session: { ...DEFAULT_MEMMY_CONFIG.algorithm.session, turnJudge: false },
+  l3FieldCognition: { ...DEFAULT_MEMMY_CONFIG.algorithm.l3FieldCognition, enabled: false } } };
 
 export function createMemoryServiceFixture(): {
   cleanup: () => Promise<void>;
@@ -57,6 +61,12 @@ export function createMemoryServiceFixture(): {
       // Legacy fixture suites opt out explicitly; turn-judge suites pass their
       // enabled configuration, and default-on coverage passes DEFAULT_MEMMY_CONFIG.
       config: options.config ?? LEGACY_TEST_CONFIG,
+      // The new L3 must not probe the real computer or read its installation id from tests;
+      // the probe never settles, so it starts no process and writes nothing.
+      l3FieldEnvironment: options.l3FieldEnvironment ?? (() => ({
+        machineId: "f".repeat(64), homeDir: createTestRoot("memmy-l3-home-"), tempRoots: []
+      })),
+      l3MachineProbe: options.l3MachineProbe ?? (() => new Promise(() => undefined)),
       fetchAppMemoryBudget: options.fetchAppMemoryBudget ?? (async () => null),
       skillLlm: options.skillLlm ?? options.llm,
       embedder: options.embedder ?? createCapturingEmbedder([])
@@ -402,6 +412,15 @@ export function createFailingLlm(): LlmClient {
   };
 }
 
+/** Task text follows the requested locale, independently of the evidence language. */
+export function episodeTitleForPrompt(messages: readonly LlmMessage[]): { title: string; summary: string } {
+  const system = messages.filter(message => message.role === "system").map(message => message.content).join("\n");
+  const english = system.includes("MUST be in English") || /BCP 47 locale en(?:[-.\s]|$)/u.test(system);
+  return english
+    ? { title: "Test task title", summary: "Test task summary." }
+    : { title: "测试任务标题", summary: "测试任务摘要。" };
+}
+
 export function createBatchReflectionLlm(calls: Array<{
   messages: Array<{ role: string; content: string }>;
   options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" };
@@ -416,18 +435,18 @@ export function createBatchReflectionLlm(calls: Array<{
     isConfigured() {
       return true;
     },
-    async complete(_messages, options) {
+    async complete(messages, options) {
       // Episode titling runs for every captured turn, and a job that keeps failing
       // would hold the top priority cohort and starve the rest of the queue.
       return options.operation.startsWith("episode_title")
-        ? JSON.stringify({ title: "测试任务标题", summary: "测试任务摘要。" })
+        ? JSON.stringify(episodeTitleForPrompt(messages))
         : "unused";
     },
     async completeJson<T extends Record<string, unknown>>(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string; thinkingMode?: "inherit" | "enabled" | "disabled" }
     ): Promise<T> {
-      if (options.operation === "episode.select.v1") return { episodeId: null, title: "测试任务", summary: "测试任务摘要" } as unknown as T;
+      if (options.operation === "episode.select.v1") return { episodeId: null, ...episodeTitleForPrompt(messages) } as unknown as T;
       calls.push({ messages, options });
       if (options.operation === "capture.reflection.batch.v13") {
         const payload = JSON.parse(messages.find((message) => message.role === "user")?.content ?? "{}") as {

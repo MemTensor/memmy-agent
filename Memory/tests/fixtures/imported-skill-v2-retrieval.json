@@ -1,0 +1,280 @@
+{
+  "provenance": "Captured round6 v2 representation before round7 changes, retaining baseline source_kind=skill",
+  "rows": [
+    {
+      "id": "skill_53a91749ec9ed4d8d96c",
+      "timeline": "2026-11-05T14:51:54.365Z",
+      "userId": "round6-representation-user",
+      "agentId": "codex",
+      "memoryType": "SkillMemory",
+      "status": "activated",
+      "visibility": "private",
+      "memoryKey": "skill.import:d8d2ef5319834886e37f",
+      "memoryValue": "# round6-plain\n\nBODY_ONLY_V2_CANARY execute npm:deploy:verify.",
+      "tags": [
+        "manual",
+        "codex"
+      ],
+      "info": {
+        "title": "round6-plain",
+        "summary": "round6-plain",
+        "source": "codex",
+        "time_zone": "-08:00",
+        "name": "round6-plain",
+        "eta": 0.5,
+        "support": 1,
+        "gain": 0,
+        "skill_status": "active",
+        "source_memory_ids": [],
+        "tags": [
+          "manual",
+          "codex"
+        ],
+        "profile_id": "default"
+      },
+      "properties": {
+        "memory_type": "SkillMemory",
+        "status": "activated",
+        "tags": [
+          "manual",
+          "codex"
+        ],
+        "info": {
+          "title": "round6-plain",
+          "summary": "round6-plain",
+          "source": "codex",
+          "time_zone": "-08:00",
+          "name": "round6-plain",
+          "eta": 0.5,
+          "support": 1,
+          "gain": 0,
+          "skill_status": "active",
+          "source_memory_ids": [],
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "profile_id": "default"
+        },
+        "internal_info": {
+          "memory_layer": "Skill",
+          "memory_kind": "skill",
+          "schema_version": 1,
+          "source": "codex",
+          "title": "round6-plain",
+          "summary": "round6-plain",
+          "time_zone": "-08:00",
+          "name": "round6-plain",
+          "procedure_json": {
+            "retrievalBlurb": "round6-plain"
+          },
+          "eta": 0.5,
+          "support": 1,
+          "gain": 0,
+          "source_policy_ids": [],
+          "source_world_model_ids": [],
+          "evidence_anchor_ids": [],
+          "skill": {
+            "name": "round6-plain",
+            "eta": 0.5,
+            "status": "active",
+            "support": 1,
+            "gain": 0,
+            "source_policy_ids": [],
+            "source_world_model_ids": [],
+            "evidence_anchor_ids": [],
+            "procedure_json": {
+              "retrievalBlurb": "round6-plain"
+            },
+            "trials_attempted": 0,
+            "trials_passed": 0,
+            "success_rate": 0,
+            "beta_posterior": {
+              "alpha": 1,
+              "beta": 1,
+              "mean": 0.5
+            }
+          },
+          "read_only": true,
+          "source_agent_id": "codex",
+          "source_skill_id": "round6-plain",
+          "source_skill_path": "/synthetic/round6-plain/SKILL.md",
+          "source_content_hash": "9f8d98b2f96aa05794bdf10fe2975eb40d5e20311bca57d705ffe0926b522a68",
+          "imported_at": "2026-11-05T14:51:54.365Z",
+          "source_raw_content_hash": "9f8d98b2f96aa05794bdf10fe2975eb40d5e20311bca57d705ffe0926b522a68",
+          "source_kind": "skill",
+          "normalized_name": "round6-plain",
+          "source_modified_at": "2026-11-05T14:51:54.365Z",
+          "invocation": {
+            "disable_model_invocation": false
+          },
+          "import_state_version": 2,
+          "retrieval_representation_version": 2,
+          "retrieval_previous": {
+            "blurb": null,
+            "summary": "# round6-plain"
+          },
+          "retrieval_index": {
+            "version": 2,
+            "source_hash": "6a09eebe94e3c261af82225c28088e395f58e7b3425b776a6e89d27a8be218a3",
+            "indexed_at": "2026-11-05T14:51:54.430Z"
+          }
+        }
+      },
+      "memoryLayer": "Skill",
+      "contentHash": "abfa2de9746dbd45496bd73cc15a304f770ea6597cf44ad137011ba7fa20891b",
+      "version": 1,
+      "createdAt": "2026-11-05T14:51:54.365Z",
+      "updatedAt": "2026-11-05T14:51:54.430Z",
+      "deletedAt": null
+    },
+    {
+      "id": "skill_0f35be89a7cadd24852c",
+      "timeline": "2026-11-05T14:51:54.371Z",
+      "userId": "round6-representation-user",
+      "agentId": "codex",
+      "memoryType": "SkillMemory",
+      "status": "activated",
+      "visibility": "private",
+      "memoryKey": "skill.import:4b1f2d9128c1fe6d79bd",
+      "memoryValue": "---\nname: round6-described\ndescription: Release the service safely.\n---\nBODY_ONLY_V2_CANARY release-check.",
+      "tags": [
+        "manual",
+        "codex"
+      ],
+      "info": {
+        "title": "round6-described",
+        "summary": "Release the service safely.",
+        "source": "codex",
+        "time_zone": "-08:00",
+        "name": "round6-described",
+        "eta": 0.5,
+        "support": 1,
+        "gain": 0,
+        "skill_status": "active",
+        "source_memory_ids": [],
+        "tags": [
+          "manual",
+          "codex"
+        ],
+        "profile_id": "default"
+      },
+      "properties": {
+        "memory_type": "SkillMemory",
+        "status": "activated",
+        "tags": [
+          "manual",
+          "codex"
+        ],
+        "info": {
+          "title": "round6-described",
+          "summary": "Release the service safely.",
+          "source": "codex",
+          "time_zone": "-08:00",
+          "name": "round6-described",
+          "eta": 0.5,
+          "support": 1,
+          "gain": 0,
+          "skill_status": "active",
+          "source_memory_ids": [],
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "profile_id": "default"
+        },
+        "internal_info": {
+          "memory_layer": "Skill",
+          "memory_kind": "skill",
+          "schema_version": 1,
+          "source": "codex",
+          "title": "round6-described",
+          "summary": "Release the service safely.",
+          "time_zone": "-08:00",
+          "name": "round6-described",
+          "procedure_json": {
+            "retrievalBlurb": "Release the service safely."
+          },
+          "eta": 0.5,
+          "support": 1,
+          "gain": 0,
+          "source_policy_ids": [],
+          "source_world_model_ids": [],
+          "evidence_anchor_ids": [],
+          "skill": {
+            "name": "round6-described",
+            "eta": 0.5,
+            "status": "active",
+            "support": 1,
+            "gain": 0,
+            "source_policy_ids": [],
+            "source_world_model_ids": [],
+            "evidence_anchor_ids": [],
+            "procedure_json": {
+              "retrievalBlurb": "Release the service safely."
+            },
+            "trials_attempted": 0,
+            "trials_passed": 0,
+            "success_rate": 0,
+            "beta_posterior": {
+              "alpha": 1,
+              "beta": 1,
+              "mean": 0.5
+            }
+          },
+          "read_only": true,
+          "source_agent_id": "codex",
+          "source_skill_id": "round6-described",
+          "source_skill_path": "/synthetic/round6-described/SKILL.md",
+          "source_content_hash": "83cb9b54fda26a4e5512f5cb19ee1afee58d43f253561ba1491feaf0a72ca17f",
+          "imported_at": "2026-11-05T14:51:54.371Z",
+          "source_raw_content_hash": "83cb9b54fda26a4e5512f5cb19ee1afee58d43f253561ba1491feaf0a72ca17f",
+          "source_kind": "skill",
+          "normalized_name": "round6-described",
+          "source_modified_at": "2026-11-05T14:51:54.371Z",
+          "skill_description": "Release the service safely.",
+          "invocation": {
+            "disable_model_invocation": false
+          },
+          "import_state_version": 2,
+          "retrieval_representation_version": 2,
+          "retrieval_previous": {
+            "blurb": null,
+            "summary": "---"
+          },
+          "retrieval_index": {
+            "version": 2,
+            "source_hash": "734ac524862770afb954726632eb54dbd699f486086e40a12143f27d18456e65",
+            "indexed_at": "2026-11-05T14:51:54.436Z"
+          }
+        }
+      },
+      "memoryLayer": "Skill",
+      "contentHash": "9d02b4ff904e08eea9bb53409934f69c00fcbf493111c7c7d1dbdb06a5159f26",
+      "version": 1,
+      "createdAt": "2026-11-05T14:51:54.371Z",
+      "updatedAt": "2026-11-05T14:51:54.436Z",
+      "deletedAt": null
+    }
+  ],
+  "vectors": [
+    {
+      "memory_id": "skill_53a91749ec9ed4d8d96c",
+      "vector_field": "vec",
+      "embedding": "AACAPwAAAAAAAAAA",
+      "embedding_model": "capturing-test-embedding",
+      "embedding_provider": "local",
+      "embedding_dim": 3,
+      "updated_at": "2026-11-05T14:51:54.430Z"
+    },
+    {
+      "memory_id": "skill_0f35be89a7cadd24852c",
+      "vector_field": "vec",
+      "embedding": "AAAAAAAAgD8AAAAA",
+      "embedding_model": "capturing-test-embedding",
+      "embedding_provider": "local",
+      "embedding_dim": 3,
+      "updated_at": "2026-11-05T14:51:54.436Z"
+    }
+  ]
+}

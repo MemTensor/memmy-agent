@@ -1,0 +1,2455 @@
+{
+  "provenance": "Captured before round 5 production changes using actual MemoryService addMemory A -> B -> A. mixed uses fca7fa91 AgentSkillLibrary A -> B, then actual addMemory A.",
+  "variants": [
+    {
+      "shape": "plain",
+      "sourceA": {
+        "title": "rolled-back-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+        "contentHash": "a010b4d3b20e8e5abf7a6d4089b74ebd6f115917ba4dd773e6ee69011446d58e",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "sourceB": {
+        "title": "intermediate-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+        "contentHash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "aId": "skill_5f6c8b710a3b4dc9e6ad",
+      "bId": "skill_1ef4844f2fc25d025592",
+      "rows": [
+        {
+          "id": "skill_5f6c8b710a3b4dc9e6ad",
+          "timeline": "2026-11-05T08:15:56.076Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:f69b33dae8489e4402da",
+          "memoryValue": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "info": {
+            "title": "rolled-back-name",
+            "summary": "---",
+            "source": "codex",
+            "time_zone": "-08:00",
+            "name": "rolled-back-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "rolled-back-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "rolled-back-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "rolled-back-name",
+              "summary": "---",
+              "time_zone": "-08:00",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "a010b4d3b20e8e5abf7a6d4089b74ebd6f115917ba4dd773e6ee69011446d58e",
+              "imported_at": "2026-11-05T08:15:56.076Z",
+              "name": "rolled-back-name",
+              "invocation_guide": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+              "procedure_json": {
+                "summary": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "rolled-back-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+                "procedure_json": {
+                  "summary": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              },
+              "superseded_by_skill_id": "skill_1ef4844f2fc25d025592"
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "a851bbc5d1642fe98bb7a248ccc2a15dddfab488ece80524768a9f3bda36aade",
+          "version": 3,
+          "createdAt": "2026-11-05T08:15:56.050Z",
+          "updatedAt": "2026-11-05T08:15:56.076Z",
+          "deletedAt": null
+        },
+        {
+          "id": "skill_1ef4844f2fc25d025592",
+          "timeline": "2026-11-05T08:15:56.064Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:2c461fffa84f0d342c45",
+          "memoryValue": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "info": {
+            "title": "intermediate-name",
+            "summary": "---",
+            "source": "codex",
+            "time_zone": "-08:00",
+            "name": "intermediate-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "intermediate-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "intermediate-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "intermediate-name",
+              "summary": "---",
+              "time_zone": "-08:00",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "imported_at": "2026-11-05T08:15:56.064Z",
+              "name": "intermediate-name",
+              "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+              "procedure_json": {
+                "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "intermediate-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+                "procedure_json": {
+                  "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              }
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "88171f07e270a89154ff3028f6357024656809a6bc7e3e693e189b45bc4ccd54",
+          "version": 1,
+          "createdAt": "2026-11-05T08:15:56.064Z",
+          "updatedAt": "2026-11-05T08:15:56.064Z",
+          "deletedAt": null
+        }
+      ]
+    },
+    {
+      "shape": "manual",
+      "sourceA": {
+        "title": "rolled-back-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A.",
+        "contentHash": "3682deaeb165e2697660d8ea721053c77e1e4c4f2f8b5346fd3ade1114137b1f",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "sourceB": {
+        "title": "intermediate-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+        "contentHash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "aId": "skill_ae02f48b5aa0970fd1d0",
+      "bId": "skill_7673d37846550372a0a5",
+      "rows": [
+        {
+          "id": "skill_ae02f48b5aa0970fd1d0",
+          "timeline": "2026-11-05T08:15:56.120Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:27fca731f2cb90dd8a19",
+          "memoryValue": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A.",
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "info": {
+            "title": "rolled-back-name",
+            "summary": "---",
+            "source": "codex",
+            "time_zone": "-08:00",
+            "name": "rolled-back-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "rolled-back-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "rolled-back-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "rolled-back-name",
+              "summary": "---",
+              "time_zone": "-08:00",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "3682deaeb165e2697660d8ea721053c77e1e4c4f2f8b5346fd3ade1114137b1f",
+              "imported_at": "2026-11-05T08:15:56.120Z",
+              "name": "rolled-back-name",
+              "invocation_guide": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A.",
+              "procedure_json": {
+                "summary": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "rolled-back-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A.",
+                "procedure_json": {
+                  "summary": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              },
+              "superseded_by_skill_id": "skill_7673d37846550372a0a5"
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "6dfaebf3ad040289effc1a007b3d56a66960874812eef48c0954c7ae5306c288",
+          "version": 3,
+          "createdAt": "2026-11-05T08:15:56.099Z",
+          "updatedAt": "2026-11-05T08:15:56.120Z",
+          "deletedAt": null
+        },
+        {
+          "id": "skill_7673d37846550372a0a5",
+          "timeline": "2026-11-05T08:15:56.109Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:2c461fffa84f0d342c45",
+          "memoryValue": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "info": {
+            "title": "intermediate-name",
+            "summary": "---",
+            "source": "codex",
+            "time_zone": "-08:00",
+            "name": "intermediate-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "intermediate-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "intermediate-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "intermediate-name",
+              "summary": "---",
+              "time_zone": "-08:00",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "imported_at": "2026-11-05T08:15:56.109Z",
+              "name": "intermediate-name",
+              "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+              "procedure_json": {
+                "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "intermediate-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+                "procedure_json": {
+                  "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              }
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "88171f07e270a89154ff3028f6357024656809a6bc7e3e693e189b45bc4ccd54",
+          "version": 1,
+          "createdAt": "2026-11-05T08:15:56.109Z",
+          "updatedAt": "2026-11-05T08:15:56.109Z",
+          "deletedAt": null
+        }
+      ]
+    },
+    {
+      "shape": "frontmatter",
+      "sourceA": {
+        "title": "rolled-back-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: rolled-back-name\n",
+        "contentHash": "dc99a61aac7deb205eb7bc6f2c207f1c045f9c7bfb99b9cd3f894159c7deaacc",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "sourceB": {
+        "title": "intermediate-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+        "contentHash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "aId": "skill_7a0d3b73d2b4bdb2a561",
+      "bId": "skill_e94343db862eb9fff3fe",
+      "rows": [
+        {
+          "id": "skill_7a0d3b73d2b4bdb2a561",
+          "timeline": "2026-11-05T08:15:56.165Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:dbec6380ee42f651edcc",
+          "memoryValue": "---\nname: rolled-back-name",
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "info": {
+            "title": "rolled-back-name",
+            "summary": "---",
+            "source": "codex",
+            "time_zone": "-08:00",
+            "name": "rolled-back-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "rolled-back-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "rolled-back-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "rolled-back-name",
+              "summary": "---",
+              "time_zone": "-08:00",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "dc99a61aac7deb205eb7bc6f2c207f1c045f9c7bfb99b9cd3f894159c7deaacc",
+              "imported_at": "2026-11-05T08:15:56.165Z",
+              "name": "rolled-back-name",
+              "invocation_guide": "---\nname: rolled-back-name",
+              "procedure_json": {
+                "summary": "---\nname: rolled-back-name"
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "rolled-back-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: rolled-back-name",
+                "procedure_json": {
+                  "summary": "---\nname: rolled-back-name"
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              },
+              "superseded_by_skill_id": "skill_e94343db862eb9fff3fe"
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "d557eca0bc3898b475071a8a4df6b6926893e8a7db3f7ce022adbca65ed6d086",
+          "version": 3,
+          "createdAt": "2026-11-05T08:15:56.143Z",
+          "updatedAt": "2026-11-05T08:15:56.165Z",
+          "deletedAt": null
+        },
+        {
+          "id": "skill_e94343db862eb9fff3fe",
+          "timeline": "2026-11-05T08:15:56.153Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:2c461fffa84f0d342c45",
+          "memoryValue": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "info": {
+            "title": "intermediate-name",
+            "summary": "---",
+            "source": "codex",
+            "time_zone": "-08:00",
+            "name": "intermediate-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "intermediate-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "intermediate-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "intermediate-name",
+              "summary": "---",
+              "time_zone": "-08:00",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "imported_at": "2026-11-05T08:15:56.153Z",
+              "name": "intermediate-name",
+              "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+              "procedure_json": {
+                "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "intermediate-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+                "procedure_json": {
+                  "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              }
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "88171f07e270a89154ff3028f6357024656809a6bc7e3e693e189b45bc4ccd54",
+          "version": 1,
+          "createdAt": "2026-11-05T08:15:56.153Z",
+          "updatedAt": "2026-11-05T08:15:56.153Z",
+          "deletedAt": null
+        }
+      ]
+    },
+    {
+      "shape": "disconnected",
+      "sourceA": {
+        "title": "rolled-back-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+        "contentHash": "a010b4d3b20e8e5abf7a6d4089b74ebd6f115917ba4dd773e6ee69011446d58e",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "sourceB": {
+        "title": "intermediate-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+        "contentHash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "aId": "skill_76191e870c433f65a4dc",
+      "bId": "skill_d072df7e61b1e5d46dee",
+      "rows": [
+        {
+          "id": "skill_76191e870c433f65a4dc",
+          "timeline": "2026-11-05T08:15:56.211Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:f69b33dae8489e4402da",
+          "memoryValue": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "info": {
+            "title": "rolled-back-name",
+            "summary": "---",
+            "source": "codex",
+            "time_zone": "-08:00",
+            "name": "rolled-back-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "rolled-back-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "rolled-back-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "rolled-back-name",
+              "summary": "---",
+              "time_zone": "-08:00",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "a010b4d3b20e8e5abf7a6d4089b74ebd6f115917ba4dd773e6ee69011446d58e",
+              "imported_at": "2026-11-05T08:15:56.211Z",
+              "name": "rolled-back-name",
+              "invocation_guide": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+              "procedure_json": {
+                "summary": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "rolled-back-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+                "procedure_json": {
+                  "summary": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              },
+              "superseded_by_skill_id": "skill_d072df7e61b1e5d46dee"
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "a851bbc5d1642fe98bb7a248ccc2a15dddfab488ece80524768a9f3bda36aade",
+          "version": 3,
+          "createdAt": "2026-11-05T08:15:56.189Z",
+          "updatedAt": "2026-11-05T08:15:56.211Z",
+          "deletedAt": null
+        },
+        {
+          "id": "skill_d072df7e61b1e5d46dee",
+          "timeline": "2026-11-05T08:15:56.199Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:2c461fffa84f0d342c45",
+          "memoryValue": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "info": {
+            "title": "intermediate-name",
+            "summary": "---",
+            "source": "codex",
+            "time_zone": "-08:00",
+            "name": "intermediate-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "intermediate-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "intermediate-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "intermediate-name",
+              "summary": "---",
+              "time_zone": "-08:00",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "imported_at": "2026-11-05T08:15:56.199Z",
+              "name": "intermediate-name",
+              "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+              "procedure_json": {
+                "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "intermediate-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+                "procedure_json": {
+                  "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              }
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "88171f07e270a89154ff3028f6357024656809a6bc7e3e693e189b45bc4ccd54",
+          "version": 1,
+          "createdAt": "2026-11-05T08:15:56.199Z",
+          "updatedAt": "2026-11-05T08:15:56.199Z",
+          "deletedAt": null
+        }
+      ],
+      "connection": "disconnected"
+    },
+    {
+      "shape": "mixed",
+      "sourceA": {
+        "title": "rolled-back-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+        "contentHash": "a010b4d3b20e8e5abf7a6d4089b74ebd6f115917ba4dd773e6ee69011446d58e",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "sourceB": {
+        "title": "intermediate-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+        "contentHash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "aId": "skill_b7aaa98b952d9d8fc907",
+      "bId": "skill_cae6e27c1411307e9530",
+      "rows": [
+        {
+          "id": "skill_b7aaa98b952d9d8fc907",
+          "timeline": "2026-11-05T08:15:56.257Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:f69b33dae8489e4402da",
+          "memoryValue": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex",
+            "manual"
+          ],
+          "info": {
+            "title": "rolled-back-name",
+            "summary": "---",
+            "source": "codex",
+            "name": "rolled-back-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "time_zone": "-08:00",
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "rolled-back-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "rolled-back-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "rolled-back-name",
+              "summary": "---",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "a010b4d3b20e8e5abf7a6d4089b74ebd6f115917ba4dd773e6ee69011446d58e",
+              "imported_at": "2026-11-05T08:15:56.257Z",
+              "name": "rolled-back-name",
+              "invocation_guide": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+              "procedure_json": {
+                "summary": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "rolled-back-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A.",
+                "procedure_json": {
+                  "summary": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\n---\nSynthetic rollback A."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              },
+              "source_kind": "skill",
+              "normalized_name": "rolled-back-name",
+              "source_modified_at": "2026-01-01T00:00:00.000Z",
+              "has_supporting_files": false,
+              "invocation": {
+                "disable_model_invocation": false
+              },
+              "import_state_version": 1,
+              "retrieval_representation_version": 1,
+              "archive_reason": "superseded",
+              "superseded_by_skill_id": "skill_cae6e27c1411307e9530",
+              "time_zone": "-08:00"
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "a851bbc5d1642fe98bb7a248ccc2a15dddfab488ece80524768a9f3bda36aade",
+          "version": 3,
+          "createdAt": "2026-01-01T00:00:00.000Z",
+          "updatedAt": "2026-11-05T08:15:56.257Z",
+          "deletedAt": null
+        },
+        {
+          "id": "skill_cae6e27c1411307e9530",
+          "timeline": "2026-01-01T00:00:00.000Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:2c461fffa84f0d342c45",
+          "memoryValue": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex"
+          ],
+          "info": {
+            "title": "intermediate-name",
+            "summary": "---",
+            "source": "codex",
+            "turn_id": "skill:rollback-directory:4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+            "name": "intermediate-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "agent-source",
+              "cross-agent-skill",
+              "codex"
+            ]
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "agent-source",
+              "cross-agent-skill",
+              "codex"
+            ],
+            "info": {
+              "title": "intermediate-name",
+              "summary": "---",
+              "source": "codex",
+              "turn_id": "skill:rollback-directory:4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "name": "intermediate-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "agent-source",
+                "cross-agent-skill",
+                "codex"
+              ]
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "intermediate-name",
+              "summary": "---",
+              "turn_id": "skill:rollback-directory:4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_skill_version": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "source_content_hash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "imported_at": "2026-11-05T08:15:56.245Z",
+              "name": "intermediate-name",
+              "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+              "procedure_json": {
+                "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "intermediate-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+                "procedure_json": {
+                  "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              },
+              "source_kind": "skill",
+              "normalized_name": "intermediate-name",
+              "source_modified_at": "2026-01-01T00:00:00.000Z",
+              "has_supporting_files": false,
+              "invocation": {
+                "disable_model_invocation": false
+              },
+              "import_state_version": 1,
+              "retrieval_representation_version": 1
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "88171f07e270a89154ff3028f6357024656809a6bc7e3e693e189b45bc4ccd54",
+          "version": 1,
+          "createdAt": "2026-01-01T00:00:00.000Z",
+          "updatedAt": "2026-11-05T08:15:56.245Z",
+          "deletedAt": null
+        }
+      ]
+    },
+    {
+      "shape": "mixed-manual",
+      "sourceA": {
+        "title": "rolled-back-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A.",
+        "contentHash": "3682deaeb165e2697660d8ea721053c77e1e4c4f2f8b5346fd3ade1114137b1f",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "sourceB": {
+        "title": "intermediate-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+        "contentHash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "aId": "skill_46afdfbf9a145f803d79",
+      "bId": "skill_0bc3583464ad94bc10e4",
+      "rows": [
+        {
+          "id": "skill_46afdfbf9a145f803d79",
+          "timeline": "2026-11-05T08:27:17.397Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:27fca731f2cb90dd8a19",
+          "memoryValue": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A.",
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex",
+            "manual"
+          ],
+          "info": {
+            "title": "rolled-back-name",
+            "summary": "---",
+            "source": "codex",
+            "name": "rolled-back-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "time_zone": "-08:00",
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "rolled-back-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "rolled-back-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "rolled-back-name",
+              "summary": "---",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "3682deaeb165e2697660d8ea721053c77e1e4c4f2f8b5346fd3ade1114137b1f",
+              "imported_at": "2026-11-05T08:27:17.397Z",
+              "name": "rolled-back-name",
+              "invocation_guide": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A.",
+              "procedure_json": {
+                "summary": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "rolled-back-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A.",
+                "procedure_json": {
+                  "summary": "---\nname: rolled-back-name\ndescription: Synthetic legacy rollback fixture.\ndisable-model-invocation: true\n---\nSynthetic rollback A."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              },
+              "source_kind": "skill",
+              "normalized_name": "rolled-back-name",
+              "source_modified_at": "2026-01-01T00:00:00.000Z",
+              "has_supporting_files": false,
+              "invocation": {
+                "disable_model_invocation": false
+              },
+              "import_state_version": 1,
+              "retrieval_representation_version": 1,
+              "archive_reason": "superseded",
+              "superseded_by_skill_id": "skill_0bc3583464ad94bc10e4",
+              "time_zone": "-08:00"
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "6dfaebf3ad040289effc1a007b3d56a66960874812eef48c0954c7ae5306c288",
+          "version": 3,
+          "createdAt": "2026-01-01T00:00:00.000Z",
+          "updatedAt": "2026-11-05T08:27:17.397Z",
+          "deletedAt": null
+        },
+        {
+          "id": "skill_0bc3583464ad94bc10e4",
+          "timeline": "2026-01-01T00:00:00.000Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:2c461fffa84f0d342c45",
+          "memoryValue": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex"
+          ],
+          "info": {
+            "title": "intermediate-name",
+            "summary": "---",
+            "source": "codex",
+            "turn_id": "skill:rollback-directory:4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+            "name": "intermediate-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "agent-source",
+              "cross-agent-skill",
+              "codex"
+            ]
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "agent-source",
+              "cross-agent-skill",
+              "codex"
+            ],
+            "info": {
+              "title": "intermediate-name",
+              "summary": "---",
+              "source": "codex",
+              "turn_id": "skill:rollback-directory:4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "name": "intermediate-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "agent-source",
+                "cross-agent-skill",
+                "codex"
+              ]
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "intermediate-name",
+              "summary": "---",
+              "turn_id": "skill:rollback-directory:4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_skill_version": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "source_content_hash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "imported_at": "2026-11-05T08:27:17.380Z",
+              "name": "intermediate-name",
+              "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+              "procedure_json": {
+                "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "intermediate-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+                "procedure_json": {
+                  "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              },
+              "source_kind": "skill",
+              "normalized_name": "intermediate-name",
+              "source_modified_at": "2026-01-01T00:00:00.000Z",
+              "has_supporting_files": false,
+              "invocation": {
+                "disable_model_invocation": false
+              },
+              "import_state_version": 1,
+              "retrieval_representation_version": 1
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "88171f07e270a89154ff3028f6357024656809a6bc7e3e693e189b45bc4ccd54",
+          "version": 1,
+          "createdAt": "2026-01-01T00:00:00.000Z",
+          "updatedAt": "2026-11-05T08:27:17.380Z",
+          "deletedAt": null
+        }
+      ]
+    },
+    {
+      "shape": "mixed-frontmatter",
+      "sourceA": {
+        "title": "rolled-back-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: rolled-back-name\n",
+        "contentHash": "dc99a61aac7deb205eb7bc6f2c207f1c045f9c7bfb99b9cd3f894159c7deaacc",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "sourceB": {
+        "title": "intermediate-name",
+        "sourceSkillId": "rollback-directory",
+        "sourceSkillPath": "/synthetic/rollback-directory/SKILL.md",
+        "content": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+        "contentHash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+        "modifiedAt": "2026-01-01T00:00:00.000Z"
+      },
+      "aId": "skill_9c769bac147dd851a1ad",
+      "bId": "skill_f24b84af383f110e2832",
+      "rows": [
+        {
+          "id": "skill_9c769bac147dd851a1ad",
+          "timeline": "2026-11-05T08:27:17.463Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:dbec6380ee42f651edcc",
+          "memoryValue": "---\nname: rolled-back-name",
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex",
+            "manual"
+          ],
+          "info": {
+            "title": "rolled-back-name",
+            "summary": "---",
+            "source": "codex",
+            "name": "rolled-back-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "time_zone": "-08:00",
+            "profile_id": "default"
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "info": {
+              "title": "rolled-back-name",
+              "summary": "---",
+              "source": "codex",
+              "time_zone": "-08:00",
+              "name": "rolled-back-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "manual",
+                "codex"
+              ],
+              "profile_id": "default"
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "rolled-back-name",
+              "summary": "---",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_content_hash": "dc99a61aac7deb205eb7bc6f2c207f1c045f9c7bfb99b9cd3f894159c7deaacc",
+              "imported_at": "2026-11-05T08:27:17.463Z",
+              "name": "rolled-back-name",
+              "invocation_guide": "---\nname: rolled-back-name",
+              "procedure_json": {
+                "summary": "---\nname: rolled-back-name"
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "rolled-back-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: rolled-back-name",
+                "procedure_json": {
+                  "summary": "---\nname: rolled-back-name"
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              },
+              "source_kind": "skill",
+              "normalized_name": "rolled-back-name",
+              "source_modified_at": "2026-01-01T00:00:00.000Z",
+              "has_supporting_files": false,
+              "invocation": {
+                "disable_model_invocation": false
+              },
+              "import_state_version": 1,
+              "retrieval_representation_version": 1,
+              "archive_reason": "superseded",
+              "superseded_by_skill_id": "skill_f24b84af383f110e2832",
+              "time_zone": "-08:00"
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "d557eca0bc3898b475071a8a4df6b6926893e8a7db3f7ce022adbca65ed6d086",
+          "version": 3,
+          "createdAt": "2026-01-01T00:00:00.000Z",
+          "updatedAt": "2026-11-05T08:27:17.463Z",
+          "deletedAt": null
+        },
+        {
+          "id": "skill_f24b84af383f110e2832",
+          "timeline": "2026-01-01T00:00:00.000Z",
+          "userId": "skill-upgrade-lifecycle-user",
+          "agentId": "codex",
+          "memoryType": "SkillMemory",
+          "status": "activated",
+          "visibility": "private",
+          "memoryKey": "skill.import:2c461fffa84f0d342c45",
+          "memoryValue": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex"
+          ],
+          "info": {
+            "title": "intermediate-name",
+            "summary": "---",
+            "source": "codex",
+            "turn_id": "skill:rollback-directory:4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+            "name": "intermediate-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "agent-source",
+              "cross-agent-skill",
+              "codex"
+            ]
+          },
+          "properties": {
+            "memory_type": "SkillMemory",
+            "status": "activated",
+            "tags": [
+              "agent-source",
+              "cross-agent-skill",
+              "codex"
+            ],
+            "info": {
+              "title": "intermediate-name",
+              "summary": "---",
+              "source": "codex",
+              "turn_id": "skill:rollback-directory:4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "name": "intermediate-name",
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "skill_status": "active",
+              "source_memory_ids": [],
+              "tags": [
+                "agent-source",
+                "cross-agent-skill",
+                "codex"
+              ]
+            },
+            "internal_info": {
+              "memory_layer": "Skill",
+              "memory_kind": "skill",
+              "schema_version": 1,
+              "source": "codex",
+              "title": "intermediate-name",
+              "summary": "---",
+              "turn_id": "skill:rollback-directory:4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "read_only": true,
+              "source_agent_id": "codex",
+              "source_skill_id": "rollback-directory",
+              "source_skill_path": "/synthetic/rollback-directory/SKILL.md",
+              "source_skill_version": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "source_content_hash": "4db0b1bd61df9d6eb588d43a3e6f28040da7189892ea632c678b0f220e2a96c0",
+              "imported_at": "2026-11-05T08:27:17.451Z",
+              "name": "intermediate-name",
+              "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+              "procedure_json": {
+                "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+              },
+              "eta": 0.5,
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "skill": {
+                "name": "intermediate-name",
+                "eta": 0.5,
+                "status": "active",
+                "support": 1,
+                "gain": 0,
+                "source_policy_ids": [],
+                "source_world_model_ids": [],
+                "evidence_anchor_ids": [],
+                "invocation_guide": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B.",
+                "procedure_json": {
+                  "summary": "---\nname: intermediate-name\ndescription: Synthetic intermediate version.\n---\nSynthetic B."
+                },
+                "trials_attempted": 0,
+                "trials_passed": 0,
+                "success_rate": 0,
+                "beta_posterior": {
+                  "alpha": 1,
+                  "beta": 1,
+                  "mean": 0.5
+                }
+              },
+              "source_kind": "skill",
+              "normalized_name": "intermediate-name",
+              "source_modified_at": "2026-01-01T00:00:00.000Z",
+              "has_supporting_files": false,
+              "invocation": {
+                "disable_model_invocation": false
+              },
+              "import_state_version": 1,
+              "retrieval_representation_version": 1
+            }
+          },
+          "memoryLayer": "Skill",
+          "contentHash": "88171f07e270a89154ff3028f6357024656809a6bc7e3e693e189b45bc4ccd54",
+          "version": 1,
+          "createdAt": "2026-01-01T00:00:00.000Z",
+          "updatedAt": "2026-11-05T08:27:17.451Z",
+          "deletedAt": null
+        }
+      ]
+    }
+  ],
+  "userIntent": {
+    "source": {
+      "title": "archived-intent",
+      "sourceSkillId": "archived-intent",
+      "sourceSkillPath": "/synthetic/archived-intent/SKILL.md",
+      "content": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+      "contentHash": "81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+      "modifiedAt": "2026-01-01T00:00:00.000Z"
+    },
+    "id": "skill_1494a8786a2db466370c",
+    "row": {
+      "id": "skill_1494a8786a2db466370c",
+      "timeline": "2026-11-05T08:18:28.943Z",
+      "userId": "skill-upgrade-lifecycle-user",
+      "agentId": "codex",
+      "memoryType": "SkillMemory",
+      "status": "activated",
+      "visibility": "private",
+      "memoryKey": "skill.import:b09bbaad734ecb8ec092",
+      "memoryValue": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+      "tags": [
+        "agent-source",
+        "cross-agent-skill",
+        "codex",
+        "manual"
+      ],
+      "info": {
+        "title": "archived-intent",
+        "summary": "---",
+        "source": "codex",
+        "name": "archived-intent",
+        "eta": 0.5,
+        "support": 1,
+        "gain": 0,
+        "skill_status": "active",
+        "source_memory_ids": [],
+        "tags": [
+          "manual",
+          "codex"
+        ],
+        "time_zone": "-08:00",
+        "profile_id": "default"
+      },
+      "properties": {
+        "memory_type": "SkillMemory",
+        "status": "activated",
+        "tags": [
+          "manual",
+          "codex"
+        ],
+        "info": {
+          "title": "archived-intent",
+          "summary": "---",
+          "source": "codex",
+          "time_zone": "-08:00",
+          "name": "archived-intent",
+          "eta": 0.5,
+          "support": 1,
+          "gain": 0,
+          "skill_status": "active",
+          "source_memory_ids": [],
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "profile_id": "default"
+        },
+        "internal_info": {
+          "memory_layer": "Skill",
+          "memory_kind": "skill",
+          "schema_version": 1,
+          "source": "codex",
+          "title": "archived-intent",
+          "summary": "---",
+          "read_only": true,
+          "source_agent_id": "codex",
+          "source_skill_id": "archived-intent",
+          "source_skill_path": "/synthetic/archived-intent/SKILL.md",
+          "source_content_hash": "81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+          "imported_at": "2026-11-05T08:18:28.943Z",
+          "name": "archived-intent",
+          "invocation_guide": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+          "procedure_json": {
+            "summary": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent."
+          },
+          "eta": 0.5,
+          "support": 1,
+          "gain": 0,
+          "source_policy_ids": [],
+          "source_world_model_ids": [],
+          "evidence_anchor_ids": [],
+          "skill": {
+            "name": "archived-intent",
+            "eta": 0.5,
+            "status": "active",
+            "support": 1,
+            "gain": 0,
+            "source_policy_ids": [],
+            "source_world_model_ids": [],
+            "evidence_anchor_ids": [],
+            "invocation_guide": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+            "procedure_json": {
+              "summary": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent."
+            },
+            "trials_attempted": 0,
+            "trials_passed": 0,
+            "success_rate": 0,
+            "beta_posterior": {
+              "alpha": 1,
+              "beta": 1,
+              "mean": 0.5
+            }
+          },
+          "source_kind": "skill",
+          "normalized_name": "archived-intent",
+          "source_modified_at": "2026-01-01T00:00:00.000Z",
+          "has_supporting_files": false,
+          "invocation": {
+            "disable_model_invocation": false
+          },
+          "import_state_version": 1,
+          "retrieval_representation_version": 1,
+          "archive_reason": "user",
+          "source_state": "present",
+          "time_zone": "-08:00"
+        }
+      },
+      "memoryLayer": "Skill",
+      "contentHash": "4b35f03dbdbd43523e5b8fa08cf5c66fea7ea8f7c20f9b235af5a0c132af7843",
+      "version": 4,
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-11-05T08:18:28.943Z",
+      "deletedAt": null
+    }
+  },
+  "scannerRollback": {
+    "source": {
+      "title": "archived-intent",
+      "sourceSkillId": "archived-intent",
+      "sourceSkillPath": "/synthetic/archived-intent/SKILL.md",
+      "content": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+      "contentHash": "81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+      "modifiedAt": "2026-01-01T00:00:00.000Z"
+    },
+    "id": "skill_7d4059d01f68a98ddc27",
+    "bId": "skill_deaf914d4a848d08a6b3",
+    "rows": [
+      {
+        "id": "skill_7d4059d01f68a98ddc27",
+        "timeline": "2026-01-01T00:00:00.000Z",
+        "userId": "skill-upgrade-lifecycle-user",
+        "agentId": "codex",
+        "memoryType": "SkillMemory",
+        "status": "activated",
+        "visibility": "private",
+        "memoryKey": "skill.import:b09bbaad734ecb8ec092",
+        "memoryValue": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+        "tags": [
+          "agent-source",
+          "cross-agent-skill",
+          "codex"
+        ],
+        "info": {
+          "title": "archived-intent",
+          "summary": "---",
+          "source": "codex",
+          "turn_id": "skill:archived-intent:81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+          "name": "archived-intent",
+          "eta": 0.5,
+          "support": 1,
+          "gain": 0,
+          "skill_status": "active",
+          "source_memory_ids": [],
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex"
+          ]
+        },
+        "properties": {
+          "memory_type": "SkillMemory",
+          "status": "activated",
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex"
+          ],
+          "info": {
+            "title": "archived-intent",
+            "summary": "---",
+            "source": "codex",
+            "turn_id": "skill:archived-intent:81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+            "name": "archived-intent",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "agent-source",
+              "cross-agent-skill",
+              "codex"
+            ]
+          },
+          "internal_info": {
+            "memory_layer": "Skill",
+            "memory_kind": "skill",
+            "schema_version": 1,
+            "source": "codex",
+            "title": "archived-intent",
+            "summary": "---",
+            "turn_id": "skill:archived-intent:81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+            "read_only": true,
+            "source_agent_id": "codex",
+            "source_skill_id": "archived-intent",
+            "source_skill_path": "/synthetic/archived-intent/SKILL.md",
+            "source_skill_version": "81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+            "source_content_hash": "81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+            "imported_at": "2026-11-05T08:24:31.090Z",
+            "name": "archived-intent",
+            "invocation_guide": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+            "procedure_json": {
+              "summary": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent."
+            },
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "source_policy_ids": [],
+            "source_world_model_ids": [],
+            "evidence_anchor_ids": [],
+            "skill": {
+              "name": "archived-intent",
+              "eta": 0.5,
+              "status": "active",
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "invocation_guide": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+              "procedure_json": {
+                "summary": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent."
+              },
+              "trials_attempted": 0,
+              "trials_passed": 0,
+              "success_rate": 0,
+              "beta_posterior": {
+                "alpha": 1,
+                "beta": 1,
+                "mean": 0.5
+              }
+            },
+            "source_kind": "skill",
+            "normalized_name": "archived-intent",
+            "source_modified_at": "2026-01-01T00:00:00.000Z",
+            "has_supporting_files": false,
+            "invocation": {
+              "disable_model_invocation": false
+            },
+            "import_state_version": 1,
+            "retrieval_representation_version": 1
+          }
+        },
+        "memoryLayer": "Skill",
+        "contentHash": "4b35f03dbdbd43523e5b8fa08cf5c66fea7ea8f7c20f9b235af5a0c132af7843",
+        "version": 3,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-11-05T08:24:31.118Z",
+        "deletedAt": null
+      },
+      {
+        "id": "skill_deaf914d4a848d08a6b3",
+        "timeline": "2026-01-01T00:00:00.000Z",
+        "userId": "skill-upgrade-lifecycle-user",
+        "agentId": "codex",
+        "memoryType": "SkillMemory",
+        "status": "archived",
+        "visibility": "private",
+        "memoryKey": "skill.import:ec8ade663d741a645417",
+        "memoryValue": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. B",
+        "tags": [
+          "agent-source",
+          "cross-agent-skill",
+          "codex"
+        ],
+        "info": {
+          "title": "intermediate-name",
+          "summary": "---",
+          "source": "codex",
+          "turn_id": "skill:archived-intent:c73704829b460eaa2e213b7fb242c9052137f63f88806604a0d1995c993749f7",
+          "name": "intermediate-name",
+          "eta": 0.5,
+          "support": 1,
+          "gain": 0,
+          "skill_status": "active",
+          "source_memory_ids": [],
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex"
+          ]
+        },
+        "properties": {
+          "memory_type": "SkillMemory",
+          "status": "archived",
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex"
+          ],
+          "info": {
+            "title": "intermediate-name",
+            "summary": "---",
+            "source": "codex",
+            "turn_id": "skill:archived-intent:c73704829b460eaa2e213b7fb242c9052137f63f88806604a0d1995c993749f7",
+            "name": "intermediate-name",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "agent-source",
+              "cross-agent-skill",
+              "codex"
+            ]
+          },
+          "internal_info": {
+            "memory_layer": "Skill",
+            "memory_kind": "skill",
+            "schema_version": 1,
+            "source": "codex",
+            "title": "intermediate-name",
+            "summary": "---",
+            "turn_id": "skill:archived-intent:c73704829b460eaa2e213b7fb242c9052137f63f88806604a0d1995c993749f7",
+            "read_only": true,
+            "source_agent_id": "codex",
+            "source_skill_id": "archived-intent",
+            "source_skill_path": "/synthetic/archived-intent/SKILL.md",
+            "source_skill_version": "c73704829b460eaa2e213b7fb242c9052137f63f88806604a0d1995c993749f7",
+            "source_content_hash": "c73704829b460eaa2e213b7fb242c9052137f63f88806604a0d1995c993749f7",
+            "imported_at": "2026-11-05T08:24:31.105Z",
+            "name": "intermediate-name",
+            "invocation_guide": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. B",
+            "procedure_json": {
+              "summary": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. B"
+            },
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "source_policy_ids": [],
+            "source_world_model_ids": [],
+            "evidence_anchor_ids": [],
+            "skill": {
+              "name": "intermediate-name",
+              "eta": 0.5,
+              "status": "archived",
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "invocation_guide": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. B",
+              "procedure_json": {
+                "summary": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. B"
+              },
+              "trials_attempted": 0,
+              "trials_passed": 0,
+              "success_rate": 0,
+              "beta_posterior": {
+                "alpha": 1,
+                "beta": 1,
+                "mean": 0.5
+              }
+            },
+            "source_kind": "skill",
+            "normalized_name": "intermediate-name",
+            "source_modified_at": "2026-01-01T00:00:00.000Z",
+            "has_supporting_files": false,
+            "invocation": {
+              "disable_model_invocation": false
+            },
+            "import_state_version": 1,
+            "retrieval_representation_version": 1,
+            "archive_reason": "superseded",
+            "superseded_by_skill_id": "skill_7d4059d01f68a98ddc27"
+          }
+        },
+        "memoryLayer": "Skill",
+        "contentHash": "4e993e9fc53a0f39bd0fd31388a3f0a12a32530603bdaa45d264b8c5012bf658",
+        "version": 2,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-11-05T08:24:31.118Z",
+        "deletedAt": null
+      }
+    ]
+  },
+  "userArchiveNewVersion": {
+    "source": {
+      "title": "archived-intent",
+      "sourceSkillId": "archived-intent",
+      "sourceSkillPath": "/synthetic/archived-intent/SKILL.md",
+      "content": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+      "contentHash": "81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+      "modifiedAt": "2026-01-01T00:00:00.000Z"
+    },
+    "sourceB": {
+      "title": "new-version-after-user-archive",
+      "sourceSkillId": "archived-intent",
+      "sourceSkillPath": "/synthetic/archived-intent/SKILL.md",
+      "content": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. New B",
+      "contentHash": "fe8ca8b77c2800cb14be403d6969e84048861aeea427b21e1a4e59a25e26759c",
+      "modifiedAt": "2026-01-01T00:00:00.000Z"
+    },
+    "id": "skill_89e2dd059f397a8e42a5",
+    "bId": "skill_1f1e6ba0145141542a54",
+    "rows": [
+      {
+        "id": "skill_89e2dd059f397a8e42a5",
+        "timeline": "2026-01-01T00:00:00.000Z",
+        "userId": "skill-upgrade-lifecycle-user",
+        "agentId": "codex",
+        "memoryType": "SkillMemory",
+        "status": "archived",
+        "visibility": "private",
+        "memoryKey": "skill.import:b09bbaad734ecb8ec092",
+        "memoryValue": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+        "tags": [
+          "agent-source",
+          "cross-agent-skill",
+          "codex"
+        ],
+        "info": {
+          "title": "archived-intent",
+          "summary": "---",
+          "source": "codex",
+          "turn_id": "skill:archived-intent:81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+          "name": "archived-intent",
+          "eta": 0.5,
+          "support": 1,
+          "gain": 0,
+          "skill_status": "active",
+          "source_memory_ids": [],
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex"
+          ]
+        },
+        "properties": {
+          "memory_type": "SkillMemory",
+          "status": "archived",
+          "tags": [
+            "agent-source",
+            "cross-agent-skill",
+            "codex"
+          ],
+          "info": {
+            "title": "archived-intent",
+            "summary": "---",
+            "source": "codex",
+            "turn_id": "skill:archived-intent:81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+            "name": "archived-intent",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "agent-source",
+              "cross-agent-skill",
+              "codex"
+            ]
+          },
+          "internal_info": {
+            "memory_layer": "Skill",
+            "memory_kind": "skill",
+            "schema_version": 1,
+            "source": "codex",
+            "title": "archived-intent",
+            "summary": "---",
+            "turn_id": "skill:archived-intent:81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+            "read_only": true,
+            "source_agent_id": "codex",
+            "source_skill_id": "archived-intent",
+            "source_skill_path": "/synthetic/archived-intent/SKILL.md",
+            "source_skill_version": "81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+            "source_content_hash": "81be3b26a088389921689cb335a2a43a164f7e78f58b3778f1768b043983a159",
+            "imported_at": "2026-11-05T08:32:04.423Z",
+            "name": "archived-intent",
+            "invocation_guide": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+            "procedure_json": {
+              "summary": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent."
+            },
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "source_policy_ids": [],
+            "source_world_model_ids": [],
+            "evidence_anchor_ids": [],
+            "skill": {
+              "name": "archived-intent",
+              "eta": 0.5,
+              "status": "archived",
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "invocation_guide": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent.",
+              "procedure_json": {
+                "summary": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent."
+              },
+              "trials_attempted": 0,
+              "trials_passed": 0,
+              "success_rate": 0,
+              "beta_posterior": {
+                "alpha": 1,
+                "beta": 1,
+                "mean": 0.5
+              }
+            },
+            "source_kind": "skill",
+            "normalized_name": "archived-intent",
+            "source_modified_at": "2026-01-01T00:00:00.000Z",
+            "has_supporting_files": false,
+            "invocation": {
+              "disable_model_invocation": false
+            },
+            "import_state_version": 1,
+            "retrieval_representation_version": 1,
+            "archive_reason": "user",
+            "source_state": "present"
+          }
+        },
+        "memoryLayer": "Skill",
+        "contentHash": "4b35f03dbdbd43523e5b8fa08cf5c66fea7ea8f7c20f9b235af5a0c132af7843",
+        "version": 3,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-11-05T08:32:04.429Z",
+        "deletedAt": null
+      },
+      {
+        "id": "skill_1f1e6ba0145141542a54",
+        "timeline": "2026-11-05T08:32:04.431Z",
+        "userId": "skill-upgrade-lifecycle-user",
+        "agentId": "codex",
+        "memoryType": "SkillMemory",
+        "status": "activated",
+        "visibility": "private",
+        "memoryKey": "skill.import:db7945310f7e09f29e2f",
+        "memoryValue": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. New B",
+        "tags": [
+          "manual",
+          "codex"
+        ],
+        "info": {
+          "title": "new-version-after-user-archive",
+          "summary": "---",
+          "source": "codex",
+          "time_zone": "-08:00",
+          "name": "new-version-after-user-archive",
+          "eta": 0.5,
+          "support": 1,
+          "gain": 0,
+          "skill_status": "active",
+          "source_memory_ids": [],
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "profile_id": "default"
+        },
+        "properties": {
+          "memory_type": "SkillMemory",
+          "status": "activated",
+          "tags": [
+            "manual",
+            "codex"
+          ],
+          "info": {
+            "title": "new-version-after-user-archive",
+            "summary": "---",
+            "source": "codex",
+            "time_zone": "-08:00",
+            "name": "new-version-after-user-archive",
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "skill_status": "active",
+            "source_memory_ids": [],
+            "tags": [
+              "manual",
+              "codex"
+            ],
+            "profile_id": "default"
+          },
+          "internal_info": {
+            "memory_layer": "Skill",
+            "memory_kind": "skill",
+            "schema_version": 1,
+            "source": "codex",
+            "title": "new-version-after-user-archive",
+            "summary": "---",
+            "time_zone": "-08:00",
+            "read_only": true,
+            "source_agent_id": "codex",
+            "source_skill_id": "archived-intent",
+            "source_skill_path": "/synthetic/archived-intent/SKILL.md",
+            "source_content_hash": "fe8ca8b77c2800cb14be403d6969e84048861aeea427b21e1a4e59a25e26759c",
+            "imported_at": "2026-11-05T08:32:04.431Z",
+            "name": "new-version-after-user-archive",
+            "invocation_guide": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. New B",
+            "procedure_json": {
+              "summary": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. New B"
+            },
+            "eta": 0.5,
+            "support": 1,
+            "gain": 0,
+            "source_policy_ids": [],
+            "source_world_model_ids": [],
+            "evidence_anchor_ids": [],
+            "skill": {
+              "name": "new-version-after-user-archive",
+              "eta": 0.5,
+              "status": "active",
+              "support": 1,
+              "gain": 0,
+              "source_policy_ids": [],
+              "source_world_model_ids": [],
+              "evidence_anchor_ids": [],
+              "invocation_guide": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. New B",
+              "procedure_json": {
+                "summary": "---\nname: archived-intent\ndescription: Synthetic user archive intent.\n---\nRetain my archived intent. New B"
+              },
+              "trials_attempted": 0,
+              "trials_passed": 0,
+              "success_rate": 0,
+              "beta_posterior": {
+                "alpha": 1,
+                "beta": 1,
+                "mean": 0.5
+              }
+            }
+          }
+        },
+        "memoryLayer": "Skill",
+        "contentHash": "b31c21218b7fdcc760eedce47e032b2d0d93fb2c29308b34c733f0a6697bf351",
+        "version": 1,
+        "createdAt": "2026-11-05T08:32:04.431Z",
+        "updatedAt": "2026-11-05T08:32:04.431Z",
+        "deletedAt": null
+      }
+    ]
+  }
+}

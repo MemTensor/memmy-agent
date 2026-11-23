@@ -6,7 +6,6 @@ import { MemoryDb } from "../../src/storage/db.js";
 import Database from "better-sqlite3";
 import { getLoadablePath } from "sqlite-vec";
 import { migrate, getSchemaVersion, SCHEMA_VERSION, SCHEMA_MIGRATION_ID } from "../../src/storage/schema.js";
-import { Repositories } from "../../src/storage/repositories.js";
 
 // A fixed v13 snapshot from the PR base; no current-schema downgrade is involved.
 const V13_SCHEMA = readFileSync(new URL("../fixtures/schema-v13.sql", import.meta.url), "utf8");
@@ -69,12 +68,23 @@ describe("panel index migration", () => {
     });
     try {
       raw = createV13Database(path);
-      const repos = new Repositories(raw), at = "2026-10-28T00:00:00.000Z";
-      repos.runtime.enqueueJob({id:"preserved-claim",jobType:"reflection",status:"queued",userId:"synthetic",attempts:0,maxAttempts:3,payload:{},createdAt:at,updatedAt:at});
-      expect(repos.runtime.leaseQueuedJobs(1)).toMatchObject([{id:"preserved-claim",status:"leased",leaseCount:1,leaseRecoveryCount:0}]);
-      repos.runtime.enqueueEmbeddingRetry({targetKind:"trace",targetId:"retry-source",vectorField:"vec_summary",sourceText:"synthetic",now:Date.parse(at)});
-      expect(repos.runtime.claimDueEmbeddingRetries({now:Date.parse(at),workerId:"synthetic-worker",leaseUntil:Date.parse(at)+60_000}))
-        .toMatchObject([{status:"in_progress",claimedBy:"synthetic-worker",attempts:0,leaseCount:1,leaseRecoveryCount:0}]);
+      const at = "2026-10-28T00:00:00.000Z", now = Date.parse(at);
+      // Seed the independent old schema directly. The current queue scheduler
+      // references new L3 tables and cannot act as a v13 fixture writer.
+      raw.prepare(`INSERT INTO evolution_jobs
+        (id,job_type,status,user_id,attempts,max_attempts,leased_until,lease_owner,lease_token,
+         lease_count,lease_recovery_count,created_at,updated_at)
+        VALUES ('preserved-claim','reflection','leased','synthetic',1,3,?,'synthetic-worker',
+          'synthetic-job-lease',2,1,?,?)`).run(new Date(now + 60_000).toISOString(), at, at);
+      raw.prepare(`INSERT INTO embedding_retry_queue
+        (id,target_kind,target_id,vector_field,source_text,status,attempts,next_attempt_at,
+         claimed_by,lease_until,lease_token,lease_count,lease_recovery_count,created_at,updated_at)
+        VALUES ('preserved-retry','trace','retry-source','vec_summary','synthetic','in_progress',2,?,
+          'synthetic-worker',?,'synthetic-retry-lease',3,1,?,?)`).run(now, now + 60_000, now, now);
+      expect(raw.prepare("SELECT status,attempts,lease_count,lease_recovery_count FROM evolution_jobs").get())
+        .toEqual({status:"leased",attempts:1,lease_count:2,lease_recovery_count:1});
+      expect(raw.prepare("SELECT status,claimed_by,attempts,lease_count,lease_recovery_count FROM embedding_retry_queue").get())
+        .toEqual({status:"in_progress",claimed_by:"synthetic-worker",attempts:2,lease_count:3,lease_recovery_count:1});
       const before = capture(raw);
       raw.close(); raw = undefined;
       db = new MemoryDb({path});

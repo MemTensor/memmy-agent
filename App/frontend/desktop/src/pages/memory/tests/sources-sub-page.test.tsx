@@ -97,6 +97,20 @@ describe("SourcesSubPage", () => {
     ]).map((source) => source.sourceId)).toEqual(["codex", "manual-1"]);
   });
 
+  it.each([
+    ["workbuddy", "skill_installed", "remove_skill"],
+    ["codex", "plugin_installed", "remove_hook"]
+  ] as const)("保留不可用但待移除的 %s %s 来源且只允许清理", (sourceId, status, removalAction) => {
+    const pending = { ...createSource(sourceId, status), available: false };
+    expect(visibleAgentSources([pending])).toEqual([pending]);
+    const action = resolveAgentSourceConnectionAction(pending);
+    expect(action).toBe(removalAction);
+    expect(isAgentSourceConnectionActionDisabled(pending, action)).toBe(false);
+    expect(isAgentSourceConnectionActionDisabled(pending, "install_hook")).toBe(true);
+    expect(visibleAgentSources([{ ...pending, status: "not_connected" }])).toEqual([]);
+    expect(pending.available).toBe(false);
+  });
+
   it("复用跨 Agent 接入源主体内容", () => {
     const html = renderToString(
       <AppProviders>

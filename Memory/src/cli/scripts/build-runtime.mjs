@@ -30,7 +30,7 @@ try {
   await mkdir(join(runtimeRoot, "dist"), { recursive: true });
   await cp(join(memoryRoot, "dist", "src"), join(runtimeRoot, "dist", "src"), { recursive: true });
   await cp(join(memoryRoot, "dist", "viewer"), join(runtimeRoot, "dist", "viewer"), { recursive: true });
-  await cp(join(memoryRoot, "adapters"), join(runtimeRoot, "adapters"), { recursive: true });
+  await cp(join(memoryRoot, "dist", "adapters"), join(runtimeRoot, "adapters"), { recursive: true });
 
   // Workspace-only packages (e.g. @memmy/agent-source-core) are not published to
   // the public registry, so `npm ci` cannot resolve them. Keep them out of the

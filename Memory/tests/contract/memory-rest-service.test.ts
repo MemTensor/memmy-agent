@@ -1,8 +1,10 @@
+import "../fixtures/isolated-user-home.js";
 import { assignedEpisodeId } from "../fixtures/memory-service-fixture.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentSourceExecutor } from "../../src/agent-source/runtime.js";
 import { canonicalJson, sha256Hex } from "../../src/contracts/index.js";
 import {
   DEFAULT_MEMMY_CONFIG,
@@ -32,8 +34,8 @@ const {
   createTestService
 } = createMemoryServiceFixture();
 
-afterEach(() => {
-  cleanupMemoryServiceFixture();
+afterEach(async () => {
+  await cleanupMemoryServiceFixture();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -118,7 +120,7 @@ describe("MemoryService / REST contract", () => {
     const seenTexts: string[] = [];
     const seenRoles: Array<"query" | "document" | undefined> = [];
     const { db, service } = createTestService({ embedder: createCapturingEmbedder(seenTexts, seenRoles) });
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -141,7 +143,7 @@ describe("MemoryService / REST contract", () => {
 
   it("deduplicates Agent source Skills by stable identity and content hash", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -158,21 +160,22 @@ describe("MemoryService / REST contract", () => {
           body: await response.json() as { id?: string; duplicate?: boolean; error?: { code?: string } }
         };
       };
+      // Identity, path changes and content hashes are independent of Codex sidecar policy.
       const firstRequest = {
-        adapterId: "agent-source:codex",
-        requestId: "agent-source-skill:codex:.system/imagegen:content-hash-v1",
-        namespace: { source: "codex", profileId: "default" },
+        adapterId: "agent-source:hermes",
+        requestId: "agent-source-skill:hermes:.system/imagegen:content-hash-v1",
+        namespace: { source: "hermes", profileId: "default" },
         content: "Generate images from a prompt.",
         layer: "Skill" as const,
         title: "imagegen",
-        tags: ["agent-source", "cross-agent-skill", "codex"],
-        source: "codex",
+        tags: ["agent-source", "cross-agent-skill", "hermes"],
+        source: "hermes",
         turnId: "skill:.system/imagegen:version-1",
         createdAt: "2026-09-04T02:13:03.091Z",
         deferProcessing: true,
-        sourceAgentId: "codex",
+        sourceAgentId: "hermes",
         sourceSkillId: ".system/imagegen",
-        sourceSkillPath: "/old-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillPath: "/old-home/.hermes/skills/.system/imagegen/SKILL.md",
         sourceSkillVersion: "version-1",
         sourceContentHash: "content-hash-v1"
       };
@@ -186,11 +189,11 @@ describe("MemoryService / REST contract", () => {
       const replayed = await post({
         ...firstRequest,
         title: "Image generation",
-        tags: ["agent-source", "codex", "new-metadata"],
+        tags: ["agent-source", "hermes", "new-metadata"],
         turnId: "skill:.system/imagegen:parser-version-2",
         createdAt: "2026-09-17T03:24:19.000Z",
         deferProcessing: false,
-        sourceSkillPath: "/new-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillPath: "/new-home/.hermes/skills/.system/imagegen/SKILL.md",
         sourceSkillVersion: "parser-version-2",
         timeZone: "Asia/Shanghai"
       });
@@ -201,15 +204,23 @@ describe("MemoryService / REST contract", () => {
       const duplicate = await post({
         ...firstRequest,
         title: "Generate an image",
-        tags: ["agent-source", "codex", "latest-metadata"],
+        tags: ["agent-source", "hermes", "latest-metadata"],
         turnId: "skill:.system/imagegen:parser-version-3",
         createdAt: "2026-09-18T03:24:19.000Z",
-        sourceSkillPath: "/another-home/.codex/skills/.system/imagegen/SKILL.md",
+        sourceSkillPath: "/another-home/.hermes/skills/.system/imagegen/SKILL.md",
         sourceSkillVersion: "parser-version-3",
         timeZone: "UTC"
       });
       expect(duplicate.response.status).toBe(200);
-      expect(duplicate.body).toMatchObject({ id: legacy.id, duplicate: true });
+      expect(duplicate.body.id).toBe(legacy.id);
+      expect(duplicate.body.duplicate).toBeUndefined();
+      const observed = new Repositories(db.db).memories.get(legacy.id)!;
+      expect(observed.status).toBe("activated");
+      expect(observed.properties.internal_info).toMatchObject({
+        source_skill_path: "/another-home/.hermes/skills/.system/imagegen/SKILL.md",
+        source_skill_version: "parser-version-3"
+      });
+      expect(observed.tags).toContain("latest-metadata");
       expect(db.db.prepare(
         `SELECT COUNT(*) AS count FROM memories
          WHERE json_extract(properties_json, '$.internal_info.source_skill_id') = ?`
@@ -250,7 +261,7 @@ describe("MemoryService / REST contract", () => {
 
   it("uses the caller timezone for offset-less memory times and rejects invalid zones", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -288,7 +299,7 @@ describe("MemoryService / REST contract", () => {
 
   it("prefers the configured timezone over the caller timezone", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service, timeZone: "UTC" });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, timeZone: "UTC" });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -309,9 +320,60 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("reconciles an Agent's skills over HTTP, including identity-only registrations and version rollback", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service, auth: { localServiceToken: "reconcile-test-token" } });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const anonymous = await fetch(`http://127.0.0.1:${address.port}/api/v1/agent-skills/reconcile`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: "{}"
+      });
+      expect(anonymous.status).toBe(401);
+      const namespace = { source: "claude_code", profileId: "default", userId: "reconcile-http-user" };
+      const post = async (body: Record<string, unknown>) => {
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/agent-skills/reconcile`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer reconcile-test-token" },
+          body: JSON.stringify({ namespace, ...body })
+        });
+        expect(response.status).toBe(200);
+        return await response.json() as { skills: Array<{ sourceSkillId: string; outcome: string; memoryId?: string }> };
+      };
+      const version = (content: string) => ({
+        sourceSkillId: "openai-docs",
+        sourceSkillPath: "/home/me/.codex/skills/.system/openai-docs/SKILL.md",
+        title: "openai-docs",
+        content,
+        contentHash: sha256Hex(content),
+        modifiedAt: "2026-10-01T00:00:00.000Z",
+        unknownField: "dropped"
+      });
+      const registrations = [{ sourceSkillId: "plugin:x@m/brainstorming", sourceSkillPath: "/p/SKILL.md", name: "brainstorming" }];
+
+      const first = await post({ sourceAgentId: "codex", complete: true, skills: [version("A")], registrations, registrationsComplete: true });
+      await post({ sourceAgentId: "codex", complete: true, skills: [version("B")], registrations, registrationsComplete: true });
+      const back = await post({ sourceAgentId: "codex", complete: true, skills: [version("A")], registrations, registrationsComplete: true });
+
+      expect(back.skills[0]).toMatchObject({ outcome: "updated", memoryId: first.skills[0]?.memoryId });
+      const active = db.db.prepare(
+        `SELECT memory_value FROM memories
+         WHERE json_extract(properties_json, '$.internal_info.source_skill_id') = 'openai-docs' AND status = 'activated'`
+      ).all();
+      expect(active).toEqual([{ memory_value: "A" }]);
+      expect(db.db.prepare(
+        `SELECT status, memory_value FROM memories
+         WHERE json_extract(properties_json, '$.internal_info.source_skill_id') = 'plugin:x@m/brainstorming'`
+      ).all()).toEqual([{ status: "archived", memory_value: "" }]);
+      expect(db.db.prepare(`SELECT COUNT(*) AS n FROM memories WHERE properties_json LIKE '%unknownField%'`).get()).toEqual({ n: 0 });
+    });
+    db.close();
+  });
+
   it("serves the REST health endpoint", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -369,7 +431,7 @@ describe("MemoryService / REST contract", () => {
 
   it("serves strict v2 L3 and project environment routes through MemoryRestClient", async () => {
     const { db, service } = createTestService();
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -431,7 +493,7 @@ describe("MemoryService / REST contract", () => {
     await runWorkerRoundsWithDueRetries(service, db, [added.id], 3, 1);
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]?.state).toBe("failed");
 
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
@@ -471,7 +533,7 @@ describe("MemoryService / REST contract", () => {
     const opened = service.openSession({ namespace: { source: "memmy-agent", profileId: "default" } });
     const started = await service.startTurn({ sessionId: opened.sessionId, turnId: "late-recall", query: "Implement the memory timeout repair" });
     db.db.prepare("UPDATE recall_events SET injected_memory_ids_json = ? WHERE id = ?").run('["undelivered-memory"]', started.searchEventId);
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -490,10 +552,44 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("forwards recordEvent=false through HTTP search without persisting recall or API logs", async () => {
+    const { db, service } = createTestService();
+    const counts = () => ({
+      recalls: (db.db.prepare("SELECT COUNT(*) AS count FROM recall_events").get() as { count: number }).count,
+      apiLogs: (db.db.prepare("SELECT COUNT(*) AS count FROM api_logs WHERE tool_name = 'memory_search'").get() as { count: number }).count
+    });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const search = (body: Record<string, unknown>) => fetch(`http://127.0.0.1:${address.port}/api/v1/memory/search`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+      });
+
+      const before = counts();
+      const recorded = await search({ query: "recorded search query" });
+      expect(recorded.status).toBe(200);
+      const afterRecorded = counts();
+      expect(afterRecorded).toEqual({ recalls: before.recalls + 1, apiLogs: before.apiLogs + 1 });
+
+      const skipped = await search({ query: "unrecorded search query", recordEvent: false });
+      expect(skipped.status).toBe(200);
+      expect(counts()).toEqual(afterRecorded);
+
+      const invalid = await search({ query: "invalid search query", recordEvent: "false" });
+      expect(invalid.status).toBe(400);
+      expect((await invalid.json() as { error: { code: string } }).error.code).toBe("invalid_argument");
+      expect(counts()).toEqual(afterRecorded);
+    });
+    db.close();
+  });
+
   it("preserves lifecycle routing fields across the REST boundary", async () => {
     const { db, service } = createTestService();
     const analyticsEvents: string[] = [];
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       service,
       pluginRuntimeAnalytics: {
         track(eventName) {
@@ -672,7 +768,7 @@ describe("MemoryService / REST contract", () => {
       llm: createBatchReflectionLlm([], "remember auto worker embeddings"),
       embedder: createCapturingEmbedder(embeddingTexts)
     });
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -741,7 +837,8 @@ describe("MemoryService / REST contract", () => {
   });
 
   it("auto-drains L3 World Model jobs frozen by a REST session.close with no open episode", async () => {
-    const { db, service } = createTestService();
+    // L3 jobs wait in the queue while no evolution model is configured, so configure one.
+    const { db, service } = createTestService({ skillLlm: createDeterministicSummaryLlm("unused") });
     const opened = service.openSession({
       l3WorldModelProtocolVersion: 2,
       l3WorldModelTransition: "resume_only",
@@ -772,7 +869,7 @@ describe("MemoryService / REST contract", () => {
     expect(l3Jobs()).toEqual([]);
 
     // Keep the startup fallback out of the wait window so only session.close can wake the worker.
-    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 60_000 });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -800,7 +897,8 @@ describe("MemoryService / REST contract", () => {
     });
     expect(l3Jobs()).toHaveLength(1);
 
-    await waitFor(() => l3Jobs().every((job) => job.status !== "queued" && job.attempts > 0));
+    // The job ran once; a failed L3 run goes back to the queue to retry later.
+    await waitFor(() => l3Jobs().every((job) => job.attempts > 0 && job.status !== "leased"));
 
     });
     db.close();
@@ -828,7 +926,7 @@ describe("MemoryService / REST contract", () => {
       new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
     );
 
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -904,7 +1002,7 @@ describe("MemoryService / REST contract", () => {
       new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
     );
 
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -988,7 +1086,7 @@ describe("MemoryService / REST contract", () => {
     expect(queuedRow).toBeUndefined();
     service.closeSession(session.sessionId);
 
-    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 0 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 0 });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -1028,7 +1126,7 @@ describe("MemoryService / REST contract", () => {
       now: Date.now() + 100
     });
 
-    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 0 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 0 });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -1115,7 +1213,7 @@ describe("MemoryService / REST contract", () => {
     expect(orphanMemoryJob).toBeDefined();
     repos.runtime.completeJob(orphanMemoryJob!.id);
 
-    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 0 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 0 });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -1161,8 +1259,10 @@ describe("MemoryService / REST contract", () => {
       config: DEFAULT_MEMMY_CONFIG,
       configLoader: () => ({ config: accountRuntimeConfig() })
     });
+    const reconcileScanPermission = vi.fn(async () => {});
     const server = createMemoryHttpServer({
       service,
+      agentSourceExecutor: { reconcileScanPermission, dispose: async () => {} } as unknown as AgentSourceExecutor,
       auth: {
         scopedApiKeys: {
           "admin-token": {
@@ -1207,6 +1307,7 @@ describe("MemoryService / REST contract", () => {
     const result = await client.reloadConfig({ reason: "profile_switched" });
 
     expect(readerResponse.status).toBe(403);
+    expect(reconcileScanPermission).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       changed: true,
       requiresRestart: false,
@@ -1396,7 +1497,7 @@ describe("MemoryService / REST contract", () => {
     }
     expect(memories.every((memory) => repos.memories.hasVector(memory.id, "vec_summary"))).toBe(true);
     expect(memories.map((memory) => repos.processing.get(memory.id)?.state)).toEqual(["ready", "ready", "ready"]);
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await withServerClosed(server, async () => {
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);

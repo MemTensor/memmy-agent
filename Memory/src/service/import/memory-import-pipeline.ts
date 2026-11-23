@@ -2,6 +2,8 @@ import type { MemoryAddRequest, MemoryLayer, ToolCallPayload } from "../../types
 import { captureTurnSteps, signatureFromTraceParts } from "../../algorithm/plugin-algorithms.js";
 import { MemoryServiceError } from "../../utils/error.js";
 import { isoTimeToUtc } from "../../utils/time.js";
+import { normalizeAgentIdKey } from "../../utils/agent-source-id.js";
+import { importedSkillContentHash } from "../../storage/imported-skill.js";
 import { stableHash } from "../../utils/id.js";
 import { clip, firstLine, firstSemanticUserLine, sourceEnvelopePrefixLength } from "../../utils/text.js";
 
@@ -26,24 +28,43 @@ const IMPORT_TOOL_PAYLOAD_MAX_CHARS = 20_000;
 export function memoryAddKey(request: MemoryAddRequest, layer: MemoryLayer, title: string): string {
   if (layer === "Skill" && request.sourceAgentId && (request.sourceSkillId || request.sourceSkillPath)) {
     return `skill.import:${stableHash([
-      request.sourceAgentId,
+      normalizeAgentIdKey(request.sourceAgentId),
       request.sourceSkillId ?? request.sourceSkillPath,
-      request.sourceContentHash ?? request.sourceSkillVersion ?? stableHash(request.content)
+      importedSkillContentHash(request.content)
     ]).slice(0, 20)}`;
   }
   if (isAgentSourceImportMemoryAdd(request) && request.adapterId && request.turnId) return `memory.add:${request.adapterId}:turn:${request.turnId}`;
   if (request.adapterId && request.requestId) return `memory.add:${request.adapterId}:${request.requestId}`;
+  if (layer === "Skill") return `manual:${stableHash([layer, normalizeAgentIdKey(request.sourceAgentId ?? ""), title,
+    importedSkillContentHash(request.content)]).slice(0, 20)}`;
   return `manual:${stableHash(`${layer}:${title}:${request.content}`).slice(0, 20)}`;
 }
 
+/** File observations share lifecycle and HTTP idempotency boundaries. */
+export function isImportedSkillObservation(request: MemoryAddRequest): boolean {
+  if (request.layer !== "Skill") return false;
+  return [request.sourceAgentId, request.sourceSkillId, request.sourceSkillPath,
+    request.sourceSkillVersion, request.sourceContentHash].some(value => Boolean(value?.trim()))
+    || isAgentSourceImportMemoryAdd(request)
+    || /^skill:\S/.test(request.turnId?.trim() ?? "");
+}
+
+export interface ImportedSkillMemoryAddOptions {
+  titleProvided?: boolean;
+  tagsProvided?: boolean;
+}
+
 export function memoryAddTags(request: MemoryAddRequest, importTrace: boolean, traceTags: string[] = []): string[] {
+  if (isImportedSkillObservation(request)) {
+    return uniq(["agent-source", "cross-agent-skill", ...(request.source ? [request.source] : []), ...(request.tags ?? [])]);
+  }
   return importTrace
     ? uniq([...(request.tags ?? []), ...(request.source ? [request.source] : []), ...traceTags])
     : uniq(["manual", ...(request.source ? [request.source] : []), ...(request.tags ?? [])]);
 }
 
 export function isAgentSourceImportMemoryAdd(request: MemoryAddRequest): boolean {
-  return request.adapterId?.startsWith("agent-source:") === true || request.tags?.some((tag) => tag.trim().toLowerCase() === "agent-source") === true;
+  return request.adapterId?.trim().startsWith("agent-source:") === true || request.tags?.some((tag) => tag.trim().toLowerCase() === "agent-source") === true;
 }
 
 export function normalizeMemoryAddCreatedAt(value: string | undefined, timeZone?: string): string | undefined {
@@ -283,3 +304,73 @@ function isToolCallPayload(value: unknown): value is ToolCallPayload {
 }
 
 function uniq(values: string[]): string[] { return [...new Set(values)]; }
+
+/** `info` fields of a Skill imported from another Agent. */
+export function importedSkillInfoFields(title: string): Record<string, unknown> {
+  return {
+    name: title,
+    eta: 0.5,
+    support: 1,
+    gain: 0,
+    skill_status: "active",
+    source_memory_ids: []
+  };
+}
+
+/** `internal_info` fields of a Skill imported from another Agent. */
+export function importedSkillInternalFields(input: {
+  sourceAgentId: string;
+  sourceSkillId?: string;
+  sourceSkillPath?: string;
+  sourceSkillVersion?: string;
+  sourceContentHash: string;
+  importedAt: string;
+  title: string;
+  content: string;
+  skillStatus?: "active" | "archived";
+  /** Short text recall indexes instead of the whole SKILL.md. */
+  retrievalBlurb?: string;
+}): Record<string, unknown> {
+  return {
+    ...skillInternalFields(input.title, input.skillStatus, input.retrievalBlurb),
+    read_only: true,
+    source_kind: "file",
+    source_agent_id: input.sourceAgentId,
+    source_skill_id: input.sourceSkillId,
+    source_skill_path: input.sourceSkillPath,
+    source_skill_version: input.sourceSkillVersion,
+    source_content_hash: input.sourceContentHash,
+    source_raw_content_hash: importedSkillContentHash(input.content),
+    imported_at: input.importedAt
+  };
+}
+
+/** Common usable Skill metadata, independent of a directory's lifecycle. */
+export function skillInternalFields(title: string, status: "active" | "archived" = "active", retrievalBlurb?: string): Record<string, unknown> {
+  const procedure = retrievalBlurb ? { retrievalBlurb } : {};
+  return {
+    name: title,
+    procedure_json: procedure,
+    eta: 0.5,
+    support: 1,
+    gain: 0,
+    source_policy_ids: [],
+    source_world_model_ids: [],
+    evidence_anchor_ids: [],
+    skill: {
+      name: title,
+      eta: 0.5,
+      status,
+      support: 1,
+      gain: 0,
+      source_policy_ids: [],
+      source_world_model_ids: [],
+      evidence_anchor_ids: [],
+      procedure_json: procedure,
+      trials_attempted: 0,
+      trials_passed: 0,
+      success_rate: 0,
+      beta_posterior: { alpha: 1, beta: 1, mean: 0.5 }
+    }
+  };
+}

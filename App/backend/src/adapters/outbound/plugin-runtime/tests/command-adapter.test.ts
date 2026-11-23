@@ -24,6 +24,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 function context(outputMode: "json" | "ndjson" = "json"): PluginRuntimeContext {
@@ -886,6 +887,7 @@ describe("CommandPluginAdapter", () => {
   });
 
   it.each(["cancel", "deactivate", "deadline"])("does not spawn a renderer after %s while TeX is downloading", async action => {
+    if (action === "deadline") vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const f = deferredTexContext();
     const spawnFn = vi.fn(spawn);
     const adapter = createCommandPluginAdapter({ spawnFn, buildLaunch: async () => ({ command: process.execPath, args: [], cwd: root! }) });
@@ -895,7 +897,11 @@ describe("CommandPluginAdapter", () => {
     expect((await iterator.next()).value).toMatchObject({ type: "progress" });
     if (action === "cancel") await adapter.cancel!(session, "waiting");
     if (action === "deactivate") await adapter.deactivate(session);
-    await expect(iterator.next()).rejects.toMatchObject({ code: action === "deadline" ? "plugin_timeout" : "plugin_cancelled" });
+    const termination = expect(iterator.next()).rejects.toMatchObject({
+      code: action === "deadline" ? "plugin_timeout" : "plugin_cancelled"
+    });
+    if (action === "deadline") await vi.advanceTimersByTimeAsync(50);
+    await termination;
     expect(spawnFn).not.toHaveBeenCalled();
     f.finish();
     await adapter.deactivate(session);

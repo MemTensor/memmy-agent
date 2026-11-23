@@ -13,6 +13,7 @@ import { finished } from "node:stream/promises";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { finished } from "node:stream/promises";
 import { createPackageWithOptions, listPackage } from "@electron/asar";
 import { afterEach, describe, expect, it } from "vitest";
 import { transpileModule, ModuleKind, ScriptTarget } from "typescript";

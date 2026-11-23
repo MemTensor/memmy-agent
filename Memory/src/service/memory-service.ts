@@ -1,3 +1,5 @@
+import { AgentSkillLibrary, type AgentSkillReconcileRequest, type AgentSkillReconcileResult } from "./import/agent-skill-library.js";
+import { isImportedSkill } from "../storage/imported-skill.js";
 import { PanelMemoryBudget } from "./panel/memory-budget.js";
 import { retryFtsRepairs } from "../storage/fts-maintenance.js";
 import { DEVICE_MEMORY_OWNER } from "./namespace/memory-owner.js";
@@ -8,6 +10,9 @@ import { panelCacheRevision } from "../storage/panel-cache.js";
 import { EmbeddingMaintenance } from "./embedding/embedding-maintenance.js";
 import { EmbeddingMaintenanceReader } from "./embedding/embedding-maintenance-reader.js";
 import { embeddingRetryTargetKindForMemory, embeddingRetryVectorFieldForMemory } from "./embedding/embedding-pipeline.js";
+import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { canRetryMemoryProcessing } from "./import/processing-retry-policy.js";
 import {PanelStats} from "./panel/stats.js";
 import { PanelReader } from "./panel/reader.js";
 import { PanelBrowse } from "./panel/browse.js";
@@ -16,9 +21,24 @@ import { userMemoryPanelItem } from "./read-model/panel-read.js";
 import {
   assertJsonValue,
   canonicalJson,
+  deriveWorkspaceHostId,
   isLocalWorkspaceUri,
-  sha256Hex
+  sha256Hex,
+  type L3FailedBatchesRetryRequest,
+  type L3FailedBatchesRetryResponse,
+  type L3ScanSessionsFreezeRequest,
+  type L3ScanSessionsFreezeResponse,
+  type L3UserProjectsReplaceRequest,
+  type L3UserProjectsReplaceResponse
 } from "../contracts/index.js";
+import { getOrCreateInstallationId } from "../cli/analytics.js";
+import { isL3FieldCognitionActive } from "./l3-field/flag.js";
+import { loadL3FieldContext } from "./l3-field/l3-field-context.js";
+import type { L3FieldEnvironment } from "./l3-field/session-units.js";
+import { l3FieldSnapshotUnitKey } from "./l3-field/snapshot-memory.js";
+import { resolveSessionUnits } from "./l3-field/session-units.js";
+import { machineProfileFingerprint, probeMachine, renderMachineProfile, type MachineProbe } from "./l3-field/machine-profile.js";
+import { L3UnitUpdatePipeline } from "./l3-field/unit-update-pipeline.js";
 import {
   languageSteeringLine,
   skillOutputLanguageFor,
@@ -196,6 +216,7 @@ import {
 } from "./retrieval/retrieval-service.js";
 import {
   SessionTurnService,
+  allowsLegacyHistoryCapture,
   rawTurnSummary as sessionRawTurnSummary,
   repairEvidenceValueDiff as sessionRepairEvidenceValueDiff
 } from "./session/session-turn-service.js";
@@ -213,6 +234,7 @@ import {
 } from "./turn/turn-normalization.js";
 import {
   createWorkerJobHandlers,
+  sanitizeProcessingError,
   type ClosedEpisodeTrigger,
   type EnqueueJobInput
 } from "./worker/job-handlers.js";
@@ -245,6 +267,10 @@ export interface MemoryServiceOptions {
   db?: MemoryDb;
   backend?: StorageBackend;
   mode?: "local" | "cloud" | "dev";
+  /** Machine identity and home folder for the new L3; defaults to this installation. Tests override it. */
+  l3FieldEnvironment?: () => L3FieldEnvironment;
+  /** Probes this computer for the new L3 machine profile; tests override it. */
+  l3MachineProbe?: () => Promise<MachineProbe>;
   configPath?: string;
   configLoader?: (configPath?: string) => {
     config: MemmyConfig;
@@ -310,8 +336,11 @@ export class MemoryService {
   private readonly episodeReadModel: EpisodeReadModel;
   private readonly episodeTitle: EpisodeTitleService;
   private readonly importJobs: ImportJobProcessor;
+  private readonly agentSkills: AgentSkillLibrary;
   private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
   private readonly projectEnvironment: ProjectEnvironmentService;
+  private readonly l3UnitUpdate: L3UnitUpdatePipeline;
+  private readonly l3MachineProfileRefreshedAt = new Map<string, number>();
   private readonly panelReadModel: PanelReadModel;
   private panelReader?: PanelReader;
   private readonly panelWrites = new PanelWriteCoordinator();
@@ -430,6 +459,7 @@ export class MemoryService {
   };
   private persistRecoveredListener?: () => void;
   private capturePendingListener?: () => void;
+  private readonly fallbackSessionId = randomUUID();
   private closing = false;
   private stopping?: Promise<void>;
   private viewerEndpoint?: string;
@@ -484,7 +514,8 @@ export class MemoryService {
       get llm() { return serviceOwner.llm; },
       get embedder() { return serviceOwner.embedder; },
       get embedAfterCapture() { return serviceOwner.config.algorithm.capture.embedAfterCapture; },
-      nowIso
+      nowIso,
+      l3FieldActive: () => serviceOwner.l3FieldActive()
     });
     const projectEnvironmentOwner = this;
     this.projectEnvironment = new ProjectEnvironmentService({
@@ -492,6 +523,15 @@ export class MemoryService {
       get llm() { return projectEnvironmentOwner.skillLlm; },
       get language() { return projectEnvironmentOwner.config.language; }
     });
+    this.l3UnitUpdate = new L3UnitUpdatePipeline({
+      repos: this.repos,
+      get llm() { return projectEnvironmentOwner.skillLlm; },
+      get language() { return projectEnvironmentOwner.config.language; },
+      environment: () => projectEnvironmentOwner.l3FieldEnvironment()
+    });
+    this.repos.l3WorldModels.routeBatchesToFieldCognition(
+      () => projectEnvironmentOwner.l3FieldActive() ? projectEnvironmentOwner.l3FieldEnvironment().machineId : null
+    );
     const episodeTitleOwner = this;
     this.episodeTitle = new EpisodeTitleService({
       repos: this.repos,
@@ -502,6 +542,7 @@ export class MemoryService {
     });
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
+      episodeTitleIsCurrent: (episode) => this.episodeTitle.isCurrent(episode),
       repos: this.repos,
       get capture() { return workerHandlerOwner.config.algorithm.capture; },
       get reward() { return workerHandlerOwner.config.algorithm.reward; },
@@ -522,6 +563,7 @@ export class MemoryService {
           abstractL3: (job) => this.evolutionJobs.abstractL3(job),
           updateL3WorldModel: (job) => this.evolutionJobs.updateL3WorldModel(job),
           updateProjectEnvironment: (job) => this.projectEnvironment.processProfileJob(job),
+          updateL3Unit: (job) => this.l3UnitUpdate.process(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
           assignSkillCluster: (job) => this.evolutionJobs.assignSkillCluster(job),
           evolveSkillCluster: (job) => this.evolutionJobs.evolveSkillCluster(job),
@@ -557,6 +599,7 @@ export class MemoryService {
       get config() { return evolutionOwner.config; },
       get llm() { return evolutionOwner.llm; },
       get skillLlm() { return evolutionOwner.skillLlm; },
+      get embedder() { return evolutionOwner.embedder; },
       traceMeta: this.traceMeta.bind(this),
       namespaceIdFromMemory,
       buildMemory: (input) => this.buildMemory(input as Parameters<MemoryService["buildMemory"]>[0]),
@@ -630,6 +673,8 @@ export class MemoryService {
       titleFromImportTrace,
       memoryAddTags,
       memoryAddKey,
+      repairManualSkillsForSource: (sourceAgentId, at) => this.agentSkills.repairLegacyManualSkills(at, 200, sourceAgentId),
+      upsertImportedSkill: (memory, at, options) => this.agentSkills.upsertMemoryAdd(memory, at, options),
       toolCallsFromUnknown,
       renderTraceMemoryValue,
       buildMemory: (input) => this.buildMemory(input as Parameters<MemoryService["buildMemory"]>[0]),
@@ -643,6 +688,15 @@ export class MemoryService {
       captureClaims: this.repos.captureClaims,
       processing: this.repos.processing,
       runtime: this.repos.runtime
+    });
+    this.agentSkills = new AgentSkillLibrary({
+      repos: this.repos,
+      nowIso,
+      embedAfterCapture: () => importJobOwner.config.algorithm.capture.embedAfterCapture,
+      resolveUserId: (request) => this.resolveContext(request).userId,
+      buildMemory: (input) => this.buildMemory(input as Parameters<MemoryService["buildMemory"]>[0]),
+      enqueueJob: (input) => this.enqueueJob(input),
+      namespaceIdFromMemory
     });
     const embeddingJobOwner = this;
     this.embeddingJobs = new EmbeddingJobProcessor({
@@ -726,6 +780,13 @@ export class MemoryService {
       runWorkerNoWrite: this.runWorkerNoWrite.bind(this),
       restartFailedProcessing: this.restartFailedProcessing.bind(this),
       enqueueObservationBackfill: (limit, at) => this.observationMemory.backfill(limit, at),
+      l3FieldActive: () => this.l3FieldActive(),
+      requeueL3DeadLettersOnce: (at) => this.requeueL3DeadLettersOnce(at),
+      armPendingL3Flushes: () => this.armPendingL3Flushes(),
+      evolutionModelConfigured: () => workerRunnerOwner.skillLlm.isConfigured(),
+      purgeL3InactiveItems: (at) => this.repos.l3Field.purgeInactive(
+        new Date(Date.parse(at) - this.config.algorithm.l3FieldCognition.inactiveRetentionDays * 86_400_000).toISOString()
+      ),
       previewPolicyEvidenceReconciliation: this.evolutionJobs.previewPolicyEvidenceReconciliation.bind(this.evolutionJobs),
       reconcileOrphanedPolicies: this.evolutionJobs.reconcileOrphanedPolicies.bind(this.evolutionJobs),
       enqueueJob: this.workerHandlers.enqueueJob,
@@ -738,7 +799,9 @@ export class MemoryService {
             ? this.sessionTurns.assignEpisode(job)
             : job.jobType === "episode_finalize"
               ? this.sessionTurns.finalizeAssignment(job)
-              : this.workerHandlers.processJob(job)
+              : this.workerHandlers.processJob(job),
+          // Jobs without a conversation use stable correlation IDs across retries.
+          job.sessionId ?? job.targetMemoryId ?? job.episodeId ?? job.id
         )
       },
       embeddingJobs: this.embeddingJobs
@@ -873,6 +936,7 @@ export class MemoryService {
       maybeCreateDecisionRepair: this.feedbackExperience.maybeCreateDecisionRepair.bind(this.feedbackExperience),
       memoryAddEnabled: this.memoryAddEnabled.bind(this),
       memorySearchEnabled: this.memorySearchEnabled.bind(this),
+      l3FieldActive: () => this.l3FieldActive(),
       observeToolNoWrite: this.observeToolNoWrite.bind(this),
       openSessionNoWrite: this.openSessionNoWrite.bind(this),
       pendingTrialsForFeedback: this.skillTrials.pendingTrialsForFeedback.bind(this.skillTrials),
@@ -955,6 +1019,7 @@ export class MemoryService {
       modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
       {
         modelRole,
+        fallbackSessionId: this.fallbackSessionId,
         usageRecorder: this.modelUsageSink
       }
     );
@@ -1199,8 +1264,8 @@ export class MemoryService {
     }
   }
 
-  private withModelTaskContext<T>(operation: () => T): T {
-    return this.modelTasks.run(operation);
+  private withModelTaskContext<T>(operation: () => T, sessionId?: string): T {
+    return this.modelTasks.run(operation, sessionId);
   }
 
   private memoryAddEnabled(): boolean {
@@ -1211,6 +1276,58 @@ export class MemoryService {
     return this.mode !== "cloud" &&
       this.memoryAddEnabled() &&
       this.storageCapabilities().backendId === "sqlite-local";
+  }
+
+  private l3FieldActive(): boolean {
+    return isL3FieldCognitionActive(this.config, this.storageCapabilities(), this.mode);
+  }
+
+  private l3FieldEnvironmentCache?: L3FieldEnvironment;
+
+  /** New L3 profiles at session start and compaction: rescan the session's project, re-probe the machine. */
+  private requestL3FieldProfiles(session: SessionRecord): void {
+    if (!this.memoryAddEnabled()) return;
+    const units = resolveSessionUnits(this.repos, this.l3FieldEnvironment(), session);
+    if (units.project?.unit.checkoutRoot) {
+      this.projectEnvironment.requestL3UnitProfile({
+        userId: session.userId,
+        unitKey: units.project.unit.unitKey,
+        checkoutRoot: units.project.unit.checkoutRoot
+      });
+    }
+    void this.refreshL3MachineProfile(units.machine.unitKey);
+  }
+
+  /** At most once per ten minutes per machine; the profile is rewritten only when the probe changed. */
+  private async refreshL3MachineProfile(unitKey: string): Promise<void> {
+    const now = Date.now();
+    if (now - (this.l3MachineProfileRefreshedAt.get(unitKey) ?? 0) < 10 * 60_000) return;
+    this.l3MachineProfileRefreshedAt.set(unitKey, now);
+    try {
+      // A reset (snapshot deleted) while probing makes this probe stale; it must not bring the profile back.
+      const resetBefore = this.repos.l3Field.getUnit(unitKey)?.deletedAt;
+      const probe = await (this.options.l3MachineProbe ?? probeMachine)();
+      // The service may have stopped, or memory writes been turned off, while the probe ran.
+      if (this.closing || !this.memoryAddEnabled()) return;
+      const fingerprint = machineProfileFingerprint(probe);
+      this.repos.transaction(() => {
+        const unit = this.repos.l3Field.getUnit(unitKey);
+        if (!unit || unit.deletedAt !== resetBefore || unit.profileFingerprint === fingerprint) return;
+        this.repos.l3Field.setProfile(unitKey, { text: renderMachineProfile(probe), fingerprint });
+        this.repos.l3Field.refreshSnapshot(unitKey);
+      });
+    } catch {
+      // A failed probe leaves the old profile; the next session start tries again.
+      this.l3MachineProfileRefreshedAt.delete(unitKey);
+    }
+  }
+
+  private l3FieldEnvironment(): L3FieldEnvironment {
+    this.l3FieldEnvironmentCache ??= this.options.l3FieldEnvironment?.() ?? {
+      machineId: deriveWorkspaceHostId(getOrCreateInstallationId({ env: process.env })),
+      homeDir: homedir()
+    };
+    return this.l3FieldEnvironmentCache;
   }
 
   private memorySearchEnabled(): boolean {
@@ -1359,6 +1476,7 @@ export class MemoryService {
     const changed = stableStringify(previousConfig) !== stableStringify(nextConfig);
     const requiresRestart = stableStringify(previousConfig.storage) !== stableStringify(nextConfig.storage);
     const reloadedAt = nowIso();
+    const l3FieldWasActive = this.l3FieldActive();
 
     this.config = nextConfig;
     this.tokenBudgetLedger.setLimits(this.config.tokenBudget);
@@ -1371,6 +1489,8 @@ export class MemoryService {
       for (const { before, after } of this.repos.runtime.requeueFailedEpisodeAssignments(reloadedAt)) this.workerHandlers.appendJobChange(after, "queued", before);
       this.capturePendingListener?.();
     }
+    // Turned on without a restart: flushes that ran while it was off did not freeze, so hand those turns over now.
+    if (!l3FieldWasActive) this.armPendingL3Flushes();
     this.workerRunner.notifyWorkAvailable();
     serviceLogger.info("config.reloaded", {
       changed,
@@ -1444,15 +1564,19 @@ export class MemoryService {
       return scopedRun();
     }
     const requestHash = stableHash({ operation, fingerprint });
-    const existing = this.repos.runtime.getIdempotency(idempotencyKey);
+    const currentAgentId = this.resolveContext(request).namespace.source;
+    const existing = this.repos.runtime.getIdempotency(idempotencyKey, currentAgentId);
     if (existing) {
       if (existing.requestHash !== requestHash) {
         throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
       }
       return withDuplicateFlag(existing.response) as T;
     }
-    const response = await scopedRun();
-    this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response);
+    const result = await scopedRun();
+    const response = operation === "memory.search" || operation === "turn.start"
+      ? this.retrieval.refreshImportedSkillResponse(result, request, operation === "turn.start" ? "turn_start" : "search")
+      : this.repos.runtime.sanitizeIdempotencyResponse(idempotencyKey, result, currentAgentId) as T;
+    this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response, nowIso(), currentAgentId);
     return response;
   }
 
@@ -1543,7 +1667,10 @@ export class MemoryService {
     serverTime: string;
   } {
     const response = this.sessionTurns.openSession(this.withTimeZone(request));
-    if (this.projectEnvironmentScanEnabled() && response.projectId) {
+    if (this.l3FieldActive()) {
+      // With memory writes off the session is not stored, and profiles are writes anyway.
+      if (this.memoryAddEnabled()) this.requestL3FieldProfiles(this.requireSession(response.sessionId));
+    } else if (this.projectEnvironmentScanEnabled() && response.projectId) {
       const session = this.requireSession(response.sessionId);
       const scope = this.repos.l3WorldModels.getScope(session.userId, response.projectId);
       if (scope?.workspaceUri && isLocalWorkspaceUri(scope.workspaceUri)) {
@@ -1586,6 +1713,95 @@ export class MemoryService {
     return this.repos.l3WorldModels.traceHead(sessionId);
   }
 
+  /** Stores the desktop app's selected project folders; kept regardless of the L3 field cognition flag. */
+  replaceL3UserProjects(request: L3UserProjectsReplaceRequest): L3UserProjectsReplaceResponse {
+    const userId = normalizeNamespace(request.namespace).userId;
+    const at = nowIso();
+    this.repos.transaction(() => {
+      this.repos.l3Field.replaceUserProjects(userId, request.projects, at);
+      this.repos.l3Field.setStandaloneRoots(userId, request.standaloneRoots ?? [], at);
+    });
+    return { count: request.projects.length, serverTime: at };
+  }
+
+  /**
+   * End of an agent-source scan pass: freeze what the pass added to each touched Session into new-L3
+   * batches, through the same entry Hook Session boundaries use. Only database rows are written (no
+   * model call), so the scan never waits on L3; a pass with nothing new freezes nothing. With the new
+   * L3 off, scans stay out of L3 as before.
+   */
+  freezeScannedL3Sessions(sessionIds: readonly string[]): number {
+    if (!this.memoryAddEnabled() || !this.l3FieldActive()) return 0;
+    let batches = 0;
+    for (const sessionId of new Set(sessionIds)) {
+      const session = this.repos.runtime.getSession(sessionId);
+      if (!session || session.meta.l3_world_model_protocol_version !== 2) continue;
+      batches += this.repos.l3WorldModels.freezeBatches({ sessionId, trigger: "scan_pass" }).batchIds.length;
+    }
+    return batches;
+  }
+
+  /**
+   * A scan or hosted import finished: freeze the scanned Sessions it touched. Capturing a scanned turn
+   * keeps the conversation's earlier owner even after an account switch. Device ownership is not
+   * source authority: every Session must still match the caller's source and profile.
+   */
+  freezeScanSessions(request: L3ScanSessionsFreezeRequest): L3ScanSessionsFreezeResponse {
+    const namespace = normalizeNamespace(request.namespace);
+    const owned = request.sessionIds.filter((id) => {
+      const session = this.repos.runtime.getSession(id);
+      if (!session) return false;
+      if (session.source !== namespace.source || session.profileId !== namespace.profileId) return false;
+      return session.userId === namespace.userId || session.userId === request.namespace.userId ||
+        session.meta.work_memory_disabled === true;
+    });
+    return { batches: this.freezeScannedL3Sessions(owned), serverTime: nowIso() };
+  }
+
+  /** Rerun entry for the new L3 only; dead letters of the old pipeline are not rerun. */
+  retryFailedL3Batches(request: L3FailedBatchesRetryRequest): L3FailedBatchesRetryResponse {
+    this.assertMemoryAddEnabled();
+    const userId = normalizeNamespace(request.namespace).userId;
+    const at = nowIso();
+    const before = new Map(this.repos.runtime.listJobs("dead_letter", 10_000, userId).map((job) => [job.id, job]));
+    const requeued = this.repos.l3Field.requeueDeadLetterBatches(userId, at);
+    for (const id of requeued) {
+      const after = this.repos.runtime.getJob(id);
+      if (after) this.workerHandlers.appendJobChange(after, "queued", before.get(id));
+    }
+    return { requeued: requeued.length, serverTime: at };
+  }
+
+  /**
+   * Worker startup (and after an import): turns not yet handed to the new L3 get someone responsible
+   * for them, also when the process stopped before a scan's hand-off or the data came from a backup.
+   * An open Session gets its idle flush armed; a closed one, which will not close again, is frozen
+   * now. Nothing while the new L3 is off.
+   */
+  armPendingL3Flushes(): number {
+    if (!this.l3FieldActive() || !this.memoryAddEnabled()) return 0;
+    const pending = this.repos.l3WorldModels.sessionsWithUnfrozenTurns();
+    this.repos.transaction(() => {
+      for (const { sessionId, open, lastActivityAt } of pending) {
+        if (open) this.workMemory.armIdleFlush(sessionId, lastActivityAt);
+        else this.repos.l3WorldModels.freezeBatches({ sessionId, trigger: "session_close" });
+      }
+    });
+    return pending.length;
+  }
+
+  /** Worker startup: one automatic rerun for each dead-lettered new-L3 batch; nothing while the new L3 is off. */
+  private requeueL3DeadLettersOnce(at: string): number {
+    if (!this.l3FieldActive()) return 0;
+    const before = new Map(this.repos.runtime.listJobs("dead_letter", 10_000).map((job) => [job.id, job]));
+    const requeued = this.repos.l3Field.requeueDeadLetterBatchesOnce(at);
+    for (const id of requeued) {
+      const after = this.repos.runtime.getJob(id);
+      if (after) this.workerHandlers.appendJobChange(after, "queued", before.get(id));
+    }
+    return requeued.length;
+  }
+
   l3WorldModelBoundary(
     sessionId: string,
     request: L3WorldModelBoundaryRequest
@@ -1608,7 +1824,9 @@ export class MemoryService {
     if (!result.throughTraceSeq) {
       throw new MemoryServiceError("conflict", "through L1 memory was not registered");
     }
-    if (
+    if (request.trigger === "token_compaction" && this.l3FieldActive()) {
+      this.requestL3FieldProfiles(session);
+    } else if (
       request.trigger === "token_compaction" &&
       this.projectEnvironmentScanEnabled() &&
       session.projectId
@@ -1638,6 +1856,9 @@ export class MemoryService {
     if (session.status !== "open") {
       throw new MemoryServiceError("conflict", "l3_world_model_session_not_open");
     }
+    if (this.l3FieldActive()) {
+      return loadL3FieldContext(this.repos, this.l3FieldEnvironment(), session, { readOnly: !this.memoryAddEnabled() });
+    }
     return this.l3WorldModelContextReadModel.load(session);
   }
 
@@ -1659,7 +1880,7 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.summary ?? "" },
       () => this.sessionTurns.compactSession(sessionId, this.withTimeZone(request))
-    )));
+    ), sessionId));
   }
 
   async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
@@ -1680,7 +1901,8 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
+    const response = await this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)), request.sessionId);
+    return this.retrieval.refreshImportedSkillResponse(response, request, "turn_start");
   }
 
   private writeCaptureTransaction<T>(operation: () => T, signal?: AbortSignal): Promise<T> {
@@ -1694,9 +1916,12 @@ export class MemoryService {
     return result;
   }
 
-  async completeSourceTurn(request: SourceTurnCompleteRequest, signal?: AbortSignal): Promise<SourceTurnCompleteResponse> {
-    // Native scans and Hooks use the same device-owned memory identity,
-    // regardless of the current account or a legacy authenticated envelope.
+  async completeSourceTurn(request: SourceTurnCompleteRequest,
+    signalOrScheduled?: AbortSignal | (() => void), onEvolutionScheduled?: () => void): Promise<SourceTurnCompleteResponse> {
+    const signal = typeof signalOrScheduled === "function" ? undefined : signalOrScheduled;
+    const notifyEvolution = typeof signalOrScheduled === "function" ? signalOrScheduled : onEvolutionScheduled;
+    let recoveredEvolutionScheduled = false;
+    // Hooks and native scans share the device owner; authenticated namespace remains a read boundary.
     const response = await this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.query, turnId: request.sourceTurn?.turnId },
       () => this.sessionTurns.completeSourceTurn(this.withTimeZone({
@@ -1708,8 +1933,17 @@ export class MemoryService {
           ...request.namespace,
           userId: DEVICE_MEMORY_OWNER
         }
-      })), signal
-    )));
+      }), () => { recoveredEvolutionScheduled = true; }), signal
+    ), request.sessionId ?? (request.sourceTurn
+      ? `${request.sourceTurn.source}:${request.sourceTurn.profileId}:${request.sourceTurn.conversationId}` : undefined)));
+    // Full scans are an explicit recovery action. Hooks and incremental scans
+    // must not repeatedly restart a terminal failure without user intervention.
+    if (isExplicitHistoryRecovery(request) && response.status === "existing") {
+      const ids = response.result?.l1MemoryIds ?? (response.legacyImportMemoryId ? [response.legacyImportMemoryId] : []);
+      for (const id of ids) {
+        if (this.retryFailedMemoryProcessingOnScan(id, request)) recoveredEvolutionScheduled = true;
+      }
+    }
     serviceLogger.info("source_turn.complete", {
       source: request.sourceTurn?.source,
       profileId: request.sourceTurn?.profileId,
@@ -1723,6 +1957,8 @@ export class MemoryService {
       rawTurnId: response.result?.rawTurnId,
       l1MemoryIds: response.result?.l1MemoryIds
     });
+    // Publish only after capture acceptance and its outer transaction have completed.
+    if (recoveredEvolutionScheduled) notifyEvolution?.();
     return response;
   }
 
@@ -1730,7 +1966,7 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.query, turnId },
       () => this.sessionTurns.completeTurn(turnId, this.withTimeZone(request)), signal
-    )));
+    ), request.sessionId));
   }
 
   async observeTool(input: ToolObserveRequest): Promise<{
@@ -1742,7 +1978,7 @@ export class MemoryService {
     syncCursor?: string;
     serverTime: string;
   }> {
-    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.observeTool(this.withTimeZone(input))));
+    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.observeTool(this.withTimeZone(input)), input.sessionId));
   }
 
 
@@ -1758,14 +1994,14 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: input.task ?? "" },
       () => this.sessionTurns.subagentStart(this.withTimeZone(input))
-    )));
+    ), input.sessionId));
   }
 
   async subagentComplete(input: SubagentCompleteRequest): Promise<CompleteTurnResponse> {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: input.summary ?? "Subagent completed" },
       () => this.sessionTurns.subagentComplete(this.withTimeZone(input))
-    )));
+    ), input.sessionId));
   }
 
   async repairSuggestion(input: RepairSuggestionRequest): Promise<{
@@ -1781,7 +2017,7 @@ export class MemoryService {
     reason?: string;
     sourceMemoryIds: string[];
   }> {
-    return this.withModelTaskContext(() => this.sessionTurns.repairSuggestion(this.withTimeZone(input)));
+    return this.withModelTaskContext(() => this.sessionTurns.repairSuggestion(this.withTimeZone(input)), input.sessionId);
   }
 
   async search(request: InternalMemorySearchRequest): Promise<{
@@ -1807,7 +2043,7 @@ export class MemoryService {
     verbose: boolean;
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.retrieval.search(this.withTimeZone(request)));
+    return this.withModelTaskContext(() => this.retrieval.search(this.withTimeZone(request)), request.sessionId);
   }
 
 
@@ -1846,6 +2082,45 @@ export class MemoryService {
     readOnlyInjectionProfile: "all" | "experience" | "skill" | "skill_experience";
   } {
     return this.retrieval.retrievalTuningConfig();
+  }
+
+  /** Whether the imported Skills of a source Agent were archived because the user disconnected it. */
+  agentSkillsDisconnected(sourceAgentId: string): boolean {
+    return this.agentSkills.isDisconnected(sourceAgentId);
+  }
+
+  agentSkillConnectionState(sourceAgentId: string): "connected" | "disconnected" | undefined {
+    return this.agentSkills.connectionState(sourceAgentId);
+  }
+
+  agentSkillConnectionEvent(sourceAgentId: string) {
+    return this.agentSkills.connectionEvent(sourceAgentId);
+  }
+
+  /** Brings the imported Skills of one source Agent in line with one scan of that Agent. */
+  reconcileAgentSkills(request: AgentSkillReconcileRequest): AgentSkillReconcileResult {
+    if (typeof request.sourceAgentId !== "string" || !request.sourceAgentId.trim()) {
+      throw new MemoryServiceError("invalid_argument", "agent skill reconcile requires sourceAgentId");
+    }
+    if (!Array.isArray(request.skills)) {
+      throw new MemoryServiceError("invalid_argument", "agent skill reconcile requires skills");
+    }
+    // Connection authorization remains manageable while memory capture is disabled.
+    const connectionOnly = request.complete === false && request.skills.length === 0
+      && request.registrations === undefined && request.registrationsComplete !== true
+      && (request.connectionState === "connected" || request.connectionState === "disconnected" || request.disconnected === true);
+    if (!connectionOnly) this.assertMemoryAddEnabled();
+    return this.agentSkills.reconcile(request);
+  }
+
+  /**
+   * Puts back the summary and retrieval text imported skills had before they
+   * switched to their frontmatter description. Run this before rolling the
+   * code back; the next startup re-embeds the affected records.
+   */
+  restoreImportedSkillRetrievalText(limit = 10000): { restored: number } {
+    this.assertMemoryAddEnabled();
+    return { restored: this.agentSkills.restoreRetrievalRepresentation(limit) };
   }
 
   addMemory(request: MemoryAddRequest): {
@@ -2546,7 +2821,7 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    return this.withModelTaskContext(() => this.retrieval.worldModelQuery(this.withTimeZone(input)));
+    return this.withModelTaskContext(() => this.retrieval.worldModelQuery(this.withTimeZone(input)), input.sessionId);
   }
 
   listSkills(input: RequestEnvelope & {
@@ -2619,7 +2894,7 @@ export class MemoryService {
   }
 
   async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
-    return this.withModelTaskContext(() => this.feedbackExperience.feedback(request));
+    return this.withModelTaskContext(() => this.feedbackExperience.feedback(request), request.sessionId);
   }
 
   private async createRevisionDecisionRepairFromJob(job: EvolutionJobRecord): Promise<void> {
@@ -2655,7 +2930,7 @@ export class MemoryService {
     );
   }
 
-  exportBundle(request: MemoryExportRequest = {}): {
+  exportBundle(request: MemoryExportRequest = {}, options: { includeApiLogs?: boolean } = {}): {
     schemaVersion: number;
     exportedAt: string;
     manifest: {
@@ -2671,7 +2946,7 @@ export class MemoryService {
     this.assertMemorySearchEnabled();
     const context = this.resolveContext(request);
     const tables = scopeBundleTables(
-      this.repos.runtime.exportBundleTables(request.includeRawText === true),
+      this.repos.runtime.exportBundleTables(request.includeRawText === true, options),
       context.namespace
     );
     tables.memory_vectors = this.repos.vectors.exportRows().map((row) => ({ ...row }));
@@ -2753,6 +3028,9 @@ export class MemoryService {
       conflictStrategy: request.conflictStrategy ?? "skip"
     });
     this.sessionTurns.migrateLegacyCaptures();
+    // Imported Sessions with turns not yet handed to the new L3 (including work the import had to
+    // drop for a unit kept here) get their idle flush armed.
+    this.armPendingL3Flushes();
     const importedVectors = importedMemoryVectors(request.bundle.tables.memory_vectors);
     this.repos.vectors.importRows(importedVectors);
     result.inserted.memory_vectors = importedVectors.length;
@@ -2809,7 +3087,14 @@ export class MemoryService {
     this.assertMemoryInScope(memory, request.namespace);
     const kind = kindFromMemory(memory);
     const at = nowIso();
-    const archived = this.repos.memories.archive(memory.id, at);
+    let archived = this.repos.transaction(() => {
+      const row = this.repos.memories.archive(memory.id, at);
+      // A project's session context includes the machine, so archiving the machine's new-L3
+      // snapshot moves the project versions too, or clients keep using their cached context.
+      const l3Unit = row ? l3FieldSnapshotUnitKey(memory) : null;
+      if (l3Unit) this.repos.l3Field.refreshProjectContexts(l3Unit, at);
+      return row && isImportedSkill(row) ? this.agentSkills.markUserArchived(row, at) : row;
+    });
     if (!archived) {
       throw new MemoryServiceError("not_found", `memory not found: ${id}`);
     }
@@ -2850,6 +3135,65 @@ export class MemoryService {
       auditId: audit.id,
       serverTime: nowIso()
     };
+  }
+
+  /**
+   * Undoes a panel archive of a Skill. Imported skills return to the state
+   * their source implies (see AgentSkillLibrary.restoreUserArchive); other
+   * skills become active again.
+   */
+  reactivateSkill(id: string, request: MemoryGovernanceRequest = {}): {
+    ok: true;
+    id: string;
+    status: MemoryRow["status"];
+    serverTime: string;
+  } {
+    this.assertMemoryAddEnabled();
+    const memory = this.requireExistingMemory(id);
+    this.assertMemoryInScope(memory, request.namespace);
+    if (memory.memoryLayer !== "Skill") throw new MemoryServiceError("invalid_argument", `not a skill: ${id}`);
+    if (memory.status !== "archived") return { ok: true, id: memory.id, status: memory.status, serverTime: nowIso() };
+    const at = nowIso();
+    let restored: MemoryRow;
+    if (isImportedSkill(memory)) {
+      restored = this.agentSkills.restoreUserArchive(memory, at);
+    } else {
+      const internal = { ...memory.properties.internal_info };
+      if (isRecord(internal.skill)) internal.skill = { ...internal.skill, status: "active" };
+      restored = this.repos.memories.update({
+        ...memory,
+        status: "activated",
+        properties: { ...memory.properties, status: "activated", internal_info: internal },
+        updatedAt: at
+      });
+      this.repos.runtime.appendChange({
+        memoryId: restored.id,
+        namespaceId: namespaceIdFromMemory(restored),
+        kind: kindFromMemory(restored),
+        op: "updated",
+        entityId: restored.id,
+        userId: restored.userId,
+        changeType: "reactivate",
+        version: restored.version,
+        before: memory,
+        after: restored,
+        source: "panel.reactivate",
+        createdAt: at
+      });
+    }
+    this.repos.runtime.insertAudit({
+      userId: restored.userId,
+      sessionId: restored.sessionId,
+      actor: request.namespace ? { ...request.namespace } : {},
+      action: "reactivate",
+      targetKind: kindFromMemory(restored),
+      targetId: restored.id,
+      before: memory,
+      after: restored,
+      meta: { reason: request.reason },
+      createdAt: at
+    });
+    return { ok: true, id: restored.id, status: restored.status, serverTime: nowIso() };
   }
 
   deleteMemory(id: string, request: MemoryGovernanceRequest = {}, local = this.mode !== "cloud"): {
@@ -2928,59 +3272,74 @@ export class MemoryService {
     } else {
       this.assertMemoryInScope(memory, request.namespace);
     }
-    const kind = kindFromMemory(memory);
-    const at = nowIso();
-    const deleted = strictV2WorldModel
-      ? this.repos.l3WorldModels.deleteScopeMemory(memory.id, at)?.deleted
-      : this.repos.memories.softDelete(memory.id, at);
-    if (!deleted) {
-      throw new MemoryServiceError("not_found", `memory not found: ${id}`);
-    }
-    if (kind === "observed_activity") {
-      this.retractExternalEvidenceSkills(deleted.id, at);
-      const origin = memory.properties.internal_info.external_evidence;
-      if (isRecord(origin) && typeof origin.source === "string"
-        && typeof origin.sourceRecordId === "string") {
-        this.retractDependentExternalEvidence(deleted, origin.source, origin.sourceRecordId, at);
+    const importedSkill = isImportedSkill(memory);
+    const remove = () => {
+      const kind = kindFromMemory(memory);
+      const at = nowIso();
+      if (importedSkill) this.agentSkills.stripBeforeDelete(memory, at);
+      const deletedL3Unit = l3FieldSnapshotUnitKey(memory);
+      const deleted = this.repos.transaction(() => {
+        const removed = strictV2WorldModel
+          ? this.repos.l3WorldModels.deleteScopeMemory(memory.id, at)?.deleted
+          : this.repos.memories.softDelete(memory.id, at);
+        // Deleting a new-L3 snapshot resets its unit: what it knew goes, later sessions start it afresh.
+        // Same transaction, so a failure never leaves the unit's items behind a deleted snapshot.
+        if (removed && deletedL3Unit) this.repos.l3Field.markUnitDeleted(deletedL3Unit, at);
+        return removed;
+      });
+      if (!deleted) {
+        throw new MemoryServiceError("not_found", `memory not found: ${id}`);
       }
-    }
-    const changeSeq = this.repos.runtime.appendChange({
-      memoryId: deleted.id,
-      namespaceId: namespaceIdFromMemory(deleted),
-      kind: kindFromMemory(deleted),
-      op: "deleted",
-      entityId: deleted.id,
-      userId: deleted.userId,
-      changeType: "delete",
-      version: deleted.version,
-      before: memory,
-      after: deleted,
-      source: "panel.delete",
-      createdAt: deleted.updatedAt
-    });
-    const audit = this.repos.runtime.insertAudit({
-      userId: deleted.userId,
-      sessionId: deleted.sessionId,
-      actor: request.namespace ? { ...request.namespace } : {},
-      action: "delete",
-      targetKind: kindFromMemory(deleted),
-      targetId: deleted.id,
-      before: memory,
-      after: deleted,
-      meta: { reason: request.reason },
-      createdAt: deleted.updatedAt
-    });
-    this.evolutionJobs.invalidateMemoryDependencies(memory, at);
-    return {
-      ok: true,
-      id: deleted.id,
-      kind: kindFromMemory(deleted),
-      status: "deleted",
-      changeSeq,
-      syncCursor: this.encodeChangeCursor(changeSeq, request.namespace ?? namespaceForMemory(deleted)),
-      auditId: audit.id,
-      serverTime: nowIso()
+      if (kind === "observed_activity") {
+        this.retractExternalEvidenceSkills(deleted.id, at);
+        const origin = memory.properties.internal_info.external_evidence;
+        if (isRecord(origin) && typeof origin.source === "string"
+          && typeof origin.sourceRecordId === "string") {
+          this.retractDependentExternalEvidence(deleted, origin.source, origin.sourceRecordId, at);
+        }
+      }
+      const changeSeq = this.repos.runtime.appendChange({
+        memoryId: deleted.id,
+        namespaceId: namespaceIdFromMemory(deleted),
+        kind: kindFromMemory(deleted),
+        op: "deleted",
+        entityId: deleted.id,
+        userId: deleted.userId,
+        changeType: "delete",
+        version: deleted.version,
+        before: memory,
+        after: deleted,
+        source: "panel.delete",
+        createdAt: deleted.updatedAt
+      });
+      const audit = this.repos.runtime.insertAudit({
+        userId: deleted.userId,
+        sessionId: deleted.sessionId,
+        actor: request.namespace ? { ...request.namespace } : {},
+        action: "delete",
+        targetKind: kindFromMemory(deleted),
+        targetId: deleted.id,
+        before: memory,
+        after: deleted,
+        meta: { reason: request.reason },
+        createdAt: deleted.updatedAt
+      });
+      // A deleted imported skill keeps only its source identity; its body is
+      // also removed from the log and queue copies written above or earlier.
+      if (importedSkill) this.repos.runtime.scrubImportedSkillCopies(deleted.id);
+      this.evolutionJobs.invalidateMemoryDependencies(memory, at);
+      return {
+        ok: true as const,
+        id: deleted.id,
+        kind: kindFromMemory(deleted),
+        status: "deleted" as const,
+        changeSeq,
+        syncCursor: this.encodeChangeCursor(changeSeq, request.namespace ?? namespaceForMemory(deleted)),
+        auditId: audit.id,
+        serverTime: nowIso()
+      };
     };
+    return importedSkill ? this.repos.transaction(remove) : remove();
   }
 
   recallEvidence(queryId: string, request: RequestEnvelope = {}, local = this.mode !== "cloud"): {
@@ -3004,6 +3363,21 @@ export class MemoryService {
     });
     if (!event) throw new MemoryServiceError("not_found", `recall event not found: ${queryId}`);
     const eventRequest = isRecord(event.request) ? event.request : {};
+    const eventSource = typeof eventRequest.source === "string" && eventRequest.source.trim()
+      ? eventRequest.source.trim()
+      : isRecord(eventRequest.namespace) && typeof eventRequest.namespace.source === "string" && eventRequest.namespace.source.trim()
+        ? eventRequest.namespace.source.trim()
+        : event.sessionId
+          ? this.repos.runtime.getSession(event.sessionId)?.source?.trim() || undefined
+          : undefined;
+    const requestSource = request.namespace?.source?.trim() || undefined;
+    const isEligibleRecallId = (id: string): boolean => {
+      if (!this.isRecallMemoryEligible(id, eventSource)) return false;
+      if (requestSource && requestSource !== eventSource) {
+        return this.isRecallMemoryEligible(id, requestSource);
+      }
+      return true;
+    };
     const evidence = isRecord(eventRequest.recallEvidence) ? eventRequest.recallEvidence : {};
     const storedHits = Array.isArray(evidence.hits)
       ? evidence.hits.filter(isRecord) as unknown as RecallHit[]
@@ -3026,12 +3400,11 @@ export class MemoryService {
           if (!raw || !this.recallRawTurnMatchesNamespace(raw, namespace!)) return [];
         }
         if (!this.recallHitSourceMatchesNamespace(hit, canReadMemory)) return [];
-        return [hit];
       }
       if (!hit.members?.length) {
-        return this.isDeletedRecallMemory(hit.id) ? [] : [hit];
+        return isEligibleRecallId(hit.id) ? [hit] : [];
       }
-      const members = hit.members.filter((member) => !this.isDeletedRecallMemory(member.id));
+      const members = hit.members.filter((member) => isEligibleRecallId(member.id));
       if (members.length === 0) return [];
       const memberIds = new Set(members.map((member) => member.id));
       return [{
@@ -3058,8 +3431,8 @@ export class MemoryService {
       query: event.query,
       hits,
       diagnostics: {
-        candidateMemoryIds: local ? event.candidateMemoryIds ?? [] : (event.candidateMemoryIds ?? []).filter(canReadMemory),
-        injectedMemoryIds: local ? event.injectedMemoryIds ?? [] : (event.injectedMemoryIds ?? []).filter(canReadMemory),
+        candidateMemoryIds: (event.candidateMemoryIds ?? []).filter(id => isEligibleRecallId(id) && (local || canReadMemory(id))),
+        injectedMemoryIds: (event.injectedMemoryIds ?? []).filter(id => isEligibleRecallId(id) && (local || canReadMemory(id))),
         ...(recordedCapture
           ? { capture: local ? recordedCapture : this.scopedRecallCapture(recordedCapture, canReadMemory) }
           : readableRawTurn ? { capture: { status: "pending" } } : {})
@@ -3152,6 +3525,14 @@ export class MemoryService {
       deletedAt: mode === "delete" ? at : rawTurn.deletedAt
     };
     this.repos.runtime.updateRawTurn(redacted);
+    // New extraction snapshots are source material too; withdraw them with their raw source.
+    for (let offset = 0; ; offset += 500) {
+      const page = this.repos.memories.list({ userId: rawTurn.userId, sessionId: rawTurn.sessionId, memoryLayer: "L1" }, 500, offset);
+      for (const memory of page) {
+        if (this.traceMeta(memory)?.rawTurnId === rawTurn.id) this.evolutionJobs.invalidateMemoryDependencies(memory, at);
+      }
+      if (page.length < 500) break;
+    }
     const changeSeq = this.repos.runtime.appendChange({
       memoryId: rawTurn.id,
       namespaceId: namespaceIdFromContext(rawTurnNamespace),
@@ -3444,14 +3825,50 @@ export class MemoryService {
     job?: JobRef;
     serverTime: string;
   } {
+    const result = this.repos.transaction(() => this.retryMemoryProcessingInTransaction(memoryId, request));
+    if (result.accepted) this.notifyProcessingRecovery();
+    return result;
+  }
+
+  /** Memory work and its dependent Episode work commit or roll back together. */
+  private retryMemoryProcessingInTransaction(memoryId: string, request: RequestEnvelope = {}) {
     // The existing operation validates memory ownership before touching its raw work.
     const result = this.importJobs.retryMemoryProcessing(memoryId, request);
     const memory = this.repos.memories.get(memoryId);
     const rawId = memory ? rawTurnIdFromMemory(memory) : undefined;
     const retried = rawId ? this.repos.runtime.requeueFailedEpisodeAssignments(nowIso(), rawId) : [];
     for (const { before, after } of retried) this.workerHandlers.appendJobChange(after, "queued", before);
-    if (retried.length) this.capturePendingListener?.();
     return retried.length ? { ...result, accepted: true, job: result.job ?? jobToRef(retried[0]!.after) } : result;
+  }
+
+  retryFailedMemoryProcessingOnScan(memoryId: string, request: RequestEnvelope = {}): boolean {
+    let accepted: boolean;
+    try {
+      accepted = this.repos.transaction(() => {
+        if (!this.memoryAddEnabled()) return false;
+        const memory = this.repos.memories.get(memoryId);
+        const processing = this.repos.processing.get(memoryId);
+        if (!memory || !processing || !canRetryMemoryProcessing(memory, processing)) return false;
+        const scopedRequest = { ...request, namespace: request.namespace ?? {
+          source: request.source ?? memory.agentId ?? "memmy", profileId: "default", userId: this.config.userId
+        } };
+        return this.retryMemoryProcessingInTransaction(memoryId, scopedRequest).accepted;
+      });
+    } catch (error) {
+      // Capture is already committed; recovery failure must not fail the scan turn.
+      serviceLogger.warn("source_turn.scan_retry_failed", { memoryId, error: sanitizeProcessingError(error) });
+      return false;
+    }
+    if (accepted) this.notifyProcessingRecovery();
+    return accepted;
+  }
+
+  private notifyProcessingRecovery(): void {
+    try { this.capturePendingListener?.(); }
+    catch (error) {
+      // A notification cannot undo committed work or turn acceptance into failure.
+      serviceLogger.warn("processing.retry_notification_failed", { error: sanitizeProcessingError(error) });
+    }
   }
 
   private embeddingMaintenance(): EmbeddingMaintenance {
@@ -3556,6 +3973,18 @@ export class MemoryService {
   }
 
   reconcileWorkerStartup(limit = 10000): ReturnType<WorkerRunner["reconcileWorkerStartup"]> {
+    try {
+      // Existing source restrictions and deleted bodies still need repair when capture is disabled.
+      const migration = this.agentSkills.migrateLegacyRecords(nowIso(), limit);
+      this.repos.runtime.repairImportedSkillResponseCopies();
+      if (migration.migrated > 0) serviceLogger.info("agent_skill.legacy_migrated", migration);
+      if (this.memoryAddEnabled()) {
+        const upgraded = this.agentSkills.upgradeRetrievalRepresentation(limit);
+        if (upgraded > 0) serviceLogger.info("agent_skill.retrieval_text_upgraded", { upgraded });
+      }
+    } catch (error) {
+      serviceLogger.error("agent_skill.legacy_migration_failed", memoryErrorFields(error));
+    }
     const result = this.workerRunner.reconcileWorkerStartup(limit);
     this.reconcileAutomaticHistorySkills(nowIso(), limit);
     return result;
@@ -3901,6 +4330,13 @@ export class MemoryService {
     if (userMemory) return userMemory.status === "deleted" || Boolean(userMemory.deletedAt);
     const memory = this.repos.memories.getIncludingDeleted(id);
     return Boolean(memory && (memory.status === "deleted" || memory.deletedAt));
+  }
+
+  private isRecallMemoryEligible(id: string, currentAgentId?: string): boolean {
+    if (this.isDeletedRecallMemory(id)) return false;
+    const memory = this.repos.memories.getIncludingDeleted(id);
+    if (!memory || !isImportedSkill(memory)) return true;
+    return this.repos.isImportedSkillEligibleForRecall(memory, currentAgentId);
   }
 
   private requireRawTurn(rawTurnId: string): RawTurnRecord {
@@ -4589,4 +5025,9 @@ function sourceObservationSummary(content: string, title: string): string {
   const section = heading < 0 ? "" : lines.slice(heading + 1).join("\n").split(/^#{1,6}\s/mu)[0]?.trim();
   return (section || content.split(/\r?\n/u).map((line) => line.replace(/^\s*#{1,6}\s+/u, "").trim())
     .find((line) => Boolean(line && line !== title)) || title).slice(0, 2_000);
+}
+
+/** Full/initial history backfills are user-requested recovery; hooks and incremental scans do not set this flag. */
+function isExplicitHistoryRecovery(request: SourceTurnCompleteRequest): boolean {
+  return allowsLegacyHistoryCapture(request);
 }

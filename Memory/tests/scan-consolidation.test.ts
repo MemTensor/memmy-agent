@@ -29,7 +29,7 @@ function adapter(messages = turn("one")): SourceAdapter {
   return { descriptor: { sourceId: "fixture", displayName: "Fixture", dataPath: "/fixture", builtin: true }, detect: async () => true, async *scan() { yield* messages; } };
 }
 function service(overrides: Record<string, unknown> = {}): MemoryService {
-  return { withAgentSourceScanPermit: withUnrestrictedScanPermit, addMemory: vi.fn(() => ({ id: "memory-one", duplicate: false })), enqueuePendingImportSummaries: vi.fn(), ...overrides } as unknown as MemoryService;
+  return { withAgentSourceScanPermit: withUnrestrictedScanPermit, retryFailedMemoryProcessingOnScan: vi.fn(() => false), addMemory: vi.fn(() => ({ id: "memory-one", duplicate: false })), enqueuePendingImportSummaries: vi.fn(), ...overrides } as unknown as MemoryService;
 }
 function executor(directory: string, source = adapter(), memory = service(), extra = {}) {
   const result = createAgentSourceExecutor({ service: memory, sourceRegistry: createSourceRegistry([source]), configPath: join(directory, "config.yaml"), statePath: join(directory, "state.json"), scanStoreDirectory: join(directory, "scans"), resolveAgentSkillRoot: () => null, ...extra });
@@ -175,25 +175,26 @@ describe("unified scan behavior", () => {
     const directory = root();
     mkdirSync(join(directory, "skills", "sample"), { recursive: true });
     writeFileSync(join(directory, "skills", "sample", "SKILL.md"), "---\nname: Sample\nversion: 1\n---\nA sample skill.");
-    const add = vi.fn(() => ({ id: "skill-one", duplicate: true }));
+    const reconcile = vi.fn(() => ({ skills: [{ sourceSkillId: "sample", outcome: "unchanged", memoryId: "skill-one" }] }));
     const worker = vi.fn(async () => ({}));
-    const memory = service({ addMemory: add, runWorkerOnce: worker, memoryProcessingStatus: () => ({ items: [{ memoryId: "skill-one", state: "ready" }] }) });
+    const memory = service({ reconcileAgentSkills: reconcile, agentSkillsDisconnected: () => false, runWorkerOnce: worker, memoryProcessingStatus: () => ({ items: [{ memoryId: "skill-one", state: "ready" }] }) });
     const scan = executor(directory, adapter([]), memory, { resolveAgentSkillRoot: () => directory });
     await scan.startScan({ sourceId: "fixture", waitForProcessing: true });
     expect((await done(scan)).error).toBeNull();
-    expect(add).toHaveBeenCalledWith(expect.objectContaining({ layer: "Skill", sourceAgentId: "fixture", sourceSkillId: "sample", sourceSkillVersion: "1", sourceSkillPath: join(directory, "skills", "sample", "SKILL.md") }));
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ sourceAgentId: "fixture", skills: [expect.objectContaining({ sourceSkillId: "sample", version: "1", sourceSkillPath: join(directory, "skills", "sample", "SKILL.md") })] }));
     expect(worker).not.toHaveBeenCalled();
   });
 
-  it("reports a skill write failure instead of advancing the scan watermark", async () => {
+  it("reports a skill write failure without holding back the conversation watermark", async () => {
     const directory = root();
     mkdirSync(join(directory, "skills", "sample"), { recursive: true });
     writeFileSync(join(directory, "skills", "sample", "SKILL.md"), "A sample skill.");
-    const add = vi.fn((input: { layer: string }) => { if (input.layer === "Skill") throw new Error("skill storage failed"); return { id: "memory-one", duplicate: false }; });
-    const scan = executor(directory, adapter(), service({ addMemory: add }), { resolveAgentSkillRoot: () => directory });
+    // Every scan reconciles the whole skill directory, so a failing skill is retried without replaying conversations.
+    const reconcile = vi.fn(() => ({ skills: [{ sourceSkillId: "sample", outcome: "failed", error: "skill storage failed" }] }));
+    const scan = executor(directory, adapter(), service({ reconcileAgentSkills: reconcile, agentSkillsDisconnected: () => false }), { resolveAgentSkillRoot: () => directory });
     await scan.startScan({ sourceId: "fixture" });
     expect((await done(scan)).error).toContain("skill storage failed");
-    expect(JSON.parse(readFileSync(join(directory, "state.json"), "utf8")).sources.fixture.latestSeenAt).toBeNull();
+    expect(JSON.parse(readFileSync(join(directory, "state.json"), "utf8")).sources.fixture.latestSeenAt).not.toBeNull();
   });
 
   it("keeps background summary failure separate from scan success", async () => {
@@ -372,18 +373,64 @@ it("services pause during preparation before any ingestion and preserves the exe
   } finally { clearInterval(timer); }
 });
 
-it("does not restart an already failed summary when rescanning identical raw history", async () => {
+it.each([
+  { code: "invalid_model_request", expectedState: "summary_pending" },
+  { code: "memory_corrupt", expectedState: "failed" }
+])("recovers eligible scan failures but keeps $code restrictions for identical history", async ({ code, expectedState }) => {
   const { service: memory, db } = fixture.createTestService();
   const scan = executor(root(), adapter(), memory);
   await scan.startScan({ sourceId: "fixture", mode: "full" });
   const completed = await done(scan);
   const memoryId = completed.results![0]!.memoryIds![0]!;
   db.db.prepare("UPDATE evolution_jobs SET status='failed', last_error='model rejected' WHERE target_memory_id=?").run(memoryId);
-  db.db.prepare("UPDATE memory_processing_state SET state='failed', error_message='model rejected', failed_at=? WHERE memory_id=?").run(new Date().toISOString(), memoryId);
+  db.db.prepare("UPDATE memory_processing_state SET state='failed', retry_action='none', error_code=?, error_message='model rejected', failed_at=? WHERE memory_id=?").run(code, new Date().toISOString(), memoryId);
   await scan.startScan({ sourceId: "fixture", mode: "full", waitForProcessing: true });
   expect((await done(scan)).error).toBeNull();
-  expect(memory.memoryProcessingStatus([memoryId]).items[0]).toMatchObject({ state: "failed", errorMessage: "model rejected" });
-  expect(db.db.prepare("SELECT COUNT(*) AS count FROM evolution_jobs WHERE target_memory_id=?").get(memoryId)).toEqual({ count: 1 });
+  expect(memory.memoryProcessingStatus([memoryId]).items[0]).toMatchObject({ state: expectedState, errorMessage: "model rejected" });
+  expect(db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE id=?").get(memoryId)).toEqual({ count: 1 });
+  expect(db.db.prepare("SELECT COUNT(*) AS count FROM evolution_jobs WHERE target_memory_id=? AND status IN ('queued','leased')").get(memoryId))
+    .toEqual({ count: expectedState === "summary_pending" ? 1 : 0 });
+});
+
+it("does not restart legacy failures during incremental replay but recovers them on full scan", async () => {
+  const { service: memory, db } = fixture.createTestService();
+  // A changed conversation can cause readers to replay context from a prior turn.
+  const messages = turn("one");
+  const source = adapter(messages);
+  const scan = executor(root(), source, memory);
+  await scan.startScan({ sourceId: "fixture", mode: "full" });
+  const memoryId = (await done(scan)).results![0]!.memoryIds![0]!;
+  db.db.prepare("UPDATE evolution_jobs SET status='dead_letter' WHERE target_memory_id=?").run(memoryId);
+  db.db.prepare("UPDATE memory_processing_state SET state='failed', active_job_id=NULL, retry_action='none', error_code='invalid_model_request', error_message='unchanged configuration' WHERE memory_id=?").run(memoryId);
+  const before = memory.memoryProcessingStatus([memoryId]).items[0]!;
+  messages.push(...turn("one", "2026-09-02T10:00:00.000Z").map(message => ({ ...message, messageId: `next-${message.messageId}` })));
+  await scan.startScan({ sourceId: "fixture", mode: "incremental" });
+  expect((await done(scan)).error).toBeNull();
+  expect(memory.memoryProcessingStatus([memoryId]).items[0]).toEqual(before);
+  await scan.startScan({ sourceId: "fixture", mode: "full" });
+  expect((await done(scan)).error).toBeNull();
+  expect(memory.memoryProcessingStatus([memoryId]).items[0]).toMatchObject({ state: "summary_pending", manualRetryCount: 1 });
+});
+
+it("preserves legacy scan success when optional failed-memory recovery cannot enqueue", async () => {
+  const { service: memory, db } = fixture.createTestService();
+  const scan = executor(root(), adapter(), memory);
+  await scan.startScan({ sourceId: "fixture", mode: "full" });
+  const memoryId = (await done(scan)).results![0]!.memoryIds![0]!;
+  db.db.prepare("UPDATE evolution_jobs SET status='dead_letter' WHERE target_memory_id=?").run(memoryId);
+  db.db.prepare("UPDATE memory_processing_state SET state='failed',active_job_id=NULL,retry_action='none',error_code='invalid_model_request' WHERE memory_id=?").run(memoryId);
+  const original = db.db.prepare("SELECT * FROM memories WHERE id=?").get(memoryId);
+  const internals = memory as unknown as { importJobs: { retryMemoryProcessing: () => never } };
+  const failure = vi.spyOn(internals.importJobs, "retryMemoryProcessing").mockImplementation(() => { throw new Error("scan retry enqueue failed"); });
+  try {
+    await scan.startScan({ sourceId: "fixture", mode: "full" });
+    const result = await done(scan);
+    expect(result.error).toBeNull();
+    expect(result.results![0]!.errorCount).toBe(0);
+    expect(result.results![0]!.memoryIds).toContain(memoryId);
+    expect(memory.memoryProcessingStatus([memoryId]).items[0]?.state).toBe("failed");
+    expect(db.db.prepare("SELECT * FROM memories WHERE id=?").get(memoryId)).toEqual(original);
+  } finally { failure.mockRestore(); }
 });
 
 it("returns every error below the shared 500-detail cap", async () => {

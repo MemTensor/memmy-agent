@@ -97,7 +97,7 @@ describe("User Memory recall gate", () => {
     seedUserMemory(db);
     const namespace = { source, profileId: "default", userId };
     const { sessionId } = service.openSession({ namespace });
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     try {
       const address = server.address();

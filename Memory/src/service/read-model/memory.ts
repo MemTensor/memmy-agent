@@ -1,17 +1,19 @@
 import type { MemoryDetailItem, MemoryProcessingRecord, MemoryRow } from "../../types.js";
 import { kindFromMemory } from "../../storage/repositories.js";
-import { displayFieldsForMemory, isTraceMemory, observedActivitySummary, storedTraceSummary } from "./display-fields.js";
+import { displayFieldsForMemory, isTraceMemory, observedActivitySummary, storedBatchSkillTitle, storedTraceSummary } from "./display-fields.js";
 import { policyMetaFromMemory, skillMetaFromMemory, traceMetaFromMemory, worldModelMetaFromMemory } from "../../algorithm/plugin-algorithms.js";
 import { panelSourceForMemory, panelTagsForMemory } from "./panel.js";
 import { isRecord } from "../../utils/json.js";
 import { firstLine } from "../../utils/text.js";
+import { processingWithRetryAction } from "../import/processing-retry-policy.js";
 
 export function detailFromMemory(memory: MemoryRow, processing?: MemoryProcessingRecord): MemoryDetailItem {
+  const processingView = processing ? processingWithRetryAction(memory, processing) : undefined;
   const sourceMemoryIds = memory.properties.internal_info.source_memory_ids;
   return { id: memory.id, kind: kindFromMemory(memory), memoryLayer: memory.memoryLayer, status: memory.status,
-    title: detailTitleForMemory(memory), summary: detailSummaryForMemory(memory), tags: panelTagsForMemory(memory, processing),
+    title: detailTitleForMemory(memory), summary: detailSummaryForMemory(memory), tags: panelTagsForMemory(memory, processingView),
     ...displayFieldsForMemory(memory),
-    updatedAt: memory.updatedAt, version: memory.version, processing, body: memory.memoryValue, createdAt: memory.createdAt,
+    updatedAt: memory.updatedAt, version: memory.version, processing: processingView, body: memory.memoryValue, createdAt: memory.createdAt,
     sourceMemoryIds: stringArray(sourceMemoryIds), metadata: { source: panelSourceForMemory(memory), info: memory.info, properties: memory.properties } };
 }
 
@@ -20,6 +22,8 @@ export function detailTitleForMemory(memory: MemoryRow): string {
     const topic = stringFromMaybeRecord(memory.properties.internal_info, "work_topic");
     if (topic) return truncateDetailTitle(topic);
   }
+  const displayTitle = storedBatchSkillTitle(memory);
+  if (displayTitle) return truncateDetailTitle(displayTitle);
   const trace = traceMetaFromMemory(memory); const policy = policyMetaFromMemory(memory); const worldModel = worldModelMetaFromMemory(memory); const skill = skillMetaFromMemory(memory);
   const generatedTitle = firstDetailDisplayString(stringFromMaybeRecord(memory.info, "title"), stringFromMaybeRecord(memory.properties.internal_info, "title"));
   const title = firstDetailDisplayString(

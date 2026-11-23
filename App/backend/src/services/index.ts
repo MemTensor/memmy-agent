@@ -90,8 +90,11 @@ import { createPluginAsrService } from "./plugin-asr-service.js";
 import { createPluginAssetKeyService } from "./plugin-asset-key-service.js";
 import { createPluginHostServiceRouter } from "./plugin-host-service-router.js";
 import { resolvePluginModelSelection } from "./plugin-model-policy.js";
+import { createModelCapabilityCatalogSyncService, type ModelCapabilityCatalogSyncService } from "./model-capability-catalog-sync-service.js";
+import { readModelCapabilityCatalog } from "../infrastructure/model-capability-catalog/index.js";
 
 export interface BackendServices {
+  modelCapabilityCatalog: ModelCapabilityCatalogSyncService;
   memoryClient: MemoryClient;
   agentAdapterRegistry: AgentAdapterRegistry;
   bootstrap: BootstrapService;
@@ -130,6 +133,7 @@ export interface BackendServices {
 }
 
 export interface CreateBackendServicesOptions {
+  modelCapabilityCatalogPath?: string;
   appStateStore: AppStateStore;
   agentAdapterRegistry: AgentAdapterRegistry;
   memoryClient: MemoryClient;
@@ -345,6 +349,11 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
   });
 
   return {
+    modelCapabilityCatalog: createModelCapabilityCatalogSyncService({
+      cloudClient: options.cloudClient,
+      filePath: options.modelCapabilityCatalogPath,
+      onUpdated: (catalog) => progressBus.emit("model_catalog.updated", { catalogVersion: catalog.catalogVersion })
+    }),
     memoryClient: options.memoryClient,
     agentAdapterRegistry: options.agentAdapterRegistry,
     bootstrap: createBootstrapService({
@@ -353,6 +362,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       scanPreferencesStore: options.scanPreferencesStore
     }),
     appConfig: createAppConfigService({
+      getModelCapabilityCatalog: () => readModelCapabilityCatalog(options.modelCapabilityCatalogPath),
       bootstrapRepository: options.appStateStore.repositories.bootstrap,
       cloudClient: options.cloudClient,
       accountSessionRepository: options.appStateStore.repositories.accountSession,
@@ -407,6 +417,11 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     agentSources,
     agentSourceAutoInject: createAgentSourceAutoInjectService({
       agentSources,
+      isScanAllowed: () => {
+        const permission = options.scanPreferencesStore?.getScanPermission()
+          ?? options.appStateStore.repositories.bootstrap.getOnboardingState().scanPermission;
+        return permission === "scan_only" || permission === "scan_and_write_skill";
+      },
       permissionManager: options.permissionManager,
       isAutoInjectSuppressed: (sourceId) => options.appStateStore.repositories.agentSources.isAutoInjectSuppressed(sourceId),
       getScanPreferences: () => options.scanPreferencesStore?.getScanPreferences()

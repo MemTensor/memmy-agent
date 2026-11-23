@@ -17,8 +17,10 @@ const mocks = vi.hoisted(() => ({
   ensureConversation: vi.fn(async (_title: string) => "created-chat" as string | null),
   send: vi.fn(async () => true), sending: false,
   messages: [] as AgentChatMessage[],
-  activeTurnIdByChatId: {} as Record<string, string | null>,
+
+activeTurnIdByChatId: {} as Record<string, string | null>,
   stopInFlightByChatId: {} as Record<string, boolean>,
+
   stageFiles: vi.fn(async () => undefined),
   stageExistingFiles: vi.fn(async () => undefined),
   draft: vi.fn(),
@@ -63,6 +65,7 @@ describe("conversation feature integration", () => {
     features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: mocks.draft,
       onStageFiles: mocks.stageFiles, onStageExistingFiles: mocks.stageExistingFiles, onOpenArtifact: mocks.openArtifact,
       onSend: mocks.send, onOpenRecording: mocks.openRecording, onEnsureConversation: mocks.ensureConversation });
+
     return <>{features.recorders}<nav>{features.shortcuts}</nav><section>{features.cards}</section></>;
   }
   const render = (language = "zh-CN") => root.render(<I18nProvider language={language}><PluginUiProvider><Harness /></PluginUiProvider></I18nProvider>);

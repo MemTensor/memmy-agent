@@ -411,12 +411,19 @@ function shouldRenderPromptUi(): boolean {
 }
 
 function setField(model: any, fieldName: string, value: any): void {
+  if ((model instanceof ModelPresetConfig || model instanceof AgentDefaults)
+    && (fieldName === "maxTokens" || fieldName === "contextWindowTokens")) {
+    model.setExplicitTokenSetting(fieldName, value);
+    return;
+  }
   model[fieldName] = value;
 }
 
 function cloneValue<T>(value: T): T {
   if (value == null || typeof value !== "object") return value;
   if (value instanceof Config) return new Config(value.toObject()) as T;
+  if (value instanceof ModelPresetConfig) return new ModelPresetConfig(value.toObject()) as T;
+  if (value instanceof AgentDefaults) return new AgentDefaults(value.toObject()) as T;
   if (Array.isArray(value)) return value.map(cloneValue) as T;
   const clone = Object.create(Object.getPrototypeOf(value));
   for (const [key, item] of Object.entries(value as Dict)) clone[key] = cloneValue(item);

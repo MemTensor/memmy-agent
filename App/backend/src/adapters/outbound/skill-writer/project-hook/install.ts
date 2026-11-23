@@ -76,17 +76,18 @@ export function currentProjectHookRevision(bundle: ProjectHookBundle): Promise<s
  */
 export async function installProjectHookBundle(
   hookDirectory: string,
-  bundle: ProjectHookBundle
+  bundle: ProjectHookBundle,
+  write = writeFileAtomically
 ): Promise<void> {
   await mkdir(hookDirectory, { recursive: true });
   const scriptPath = join(hookDirectory, PROJECT_HOOK_SCRIPT_FILE_NAME);
   const runtimePath = join(hookDirectory, PROJECT_HOOK_RUNTIME_FILE_NAME);
   const configPath = join(hookDirectory, PROJECT_HOOK_CONFIG_FILE_NAME);
-  await writeFileAtomically(scriptPath, renderMemmyProjectHookScript({ source: bundle.source, mode: bundle.mode }));
-  await writeFileAtomically(runtimePath, await loadMemmyProjectHookRuntimeAsset());
-  await writeFileAtomically(configPath, `${JSON.stringify(bundle.config, null, 2)}\n`);
+  await write(scriptPath, renderMemmyProjectHookScript({ source: bundle.source, mode: bundle.mode }));
+  await write(runtimePath, await loadMemmyProjectHookRuntimeAsset());
+  await write(configPath, `${JSON.stringify(bundle.config, null, 2)}\n`);
   const revision = await currentProjectHookRevision(bundle);
-  await writeFileAtomically(
+  await write(
     configPath,
     `${JSON.stringify({ ...bundle.config, [PROJECT_HOOK_REVISION_FIELD]: revision }, null, 2)}\n`
   );

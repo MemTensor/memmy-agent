@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { reasoningEffortFromTurnMetadata } from "../../../src/core/agent-runtime/loop.js";
 
 describe("reasoningEffortFromTurnMetadata", () => {
-  it("maps disabled thinking to none and missing level to medium", () => {
+  it("passes only explicit choices without inventing a level", () => {
     expect(reasoningEffortFromTurnMetadata({ thinking_enabled: false }, "gpt-5.4")).toBe("none");
-    expect(reasoningEffortFromTurnMetadata({ thinking_enabled: true }, "gpt-5.4")).toBe("medium");
+    expect(reasoningEffortFromTurnMetadata({ thinking_enabled: true }, "gpt-5.4")).toBeUndefined();
     expect(reasoningEffortFromTurnMetadata({
       thinking_enabled: true,
       thinking_level: "high",
@@ -12,11 +12,11 @@ describe("reasoningEffortFromTurnMetadata", () => {
     expect(reasoningEffortFromTurnMetadata({}, "gpt-5.4")).toBeUndefined();
   });
 
-  it("keeps always-on table models enabled even if the frame asked to disable", () => {
+  it("does not infer always-on behavior from model names", () => {
     expect(reasoningEffortFromTurnMetadata({
       thinking_enabled: false,
       thinking_level: "low",
-    }, "claude-fable-5")).toBe("low");
+    }, "claude-fable-5")).toBe("none");
   });
 
   it("lets a custom model turn thinking off even when the catalog model is always on", () => {

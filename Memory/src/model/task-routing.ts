@@ -14,6 +14,7 @@ import type {
 export type MemoryModelRole = "summary" | "evolution";
 
 export interface MemoryModelTaskContext {
+  sessionId?: string;
   config: MemmyConfig;
   summary: LlmClient;
   evolution: LlmClient;
@@ -87,10 +88,12 @@ export class MemoryModelTaskRouter {
     return this.concurrency?.limits.embeddingBatchSize ?? 16;
   }
 
-  run<T>(operation: () => T): T {
-    if (this.storage.getStore() && this.isActiveTask()) return operation();
+  run<T>(operation: () => T, sessionId?: string): T {
+    const current = this.storage.getStore();
+    if (current && this.isActiveTask()) return sessionId
+      ? this.storage.run({ ...current, sessionId }, operation) : operation();
     if (this.closing) throw new Error("Model task router is closing");
-    const start = () => this.storage.run(this.resolveContext(), operation);
+    const start = () => this.storage.run({ ...this.resolveContext(), ...(sessionId ? { sessionId } : {}) }, operation);
     return this.track(() => this.concurrency ? this.concurrency.runNewForegroundTask(start) : start());
   }
 
@@ -199,7 +202,9 @@ class TaskRoutedLlmClient implements LlmClient {
   ): Promise<string> {
     return this.router.run(() => {
       const delegate = this.delegate();
-      return this.router.request(delegate.config, () => delegate.complete(messages, options), false, this.role);
+      const sessionId = options.sessionId ?? this.router.currentOrResolve().sessionId;
+      return this.router.request(delegate.config,
+        () => delegate.complete(messages, sessionId ? { ...options, sessionId } : options), false, this.role);
     });
   }
 
@@ -209,7 +214,9 @@ class TaskRoutedLlmClient implements LlmClient {
   ): Promise<T> {
     return this.router.run(() => {
       const delegate = this.delegate();
-      return this.router.request(delegate.config, () => delegate.completeJson<T>(messages, options), false, this.role);
+      const sessionId = options.sessionId ?? this.router.currentOrResolve().sessionId;
+      return this.router.request(delegate.config,
+        () => delegate.completeJson<T>(messages, sessionId ? { ...options, sessionId } : options), false, this.role);
     });
   }
 

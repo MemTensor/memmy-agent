@@ -35,7 +35,13 @@ const PLUGIN_REVISION = "opencode-v2-3";
 export default {
   id: "memmy-memory",
   async server(input) {
-    const hooks = await createMemmyHooks(input);
+    const resolveAgent = input.resolveAgent || (input.client && input.client.session && (async (sessionID) => {
+      const response = await input.client.session.get({ path: { id: sessionID } });
+      const session = response && response.data || response || {};
+      const agents = !session.agent && input.client.agent && await input.client.agent.list();
+      return resolveOpencodeAgent(session.agent, undefined, agents && agents.data || agents);
+    }));
+    const hooks = await createMemmyHooks({ ...input, resolveAgent });
     console.error("Memmy plugin loaded: revision=" + PLUGIN_REVISION + ", entry=v1");
     return hooks;
   },
@@ -197,6 +203,13 @@ const createMemmyHooks = async ({ client, directory, worktree, resolveAgent, mod
     }).catch((error) => { sessionCache.delete(cacheKey); throw error; });
     sessionCache.set(cacheKey, opening);
     return opening;
+  }
+
+  async function searchSessionId(memmy, externalSessionId, agent) {
+    const sessionID = normalizeText(externalSessionId);
+    if (!sessionID) return undefined;
+    const profile = agent || sessionAgents.get(sessionID) || (resolveAgent && await resolveAgent(sessionID));
+    return (await ensureSession(memmy, sessionID, profile)).sessionId;
   }
 
   async function l3Context(sessionID, agent) {
@@ -377,7 +390,7 @@ const createMemmyHooks = async ({ client, directory, worktree, resolveAgent, mod
     return false;
   }
 
-  async function handleResumeSearch(sessionID, query, parts) {
+  async function handleResumeSearch(sessionID, query, parts, agent) {
     if (!query) {
       replaceUserTextParts(parts, renderCommandResult("Usage: /memmy-resume <query>"));
       return;
@@ -390,7 +403,9 @@ const createMemmyHooks = async ({ client, directory, worktree, resolveAgent, mod
 
     try {
       const memmy = await createMemmyClient();
+      const sessionId = await searchSessionId(memmy, sessionID, agent);
       const result = await memmy.post("/api/v1/memory/search", {
+        sessionId,
         query,
         layers: ["L1"],
         limit: SEARCH_LIMIT,
@@ -441,9 +456,12 @@ const createMemmyHooks = async ({ client, directory, worktree, resolveAgent, mod
         },
         async execute(args, context) {
           const memmy = await createMemmyClient();
+          const sessionId = await searchSessionId(memmy, context.sessionID, context.agent);
           const result = await memmy.post("/api/v1/memory/search", {
+            sessionId,
             query: normalizeText(args.query),
             layers: Array.isArray(args.layers) ? args.layers : undefined,
+            verbose: true,
             source: SOURCE
           });
           return renderMemmyContextPacket(
@@ -511,7 +529,7 @@ const createMemmyHooks = async ({ client, directory, worktree, resolveAgent, mod
         return;
       }
       if (commandArguments !== null) {
-        await handleResumeSearch(input.sessionID, normalizeText(commandArguments), output.parts);
+        await handleResumeSearch(input.sessionID, normalizeText(commandArguments), output.parts, input.agent);
         return;
       }
       await beginTurn(input, output, rawPrompt);
@@ -1112,13 +1130,15 @@ function formatRelatedMemoryForResume(item, index) {
 function formatSearchResult(result) {
   const hits = extractSearchHits(result).slice(0, 10);
   if (!hits.length) {
-    return "No relevant Memmy memories found.";
+    const context = typeof (result && result.injectedContext) === "string"
+      ? result.injectedContext : result && result.injectedContext && result.injectedContext.markdown;
+    return truncateText(normalizeText(context), RESUME_CONTEXT_MAX_CHARS) || "No relevant Memmy memories found.";
   }
   return hits.map((hit, index) => {
     const id = normalizeText(hit.id) || normalizeText(hit.memoryId) || normalizeText(hit.refId);
     const layer = normalizeText(hit.memoryLayer || hit.layer) || "memory";
     const title = normalizeText(hit.title) || id || "Memory " + String(index + 1);
-    const summary = normalizeText(hit.summary) || normalizeText(hit.body) || normalizeText(hit.content);
+    const summary = normalizeText(hit.summary) || normalizeText(hit.body) || normalizeText(hit.content) || normalizeText(hit.snippet);
     return String(index + 1) + ". [" + layer + "] " + title + (id ? " (" + id + ")" : "") +
       (summary ? "\n" + truncateText(summary, 1200) : "");
   }).join("\n\n");

@@ -1371,7 +1371,9 @@ body.memmy-window-fullscreen {
 
 .agent-model-selector__menu .select-control__aside {
   position: absolute;
+  top: auto !important;
   right: 100%;
+  bottom: 0;
   z-index: 130;
   width: min(260px, calc(100vw - 48px));
   padding-right: 8px;
@@ -14497,6 +14499,22 @@ body.memmy-platform-windows :is(
 
 .ch__settings-card > * + * {
   border-top: 1px solid var(--ch-border);
+}
+
+.ch__dependent-settings {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.ch__dependent-settings > * + * { border-top: 1px solid var(--ch-border); }
+.ch__dependent-settings:disabled { opacity: 0.45; }
+.ch__dependent-settings > section[aria-label] {
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
+  padding: 0;
 }
 
 .ch__settings-card .ch__recording-setting {

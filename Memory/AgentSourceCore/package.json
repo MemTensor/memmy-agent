@@ -11,12 +11,18 @@
     "test": "vitest run --config ./vitest.config.ts src"
   },
   "dependencies": {
-    "fzstd": "^0.1.1"
+    "fzstd": "^0.1.1",
+    "smol-toml": "1.7.0",
+    "yaml": "^2.9.0"
   },
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
       "default": "./dist/src/index.js"
+    },
+    "./memory-connection": {
+      "types": "./dist/src/memory-connection.d.ts",
+      "default": "./dist/src/memory-connection.js"
     },
     "./scan-state": {
       "types": "./dist/src/scan-state.d.ts",

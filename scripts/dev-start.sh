@@ -197,18 +197,19 @@ ensure_npm_dependencies() {
   write_root_dependency_stamp
 }
 
-resolve_electron_package_dir() {
-  (
-    cd "$DESKTOP_DIR"
-    node --eval 'const path = require("node:path"); process.stdout.write(path.dirname(require.resolve("electron/package.json")));'
-  )
-}
-
 electron_runtime_available() {
   (
     cd "$DESKTOP_DIR"
     node --eval 'const fs = require("node:fs"); const executable = require("electron"); if (!fs.existsSync(executable)) process.exit(1);'
   ) >/dev/null 2>&1
+}
+
+resolve_electron_package_dir() {
+  node --eval '
+    const path = require("node:path");
+    const searchRoot = process.argv[1];
+    process.stdout.write(path.dirname(require.resolve("electron/package.json", { paths: [searchRoot] })));
+  ' "$DESKTOP_DIR"
 }
 
 ensure_electron_runtime() {

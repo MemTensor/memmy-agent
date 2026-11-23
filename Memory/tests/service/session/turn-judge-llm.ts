@@ -5,6 +5,7 @@ import {
   type LlmMessage
 } from "../../../src/index.js";
 import {
+  episodeTitleForPrompt,
   isTurnJudgeCall,
   turnJudgeUserText,
   type createMemoryServiceFixture
@@ -52,13 +53,13 @@ export function createTurnJudgeLlm(answers: Record<string, JudgeAnswer[] | ((cal
   const llm: LlmClient = {
     config: { ...DEFAULT_MEMMY_CONFIG.summary, provider: "host", endpoint: "http://127.0.0.1/turn-judge", model: "turn-judge" },
     isConfigured: () => true,
-    async complete(_messages, options) {
+    async complete(messages, options) {
       return options.operation.startsWith("episode_title")
-        ? JSON.stringify({ title: "测试任务标题", summary: "测试任务摘要。" })
+        ? JSON.stringify(episodeTitleForPrompt(messages))
         : "unused";
     },
     async completeJson<T extends Record<string, unknown>>(messages: LlmMessage[], options: LlmCompletionOptions): Promise<T> {
-      if (options.operation === "episode.select.v1") return { episodeId: null, title: "测试任务标题", summary: "测试任务摘要。" } as unknown as T;
+      if (options.operation === "episode.select.v1") return { episodeId: null, ...episodeTitleForPrompt(messages) } as unknown as T;
       if (options.operation === "capture.summarize" && isTurnJudgeCall(messages)) {
         const user = turnJudgeUserText(messages);
         const call = { messages, options, user };

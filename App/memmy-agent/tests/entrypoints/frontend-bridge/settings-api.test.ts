@@ -81,7 +81,7 @@ afterEach(() => {
 });
 
 describe("webui settings api current catalog boundary", () => {
-  it("projects mapped token defaults for a BYOK preset missing both fields", () => {
+  it("uses global defaults for a BYOK preset missing both explicit token fields", () => {
     const file = useConfigFile({
       ...configuredCatalog(),
       agents: { defaults: { modelPreset: "known" } },
@@ -113,12 +113,12 @@ describe("webui settings api current catalog boundary", () => {
 
     expect(payload.agent).toMatchObject({
       model_preset: "known",
-      max_tokens: 128_000,
-      context_window_tokens: 1_050_000,
+      max_tokens: 65_536,
+      context_window_tokens: 200_000,
     });
     expect(known).toMatchObject({
-      max_tokens: 128_000,
-      context_window_tokens: 1_050_000,
+      max_tokens: 65_536,
+      context_window_tokens: 200_000,
     });
   });
 

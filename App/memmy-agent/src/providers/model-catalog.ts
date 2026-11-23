@@ -3,6 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   ModelEndpointProtocolSchema,
+  CloudModelThinkingConfigSchema,
+  CloudModelCapabilitySchema,
+  type CloudModelCapability,
   resolveAssignedModel,
   type ActualModelContext,
   type CommittedModelSelection,
@@ -16,6 +19,8 @@ import {
 import YAML from "yaml";
 import { getConfigPath, loadConfig, resolveConfigEnvVars } from "../config/loader.js";
 import { Config } from "../config/schema.js";
+import type { RuntimeModelCapabilityCatalogState } from "./model-capability-catalog.js";
+import type { TurnModelCapabilities } from "./turn-model-capabilities.js";
 import { buildProviderSnapshot, type ProviderSnapshot } from "./factory.js";
 
 export type { ActualModelContext, CommittedModelSelection } from "@memmy/local-api-contracts";
@@ -45,6 +50,13 @@ export type ModelCatalog = {
 };
 
 export type ResolvedModelSelection = Readonly<ActualModelContext & {
+  capabilityConfig?: {
+    customConfig?: Partial<CloudModelCapability>;
+    explicitGeneration: { maxTokens?: number; contextWindowTokens?: number; reasoningEffort?: string | null };
+    agentReasoningEffort?: string | null;
+  };
+  turnCapabilities?: TurnModelCapabilities;
+  capabilityCatalogState?: RuntimeModelCapabilityCatalogState;
   /** Compatibility alias for existing Agent callers. */
   preset: string;
   snapshot: ProviderSnapshot;
@@ -109,11 +121,23 @@ export function resolveModelSelection(input: ModelSelectionInput): ResolvedModel
       presetName: resolution.context.presetId,
       validateCredentials: false,
     });
+    const preset = config.modelPresets[resolution.context.presetId];
+    const raw = preset as unknown as Record<string, unknown>;
+    const customConfig = raw.custom === true || preset.provider === "custom" ? {
+      ...preset.explicitTokenSettings,
+      ...(preset.inputModalities ? { inputModalities: CloudModelCapabilitySchema.shape.inputModalities.parse(preset.inputModalities) } : {}),
+      ...(raw.thinking !== undefined ? { thinking: CloudModelThinkingConfigSchema.parse(raw.thinking) } : {}),
+    } : undefined;
     return Object.freeze({
       ...resolution.context,
       preset: resolution.context.presetId,
       snapshot,
       providerConfig: resolution.provider,
+      capabilityConfig: {
+        ...(customConfig ? { customConfig } : {}),
+        explicitGeneration: { ...config.agents.defaults.explicitTokenSettings, ...preset.explicitTokenSettings, reasoningEffort: preset.reasoningEffort },
+        agentReasoningEffort: config.agents.defaults.reasoningEffort,
+      },
     });
   } catch {
     return null;

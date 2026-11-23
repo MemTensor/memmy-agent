@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { DEFAULT_MEMORY_URL, resolveMemoryConnection } from "@memmy/agent-source-core/memory-connection";
 import { normalizeMemoryByokLimitM } from "@memmy/agent-source-core";
 import { parse as parseYaml } from "yaml";
 import {
@@ -110,6 +111,8 @@ export interface StorageConfig {
 }
 
 export interface AgentAccessConfig {
+  /** Desktop authorization. Absent for standalone CLI installations. */
+  scanPermission?: "unset" | "none" | "scan_only" | "scan_and_write_skill";
   autoScanKnownAgents: boolean;
   watchFileChanges: boolean;
   autoInjectSkill: boolean;
@@ -188,6 +191,11 @@ export interface AlgorithmConfig {
     implicitConfidenceCap: number;
   };
   l2Induction: {
+    mode: "unified" | "legacy";
+    recallCosine: number;
+    recallTopK: number;
+    maxInputChars: number;
+    maxOutputTokens: number;
     useLlm: boolean;
     minEpisodesForInduction: number;
     minEpisodesForActivation: number;
@@ -248,6 +256,11 @@ export interface AlgorithmConfig {
     // Keep the full stored input of a judged turn (for checking what the model
     // saw). Off: after a successful judgment only the small fields stay.
     turnJudgeKeepInput: boolean;
+  };
+  /** Itemized machine/project L3; on by default (local SQLite only, see isL3FieldCognitionActive). */
+  l3FieldCognition: {
+    enabled: boolean;
+    inactiveRetentionDays: number;
   };
   retrieval: {
     tier1TopK: number;
@@ -333,7 +346,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     mode: "local",
     backend: "sqlite",
     sqlitePath: defaultMemoryDatabasePath(),
-    endpoint: "http://127.0.0.1:18960",
+    endpoint: DEFAULT_MEMORY_URL,
     token: undefined
   },
   summary: {
@@ -455,6 +468,11 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       implicitConfidenceCap: 0.65
     },
     l2Induction: {
+      mode: "unified",
+      recallCosine: 0.55,
+      recallTopK: 5,
+      maxInputChars: 48_000,
+      maxOutputTokens: 8_192,
       useLlm: true,
       minEpisodesForInduction: 1,
       minEpisodesForActivation: 3,
@@ -511,6 +529,10 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       turnJudge: true,
       turnJudgeKeepInput: false
     },
+    l3FieldCognition: {
+      enabled: true,
+      inactiveRetentionDays: 15
+    },
     retrieval: {
       tier1TopK: 3,
       tier2TopK: 5,
@@ -554,7 +576,7 @@ export function defaultConfigPaths(): string[] {
   ].filter((value): value is string => Boolean(value));
 }
 
-export function loadMemmyConfig(configPath?: string): {
+export function loadMemmyConfig(configPath?: string, connectionEnv = process.env): {
   config: MemmyConfig;
   path: string;
 } {
@@ -581,9 +603,15 @@ export function loadMemmyConfig(configPath?: string): {
     fileConfig,
     envConfig
   ));
+  const storage = asRecord(fileConfig.storage);
+  const connection = resolveMemoryConnection(
+    optionalString(storage.endpoint) ?? optionalString(fileConfig.endpoint) ?? DEFAULT_MEMORY_URL,
+    optionalString(storage.token) ?? optionalString(fileConfig.token), connectionEnv
+  );
   return {
     config: {
       ...merged,
+      storage: { ...merged.storage, endpoint: connection.endpoint, token: connection.token },
       ...(configuredTimeZone ? { timeZone: resolveTimeZone(configuredTimeZone) } : {})
     },
     path: selectedPath
@@ -607,9 +635,7 @@ function configFromEnv(): Record<string, unknown> {
     storage: compactRecord({
       mode: process.env.MEMMY_MEMORY_MODE,
       backend: process.env.MEMMY_MEMORY_BACKEND,
-      sqlitePath: process.env.MEMMY_MEMORY_DB ?? process.env.MEMORY_SERVICE_DB,
-      endpoint: process.env.MEMMY_MEMORY_URL ?? process.env.MEMORY_SERVICE_URL,
-      token: process.env.MEMMY_MEMORY_TOKEN ?? process.env.MEMORY_SERVICE_TOKEN
+      sqlitePath: process.env.MEMMY_MEMORY_DB ?? process.env.MEMORY_SERVICE_DB
     }),
     summary: compactRecord({
       provider: process.env.MEMMY_SUMMARY_PROVIDER,
@@ -657,6 +683,9 @@ function configFromEnv(): Record<string, unknown> {
         skillInjectionMode: process.env.MEMMY_SKILL_INJECTION_MODE,
         skillSummaryChars: numberEnv("MEMMY_SKILL_SUMMARY_CHARS"),
         skillFullMaxChars: numberEnv("MEMMY_SKILL_FULL_MAX_CHARS")
+      }),
+      l3FieldCognition: compactRecord({
+        enabled: booleanEnv("MEMMY_L3_FIELD_COGNITION")
       })
     })
   });
@@ -782,7 +811,7 @@ function normalizeStorage(input: Record<string, unknown>): StorageConfig {
     backend: storageBackend(input.backend, DEFAULT_MEMMY_CONFIG.storage.backend),
     sqlitePath: optionalPathString(input.sqlitePath),
     endpoint: optionalString(input.endpoint) ?? DEFAULT_MEMMY_CONFIG.storage.endpoint,
-    token: optionalString(input.token)
+    token: optionalString(input.token)?.trim() || undefined
   };
 }
 
@@ -838,6 +867,10 @@ function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {
 
 function normalizeAgentAccess(input: Record<string, unknown>): AgentAccessConfig {
   return {
+    ...(input.scanPermission !== undefined ? {
+      scanPermission: input.scanPermission === "scan_only" || input.scanPermission === "scan_and_write_skill"
+        ? input.scanPermission : input.scanPermission === "none" ? "none" : "unset"
+    } : {}),
     autoScanKnownAgents: booleanValue(
       input.autoScanKnownAgents,
       DEFAULT_MEMMY_CONFIG.agentAccess.autoScanKnownAgents
@@ -1161,6 +1194,7 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
   const l3 = asRecord(input.l3Abstraction);
   const skill = asRecord(input.skill);
   const session = asRecord(input.session);
+  const l3FieldCognition = asRecord(input.l3FieldCognition);
   const retrieval = asRecord(input.retrieval);
   return {
     enableMemoryAdd: booleanValue(input.enableMemoryAdd, DEFAULT_MEMMY_CONFIG.algorithm.enableMemoryAdd),
@@ -1264,6 +1298,11 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       )
     },
     l2Induction: {
+      mode: l2.mode === "legacy" ? "legacy" : "unified",
+      recallCosine: Math.max(-1, Math.min(1, numberValue(l2.recallCosine, 0.55))),
+      recallTopK: Math.max(1, Math.floor(numberValue(l2.recallTopK, 5))),
+      maxInputChars: Math.max(1_000, numberValue(l2.maxInputChars, 48_000)),
+      maxOutputTokens: Math.max(256, numberValue(l2.maxOutputTokens, 8_192)),
       useLlm: booleanValue(l2.useLlm, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.useLlm),
       minEpisodesForInduction: numberValue(l2.minEpisodesForInduction, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.minEpisodesForInduction),
       minEpisodesForActivation: numberValue(l2.minEpisodesForActivation, DEFAULT_MEMMY_CONFIG.algorithm.l2Induction.minEpisodesForActivation),
@@ -1319,6 +1358,13 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
       mergeMaxGapMs: numberValue(session.mergeMaxGapMs, DEFAULT_MEMMY_CONFIG.algorithm.session.mergeMaxGapMs),
       turnJudge: booleanValue(session.turnJudge, DEFAULT_MEMMY_CONFIG.algorithm.session.turnJudge),
       turnJudgeKeepInput: booleanValue(session.turnJudgeKeepInput, DEFAULT_MEMMY_CONFIG.algorithm.session.turnJudgeKeepInput)
+    },
+    l3FieldCognition: {
+      enabled: booleanValue(l3FieldCognition.enabled, DEFAULT_MEMMY_CONFIG.algorithm.l3FieldCognition.enabled),
+      inactiveRetentionDays: numberValue(
+        l3FieldCognition.inactiveRetentionDays,
+        DEFAULT_MEMMY_CONFIG.algorithm.l3FieldCognition.inactiveRetentionDays
+      )
     },
     retrieval: {
       tier1TopK: numberValue(retrieval.tier1TopK, DEFAULT_MEMMY_CONFIG.algorithm.retrieval.tier1TopK),

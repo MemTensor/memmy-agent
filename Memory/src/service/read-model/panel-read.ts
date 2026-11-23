@@ -551,6 +551,8 @@ export class PanelReadModel {
     }
     ensurePanelCache(this.deps.repos.db,["memories"]);
     const filter: MemoryFilter = {
+      // panelVisible uses the indexed facts, which already exclude derived spans.
+      // Keep counts and pages on that same projection without reparsing source JSON.
       panelSource: true,
       panelVisible: true,
       memoryLayer: input.layer,
@@ -589,6 +591,12 @@ export class PanelReadModel {
   }
 
   private displayItems(memories: ReturnType<Repositories["memories"]["getManyForPanel"]>,local=true) {
+    // The narrow list projection deliberately omits source-policy evidence.
+    // Resolve Skill redaction from authoritative vector-free display rows in
+    // one batch, then serialize the same small panel items as every other layer.
+    const skillRows = new Map(this.deps.repos.memories.getManyForDisplay(
+      memories.filter(memory => memory.memoryLayer === "Skill").map(memory => memory.id)
+    ).map(memory => [memory.id, memory]));
     const processingById = new Map(this.deps.repos.processing.getMany(memories.map((memory) => memory.id))
       .map((processing) => [processing.memoryId, processing]));
     const scopes = this.deps.repos.l3WorldModels.getScopesByMemoryIds(
@@ -606,7 +614,12 @@ export class PanelReadModel {
         .filter(memory => visibleEvidence.has(memory.id))
         .map((memory) => [memory.id, memory] as const)
     );
-    return memories.map((memory) => {
+    return memories.flatMap((rawMemory) => {
+      const authoritativeSkill = skillRows.get(rawMemory.id);
+      // A concurrent withdrawal may remove a Skill after the narrow list read.
+      // Never fall back to a row whose policy evidence has been projected away.
+      if (rawMemory.memoryLayer === "Skill" && !authoritativeSkill) return [];
+      const memory = this.deps.repos.projectMemoryForRead(authoritativeSkill ?? rawMemory);
         const listed = panelListItemFromMemory(
           this.deps.repos.memories.toListItem(memory),
           memory,
@@ -624,7 +637,7 @@ export class PanelReadModel {
           scope.memoryId === memory.id && scope.userId === memory.userId
           ? panelWorldModelScope(scope)
           : undefined;
-        return worldModelScope ? { ...item, worldModelScope } : item;
+        return [worldModelScope ? { ...item, worldModelScope } : item];
       });
   }
 

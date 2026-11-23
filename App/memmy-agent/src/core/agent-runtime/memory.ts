@@ -16,6 +16,9 @@ import { AgentHook, AgentHookContext } from "./hook.js";
 import { AgentRunner, AgentRunSpec } from "./runner.js";
 import { EditFileTool, ReadFileTool, WriteFileTool } from "./tools/filesystem.js";
 import { ToolRegistry } from "./tools/registry.js";
+import type { TurnModelCapabilities } from "../../providers/turn-model-capabilities.js";
+import type { RuntimeModelCapabilityCatalogState } from "../../providers/model-capability-catalog.js";
+import type { LLMRuntime } from "../../utils/llm-runtime.js";
 
 export const RAW_ARCHIVE_MAX_CHARS = 16_000;
 export const ARCHIVE_SUMMARY_MAX_CHARS = 8_000;
@@ -627,6 +630,8 @@ class AsyncLock {
 }
 
 type ConsolidatorInit = {
+  modelCapabilities?: TurnModelCapabilities;
+  capabilityCatalogState?: RuntimeModelCapabilityCatalogState;
   store: MemoryStore;
   provider: any;
   model: string;
@@ -651,6 +656,8 @@ export class Consolidator {
   store: MemoryStore;
   provider: any;
   model: string;
+  readonly modelCapabilities?: TurnModelCapabilities;
+  readonly capabilityCatalogState?: RuntimeModelCapabilityCatalogState;
   sessions: any;
   contextWindowTokens: number;
   maxCompletionTokens: number;
@@ -690,7 +697,7 @@ export class Consolidator {
     maxCompletionTokens?: number,
     consolidationRatio?: number,
   ) {
-    const init =
+    const init: ConsolidatorInit =
       initOrStore instanceof MemoryStore
         ? {
             store: initOrStore,
@@ -707,9 +714,11 @@ export class Consolidator {
     this.store = init.store;
     this.provider = init.provider;
     this.model = init.model;
+    this.modelCapabilities = init.modelCapabilities;
+    this.capabilityCatalogState = init.capabilityCatalogState;
     this.sessions = init.sessions;
-    this.contextWindowTokens = init.contextWindowTokens ?? 0;
-    this.maxCompletionTokens = init.maxCompletionTokens ?? init.provider?.generation?.maxTokens ?? 4096;
+    this.contextWindowTokens = init.modelCapabilities ? init.modelCapabilities.contextWindowTokens ?? 0 : init.contextWindowTokens ?? 0;
+    this.maxCompletionTokens = init.modelCapabilities ? init.modelCapabilities.maxTokens ?? 0 : init.maxCompletionTokens ?? init.provider?.generation?.maxTokens ?? 4096;
     this.consolidationRatio = init.consolidationRatio ?? 0.5;
     this.unifiedSession = init.unifiedSession ?? false;
     this.buildMessages = init.buildMessages ?? ((args: any) => args?.history ?? []);
@@ -744,8 +753,12 @@ export class Consolidator {
     provider: any,
     model: string,
     contextWindowTokens: number,
+    modelCapabilities?: TurnModelCapabilities,
+    capabilityCatalogState?: RuntimeModelCapabilityCatalogState,
   ): Consolidator {
     const scoped = new Consolidator({
+      modelCapabilities,
+      capabilityCatalogState,
       store: this.store,
       provider,
       model,
@@ -776,6 +789,7 @@ export class Consolidator {
   }
 
   get inputTokenBudget(): number {
+    if (this.modelCapabilities && (!this.modelCapabilities.contextWindowTokens || !this.modelCapabilities.maxTokens)) return 0;
     return this.contextWindowTokens - this.maxCompletionTokens - this.safetyBuffer;
   }
 
@@ -1002,6 +1016,7 @@ export class Consolidator {
       const chat = this.provider?.chatWithRetry ?? this.provider?.chatWithRetry;
       if (typeof chat !== "function") throw new Error("provider does not implement chatWithRetry");
       const response = await chat.call(this.provider, {
+        ...(this.modelCapabilities ? { modelCapabilities: this.modelCapabilities, capabilityCatalogState: this.capabilityCatalogState } : {}),
         model: this.model,
         messages: [
           {
@@ -1061,7 +1076,7 @@ export class Consolidator {
         replayMaxMessages,
       });
     };
-    if (this.contextWindowTokens <= 0) return result();
+    if (this.contextWindowTokens <= 0 || (this.modelCapabilities && this.inputTokenBudget <= 0)) return result();
     await this.emitBeforeCompaction(new AgentHookContext({
       sessionKey,
       session,
@@ -1199,7 +1214,7 @@ export class Consolidator {
         replayMaxMessages,
       });
     };
-    if (this.contextWindowTokens <= 0) return result();
+    if (this.contextWindowTokens <= 0 || (this.modelCapabilities && this.inputTokenBudget <= 0)) return result();
     await this.emitBeforeCompaction(new AgentHookContext({
       sessionKey,
       session,
@@ -1500,6 +1515,7 @@ export class Consolidator {
 }
 
 type DreamInit = {
+  resolveRuntime?: () => Promise<LLMRuntime>;
   store: MemoryStore;
   provider: any;
   model: string;
@@ -1524,6 +1540,7 @@ function skillCreatorPath(): string {
 }
 
 export class Dream {
+  private readonly resolveRuntime?: () => Promise<LLMRuntime>;
   memoryFileMaxChars = 32_000;
   soulFileMaxChars = 16_000;
   userFileMaxChars = 16_000;
@@ -1559,11 +1576,12 @@ export class Dream {
     maxToolResultChars?: number,
     annotateLineAges?: boolean,
   ) {
-    const init =
+    const init: DreamInit =
       initOrStore instanceof MemoryStore
         ? { store: initOrStore, provider, model: model ?? "", maxBatchSize, maxIterations, maxToolResultChars, annotateLineAges }
         : initOrStore;
     this.store = init.store;
+    this.resolveRuntime = init.resolveRuntime;
     this.provider = init.provider;
     this.model = init.model;
     this.maxBatchSize = init.maxBatchSize ?? 20;
@@ -1644,6 +1662,14 @@ export class Dream {
     const entries = this.store.readUnprocessedHistory(lastCursor);
     if (!entries.length) return false;
 
+    let runtime: LLMRuntime;
+    try {
+      runtime = this.resolveRuntime ? await this.resolveRuntime() : { provider: this.provider, model: this.model };
+    } catch {
+      return false;
+    }
+    const { provider, model, modelCapabilities, capabilityCatalogState } = runtime;
+
     const batch = entries.slice(0, this.maxBatchSize);
     const historyText = batch
       .map((entry) => `[${entry.timestamp ?? "?"}] ${truncateText(String(entry.content ?? ""), this.historyEntryPreviewMaxChars)}`)
@@ -1662,10 +1688,11 @@ export class Dream {
 
     let analysis = "";
     try {
-      const chat = this.provider?.chatWithRetry ?? this.provider?.chatWithRetry;
+      const chat = provider?.chatWithRetry;
       if (typeof chat !== "function") throw new Error("provider does not implement chatWithRetry");
-      const response = await chat.call(this.provider, {
-        model: this.model,
+      const response = await chat.call(provider, {
+        model,
+        ...(modelCapabilities ? { modelCapabilities, capabilityCatalogState } : {}),
         messages: [
           {
             role: "system",
@@ -1704,9 +1731,13 @@ export class Dream {
         new AgentRunSpec({
           messages,
           initialMessages: messages,
-          provider: this.provider,
+          provider,
+          modelCapabilities,
+          capabilityCatalogState,
+          contextWindowTokens: modelCapabilities?.contextWindowTokens,
+          reasoningEffort: modelCapabilities?.reasoningEffort,
           tools: this.tools,
-          model: this.model,
+          model,
           maxIterations: this.maxIterations,
           maxToolResultChars: this.maxToolResultChars,
           toolResultCompressionEnabled: this.toolResultCompressionEnabled,

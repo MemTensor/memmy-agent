@@ -126,12 +126,9 @@ describe("native source-turn historical scheduling through MemoryService", () =>
     }
     await settleCaptureAssignments(h.service);
     first.episodeId = assignedEpisodeId(h.service, first);
-    h.service["workerHandlers"].enqueueJob({ jobType: "episode_title", userId: namespace.userId,
+    const provisional = h.service["workerHandlers"].enqueueJob({ jobType: "episode_title", userId: namespace.userId,
       sessionId: first.sessionId, episodeId: first.episodeId, payload: { stage: "provisional" } });
-    const provisional = h.db.db.prepare("SELECT queue_lane,payload_json FROM evolution_jobs WHERE episode_id=? AND job_type='episode_title'")
-      .all(first.episodeId) as Array<{queue_lane: string;payload_json: string}>;
-    expect(provisional.length).toBeGreaterThan(0);
-    expect(provisional[0]!.queue_lane).toBe(kind === "history" ? "import" : "interactive");
+    expect(provisional.queueLane).toBe(kind === "history" ? "import" : "interactive");
     h.service.closeSession(first.sessionId);
     // A final title is only produced once capture decisions finish. Exercise the
     // same production enqueuer directly with the now-closed real episode.
@@ -257,6 +254,7 @@ describe("native source-turn historical scheduling through MemoryService", () =>
       toolCalls: [], toolResults: [] };
     const executor = createAgentSourceExecutor({
       service: h.service, configPath: join(h.root, "config.yaml"), statePath: join(h.root, "source-state.json"),
+      resolveAgentSkillRoot: () => null,
       sourceRegistry: createSourceRegistry([{
         descriptor: { sourceId: "codex", displayName: "Codex fixture", builtin: true, dataPath: h.root },
         async detect() { return true; },

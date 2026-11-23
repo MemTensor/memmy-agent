@@ -82,10 +82,10 @@ describe("model preset runtime", () => {
     expect(loop.dream?.model).toBe("openai/gpt-4.1");
   });
 
-  it("switches mapped token defaults without retaining the previous model budget", () => {
+  it("switches explicit token settings without retaining the previous model budget", () => {
     const loop = makeLoop({
-      large: modelPreset({ model: "gpt-5.6" }),
-      small: modelPreset({ model: "gpt-4o" }),
+      large: modelPreset({ model: "gpt-5.6", contextWindowTokens: 1_050_000, maxTokens: 128_000 }),
+      small: modelPreset({ model: "gpt-4o", contextWindowTokens: 128_000, maxTokens: 16_384 }),
     });
 
     loop.modelPreset = "large";

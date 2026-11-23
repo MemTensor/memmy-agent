@@ -4,6 +4,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ARCHIVE_SUMMARY_MAX_CHARS, Consolidator, MemoryStore } from "../../../src/core/agent-runtime/memory.js";
 import { Session, SessionManager } from "../../../src/core/session/manager.js";
+import { resolveTurnModelCapabilities } from "../../../src/providers/turn-model-capabilities.js";
+import type { RuntimeModelCapabilityCatalogState } from "../../../src/providers/model-capability-catalog.js";
 
 const roots: string[] = [];
 
@@ -68,6 +70,58 @@ afterEach(() => {
 });
 
 describe("Consolidator archive", () => {
+  it("uses the turn catalog limits and passes the same snapshot to archive requests", async () => {
+    const { provider: p, consolidator } = makeConsolidator();
+    const state: RuntimeModelCapabilityCatalogState = { mode: "catalog", catalog: {
+      catalogVersion: 21, models: { "gpt-4o": { inputModalities: ["text", "image"], contextWindowTokens: 128000, maxTokens: 16384 } }
+    } };
+    const capabilities = resolveTurnModelCapabilities({ state, model: "gpt-4o" });
+    const scoped = consolidator.withProviderSnapshot(p, "gpt-4o", 1000, capabilities, state);
+    expect(scoped.contextWindowTokens).toBe(128000);
+    expect(scoped.maxCompletionTokens).toBe(16384);
+    expect(scoped.inputTokenBudget).toBe(128000 - 16384 - scoped.safetyBuffer);
+    p.generation.maxTokens = 99999;
+    await scoped.archive([{ role: "user", content: "hello" }]);
+    expect(p.chatWithRetry).toHaveBeenCalledWith(expect.objectContaining({ model: "gpt-4o", modelCapabilities: capabilities, capabilityCatalogState: state }));
+    expect(scoped.maxCompletionTokens).toBe(16384);
+    expect(scoped.getLock("same-session")).toBe(consolidator.getLock("same-session"));
+  });
+
+  it.each([
+    { summaryMode: "text", mode: "provider-fallback" },
+    { summaryMode: "dag", mode: "provider-fallback" },
+    { summaryMode: "text", mode: "catalog" },
+    { summaryMode: "dag", mode: "catalog" },
+  ] as const)("does not invent token budgets or compress history when limits are unknown: $summaryMode/$mode", async ({ summaryMode, mode }) => {
+    const { provider: p, consolidator } = makeConsolidator();
+    consolidator.summaryMode = summaryMode;
+    const state: RuntimeModelCapabilityCatalogState = mode === "catalog"
+      ? { mode, catalog: { catalogVersion: 21, models: {} } }
+      : { mode, catalog: null };
+    const capabilities = resolveTurnModelCapabilities({ state, model: "gpt-4o" });
+    const scoped = consolidator.withProviderSnapshot(p, "gpt-4o", 128000, capabilities, state);
+    expect(scoped.contextWindowTokens).toBe(0);
+    expect(scoped.maxCompletionTokens).toBe(0);
+    expect(scoped.inputTokenBudget).toBe(0);
+    const session = new Session({ key: "cli:unknown-budget", messages: [{ role: "user", content: "hello" }] });
+    const before = JSON.stringify(session.messages);
+    expect(await scoped.maybeConsolidateByTokens(session)).toMatchObject({ changed: false, started: false });
+    expect(JSON.stringify(session.messages)).toBe(before);
+    expect(p.chatWithRetry).not.toHaveBeenCalled();
+    // Character caps protect archive storage independently of model token capabilities.
+    await scoped.archive(session.messages);
+    expect(p.chatWithRetry.mock.calls[0][0]).toMatchObject({ modelCapabilities: { mode } });
+    expect(p.chatWithRetry.mock.calls[0][0]).not.toHaveProperty("maxTokens");
+  });
+
+  it("does not infer a budget from only one explicitly configured token limit", async () => {
+    const { provider: p, consolidator } = makeConsolidator();
+    const state = { mode: "provider-fallback", catalog: null } as const;
+    const capabilities = resolveTurnModelCapabilities({ state, model: "gpt-4o", explicitGeneration: { contextWindowTokens: 128000 } });
+    const scoped = consolidator.withProviderSnapshot(p, "gpt-4o", 128000, capabilities, state);
+    expect(scoped.inputTokenBudget).toBe(0);
+    expect(await scoped.maybeConsolidateByTokens(new Session({ key: "cli:partial-budget" }))).toMatchObject({ changed: false, started: false });
+  });
   it("summarizes messages and appends to history", async () => {
     const { store, provider: p, consolidator } = makeConsolidator({ provider: provider("User fixed a bug in the auth module.") });
 

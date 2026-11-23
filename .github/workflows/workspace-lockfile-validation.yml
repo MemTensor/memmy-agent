@@ -1,0 +1,42 @@
+name: Workspace lockfile validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/workspace-lockfile-validation.yml"
+      - "package-lock.json"
+      - "**/package.json"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/workspace-lockfile-validation.yml"
+      - "package-lock.json"
+      - "**/package.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile:
+    name: npm ${{ matrix.npm }} workspace lockfile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node: 22
+            npm: 10.9.9
+          - node: 24
+            npm: 11.19.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Check manifests with npm's lockfile validator
+        # Validate the full workspace graph without compiling native dependencies.
+        run: npm exec --yes --package=npm@${{ matrix.npm }} -- npm ci --dry-run --ignore-scripts --no-audit --no-fund

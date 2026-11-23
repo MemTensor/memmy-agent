@@ -17,6 +17,23 @@ function log(db: MemoryDb, content: string, source = "codex") {
   return new Repositories(db.db).runtime.insertApiLog({ toolName: "memory_add", sourceAgent: source, inputJson: JSON.stringify({ content }), outputJson: "{}", success: true, durationMs: 3, calledAt: now });
 }
 describe("persistent panel projections", () => {
+  it("keeps internal spans and imported plugin registrations out of the shared panel projection", () => {
+    const db = new MemoryDb({ path: ":memory:" });
+    try {
+      addMemory(db, "ordinary");
+      addMemory(db, "span", { internal_info: { memory_kind: "span" } });
+      addMemory(db, "plugin", { internal_info: { source_kind: "plugin", read_only: true } });
+      db.db.prepare("UPDATE memories SET memory_layer='Skill' WHERE id='plugin'").run();
+      ensurePanelCache(db.db, ["memories"]);
+      expect([...panelMemoryStats(db.db)].map(row => row.id)).toEqual(["ordinary"]);
+      db.db.prepare("UPDATE memories SET properties_json=? WHERE id='ordinary'")
+        .run(JSON.stringify({ internal_info: { memory_kind: "span" } }));
+      ensurePanelCache(db.db, ["memories"]);
+      expect([...panelMemoryStats(db.db)]).toEqual([]);
+      // Projection exclusions do not delete source rows or remove them from recall storage.
+      expect(db.db.prepare("SELECT count(*) FROM memories").pluck().get()).toBe(3);
+    } finally { db.close(); }
+  });
   it("resumes committed batches after reopening and keeps source facts unchanged", () => {
     const root=mkdtempSync(join(tmpdir(),"panel-cache-resume-")),path=join(root,"memory.sqlite");
     const db=new MemoryDb({path});let reader=openCacheFixture(path);

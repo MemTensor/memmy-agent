@@ -1,6 +1,7 @@
 /** Definition for memory layer paths. */
 
 export const MEMORY_LAYER_PATHS = Object.freeze({
+  agentSourceConnectionState: "/api/v1/agent-sources/:sourceId/connection-state",
   agentSources: "/api/v1/agent-sources",
   agentSourceScan: "/api/v1/agent-sources/scan",
   agentSourceStatus: "/api/v1/agent-sources/scan/status",
@@ -18,9 +19,13 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   startTurn: "/api/v1/turns/start",
   completeTurn: "/api/v1/turns/:turnId/complete",
   completeSourceTurn: "/api/v1/source-turns/complete",
+  freezeScanSessions: "/api/v1/l3/scan-sessions/freeze",
   search: "/api/v1/memory/search",
   embeddingInference: "/api/v1/models/embedding/infer",
   addMemory: "/api/v1/memory/add",
+  reconcileAgentSkills: "/api/v1/agent-skills/reconcile",
+  archiveSkill: "/api/v1/skills/archive",
+  reactivateSkill: "/api/v1/skills/reactivate",
   getMemory: "/api/v1/memory/:id",
   deleteMemory: "/api/v1/memory/:id",
   approveObservedSkill: "/api/v1/evidence/skills/:id/approve",

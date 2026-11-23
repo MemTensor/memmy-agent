@@ -71,11 +71,13 @@ function fallback(
     contextWindowTokens = 200_000,
     temperature = 0.1,
     reasoningEffort = null,
+    inputModalities,
   }: {
     maxTokens?: number;
     contextWindowTokens?: number;
     temperature?: number;
     reasoningEffort?: string | null;
+    inputModalities?: string[];
   } = {},
 ): ModelPresetConfig {
   return new ModelPresetConfig({
@@ -88,6 +90,7 @@ function fallback(
     contextWindowTokens,
     temperature,
     reasoningEffort,
+    inputModalities,
   });
 }
 
@@ -547,7 +550,7 @@ describe("FallbackProvider failover", () => {
     const factory = vi.fn(() => new FakeProvider("fallback", makeResponse("must not run")));
     const provider = new FallbackProvider({
       primary,
-      fallbackPresets: [fallback("deepseek-v4-pro")],
+      fallbackPresets: [fallback("deepseek-v4-pro", "custom", { inputModalities: ["text"] })],
       providerFactory: factory,
     });
 
@@ -572,7 +575,7 @@ describe("FallbackProvider failover", () => {
     });
     const provider = new FallbackProvider({
       primary,
-      fallbackPresets: [fallback("deepseek-v4-pro"), fallback(model)],
+      fallbackPresets: [fallback("deepseek-v4-pro", "custom", { inputModalities: ["text"] }), fallback(model)],
       providerFactory: factory,
     });
 
@@ -592,7 +595,7 @@ describe("FallbackProvider failover", () => {
     const factory = vi.fn();
     const provider = new FallbackProvider({
       primary,
-      fallbackPresets: [fallback("deepseek-v4-pro")],
+      fallbackPresets: [fallback("deepseek-v4-pro", "custom", { inputModalities: ["text"] })],
       providerFactory: factory,
     });
     provider.primaryFailures = 3;

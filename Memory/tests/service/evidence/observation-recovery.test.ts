@@ -76,7 +76,7 @@ describe("History recovery across runtime lifecycle", () => {
       service = createTestMemoryService({ db, mode: "dev", config: DEFAULT_MEMMY_CONFIG,
         configLoader: () => ({ config: DEFAULT_MEMMY_CONFIG }), llm, skillLlm });
       // Exercise the actual HTTP startup worker used by a newly activated runtime.
-      const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 0 });
+      const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 0 });
       servers.push(server);
       await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
     } else {

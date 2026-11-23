@@ -7,6 +7,7 @@ import {
   type HealthStatus,
   type ScanPreferences
 } from "@memmy/local-api-contracts";
+import { scanPreferencesWriter } from "../api/scan-preferences-writer.js";
 import { ApiRequestError } from "../api/http.js";
 import type { AppClients } from "../api/client-types.js";
 import {
@@ -308,10 +309,13 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
   useEffect(() => {
     if (!clients) return;
     let active = true;
+    const writer = scanPreferencesWriter(clients.config);
     const refresh = () => {
+      const revision = writer.revision;
+      if (!writer.canRefresh(revision)) return;
       void clients.config.getScanPreferences()
         .then((preferences) => {
-          if (active) dispatch(appActions.scanPreferencesUpdated(preferences));
+          if (active && writer.canRefresh(revision)) dispatch(appActions.scanPreferencesUpdated(preferences));
         })
         .catch(() => undefined);
     };
@@ -507,13 +511,14 @@ export function MemorySourcesContent(props: MemorySourcesContentProps = {}) {
       return;
     }
 
-    void clients.config
-      .updateScanPreferences(preferences)
-      .then((persisted) => dispatch(appActions.scanPreferencesUpdated(persisted)))
-      .catch((error) => {
-        dispatch(appActions.scanPreferencesUpdated(previous));
-        dispatch(appActions.agentSourcesFailed(error instanceof Error ? error.message : String(error)));
-      });
+    void scanPreferencesWriter(clients.config).write({
+      patch: preferences,
+      previous,
+      permission: state.bootstrap?.onboarding.scanPermission ?? "unset",
+      onOnboarding: (onboarding) => dispatch(appActions.onboardingUpdated(onboarding)),
+      onConfirmed: (persisted) => dispatch(appActions.scanPreferencesUpdated(persisted)),
+      onError: (error) => dispatch(appActions.agentSourcesFailed(error instanceof Error ? error.message : String(error)))
+    });
   }
 
   function continueScan() {
@@ -1513,9 +1518,9 @@ function SourceStatusBadge(props: { source: Pick<AgentSourceView, "sourceId" | "
 const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes", "deepseek_harness"]);
 const HOOK_AGENT_SOURCE_IDS = new Set(["codex", "claude_code", "cursor"]);
 
-export function visibleAgentSources<T extends Pick<AgentSourceView, "builtin" | "available" | "dataPath">>(sources: readonly T[]): T[] {
+export function visibleAgentSources<T extends Pick<AgentSourceView, "builtin" | "available" | "dataPath" | "status">>(sources: readonly T[]): T[] {
   return sources.filter((source) => source.builtin
-    ? source.available
+    ? source.available || source.status === "skill_installed" || source.status === "plugin_installed"
     : source.dataPath !== MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH
   );
 }

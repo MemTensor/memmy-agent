@@ -309,9 +309,12 @@ describe("worker business failure policy", () => {
       .toEqual({ code: "model_configuration", retryAction: "open_settings" });
   });
 
-  it("preserves the explicit 40309 business error before retryable HTTP status classification", () => {
+  it("preserves the explicit quota business error before retryable HTTP status classification", () => {
+    expect(classifyProcessingError(new ModelHttpError("provider request failed", "test", 429, "40308",
+      "API key quota exhausted", undefined, "insufficient_quota", "quota_exhausted")))
+      .toEqual({ code: "quota_exhausted", retryAction: "open_settings" });
     expect(classifyProcessingError(new ModelHttpError("provider request failed", "test", 429, "40309", "API key quota exhausted")))
-      .toEqual({ code: "40309", retryAction: "open_settings" });
+      .toEqual({ code: "quota_exhausted", retryAction: "open_settings" });
   });
 
   it("does not apply a transient HTTP failure after the execution loses its lease", async () => {

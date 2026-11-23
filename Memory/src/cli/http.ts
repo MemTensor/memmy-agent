@@ -17,15 +17,15 @@ export interface CliRequest {
 
 export async function sendRequest(request: CliRequest, options: CliRequestOptions = {}): Promise<unknown> {
   const fetchImpl = options.fetch ?? fetch;
-  const baseUrl = resolveBaseUrl(options);
-  const url = new URL(withApiPrefix(request.path), baseUrl);
+  const { config } = loadCliMemoryConfig(options.configPath, options.url);
+  const url = new URL(withApiPrefix(request.path), config.endpoint ?? DEFAULT_MEMORY_URL);
   for (const [key, value] of Object.entries(request.query ?? {})) {
     if (value !== undefined && value !== "") {
       url.searchParams.set(key, String(value));
     }
   }
 
-  const token = resolveToken(options);
+  const token = options.token || config.token;
   const headers: Record<string, string> = {
     ...(options.headers ?? {})
   };
@@ -62,22 +62,6 @@ export function withApiPrefix(path: string): string {
     return normalized;
   }
   return `/api/v1${normalized}`;
-}
-
-function resolveBaseUrl(options: CliRequestOptions): string {
-  if (options.url) {
-    return options.url;
-  }
-  const { config } = loadCliMemoryConfig(options.configPath);
-  return config.endpoint ?? DEFAULT_MEMORY_URL;
-}
-
-function resolveToken(options: CliRequestOptions): string | undefined {
-  if (options.token) {
-    return options.token;
-  }
-  const { config } = loadCliMemoryConfig(options.configPath);
-  return config.token;
 }
 
 function errorMessage(payload: unknown): string | undefined {

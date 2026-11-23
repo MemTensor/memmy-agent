@@ -20,6 +20,18 @@ async function drain(service: ReturnType<typeof fixture.createTestService>["serv
   }
 }
 
+async function drainUntil(
+  service: ReturnType<typeof fixture.createTestService>["service"],
+  done: () => boolean,
+  description: string
+) {
+  for (let round = 0; round < 32 && !done(); round++) {
+    await drain(service, 1);
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  expect(done(), description).toBe(true);
+}
+
 
 describe("raw-first independent L1 and Episode processing", () => {
   it.each([true, false])("preserves the original capture model contract after exhausted retries and restart (%s)", async enabled => {
@@ -37,16 +49,67 @@ describe("raw-first independent L1 and Episode processing", () => {
     const { service, db } = fixture.createTestService({ llm, config });
     const { sessionId } = service.openSession({});
     const saved = await service.completeTurn("retry-contract", { sessionId, query: "Persist the original capture contract", answer: "Verified outcome" });
-    await drain(service);
+    const summaryStatus = () => (db.db.prepare(
+      "SELECT status FROM evolution_jobs WHERE job_type='trace_summary' AND target_memory_id=?"
+    ).get(saved.l1MemoryId) as { status: string } | undefined)?.status;
+    await drainUntil(service, () => summaryStatus() === "dead_letter", "capture retries reach dead_letter");
     expect(db.db.prepare("SELECT status FROM evolution_jobs WHERE job_type='trace_summary'").get()).toEqual({ status: "dead_letter" });
     fail = false;
     const restored = fixture.createTestMemoryService({ db: new MemoryDb({ path: db.path }), llm, config });
-    restored.reconcileWorkerStartup(); await drain(restored);
+    restored.reconcileWorkerStartup();
+    await drainUntil(restored, () => restored.memoryProcessingStatus([saved.l1MemoryId]).items[0]?.state === "ready",
+      "restored capture completes");
     expect(captureInputs.at(-1)).toBe(captureInputs[0]);
     expect(judgeCalls).toHaveLength(enabled ? 1 : 0);
     expect(db.db.prepare("SELECT state FROM memory_processing_state WHERE memory_id=?").get(saved.l1MemoryId)).toEqual({ state: "ready" });
     expect(db.db.prepare("SELECT count(*) AS n FROM raw_turns").get()).toEqual({ n: 1 });
   });
+  it.each([true, false])("completes capture while wrong-language titles retry (%s)", async enabled => {
+    const { llm } = createTurnJudgeLlm();
+    const select = llm.completeJson;
+    const title = llm.complete;
+    llm.completeJson = async <T extends Record<string, unknown>>(
+      messages: Parameters<typeof select>[0], options: Parameters<typeof select>[1]
+    ): Promise<T> => {
+      const result = await select<T>(messages, options);
+      return options.operation === "episode.select.v1"
+        ? { ...result, title: "中文标题", summary: "中文摘要。" }
+        : result;
+    };
+    let wrongLanguage = true;
+    llm.complete = async (messages, options) => wrongLanguage && options.operation.startsWith("episode_title")
+      ? JSON.stringify({ title: "中文标题", summary: "中文摘要。" })
+      : title(messages, options);
+    const { service, db } = fixture.createTestService({ llm, config: { ...turnJudgeConfig(enabled), language: "en-US" } });
+    const repos = new Repositories(db.db);
+    const { sessionId } = service.openSession({});
+    const saved = await service.completeTurn("wrong-language", {
+      sessionId, query: "Fix the cache", answer: "Cache fixed"
+    });
+    const titleJob = () => db.db.prepare(
+      "SELECT id,status,last_error FROM evolution_jobs WHERE job_type='episode_title' AND session_id=?"
+    ).get(sessionId) as { id: string; status: string; last_error: string } | undefined;
+    await drainUntil(service, () => titleJob()?.status === "failed"
+      && service.memoryProcessingStatus([saved.l1MemoryId]).items[0]?.state === "ready",
+    "title failure does not prevent capture completion");
+    const episodeId = repos.runtime.getRawTurn(saved.rawTurnId)?.episodeId;
+    expect(episodeId).toBeTruthy();
+    expect(repos.runtime.getEpisode(episodeId!)?.title).toBeFalsy();
+    expect(titleJob()?.last_error).toContain("episode title language does not match en");
+    expect(db.db.prepare(
+      "SELECT job_type,status FROM evolution_jobs WHERE session_id=? AND job_type IN ('episode_assignment','trace_summary') ORDER BY job_type"
+    ).all(sessionId)).toEqual([
+      { job_type: "episode_assignment", status: "succeeded" }, { job_type: "trace_summary", status: "succeeded" }
+    ]);
+    const titleJobId = titleJob()!.id;
+    wrongLanguage = false;
+    await drainUntil(service, () => titleJob()?.status === "succeeded", "title retry succeeds in English");
+    expect(titleJob()?.id).toBe(titleJobId);
+    expect(repos.runtime.getRawTurn(saved.rawTurnId)?.episodeId).toBe(episodeId);
+    expect(repos.runtime.getEpisode(episodeId!)).toMatchObject({ title: "Test task title", summary: "Test task summary." });
+    expect(service.memoryProcessingStatus([saved.l1MemoryId]).items[0]?.state).toBe("ready");
+  });
+
   it.each([true, false].flatMap(enabled => (["negative", "positive"] as const).map(polarity => ({ enabled, polarity }))))(
     "defers feedback evolution until attribution and preserves it across recovery ($enabled, $polarity)", async ({ enabled, polarity }) => {
     const { llm } = createTurnJudgeLlm();

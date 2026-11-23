@@ -1,8 +1,10 @@
 /** Memmy local API contract. */
 import { z } from "zod";
 import { ModelThinkingConfigSchema } from "./model-thinking-levels.js";
+import { ModelCapabilityCatalogSchema } from "./model-capability-catalog.js";
 import { PluginCapabilityEventPayloadSchema } from "./plugin.js";
 export * from "@memmy/agent-source-core/scan-state";
+export { resolveMemoryConnection, sameHttpOrigin } from "@memmy/agent-source-core/memory-connection";
 
 export const ScanVersionSchema = z.object({ generation: z.number().int().nonnegative(), sequence: z.number().int().nonnegative() });
 export const ScanLifecycleSchema = z.enum(["idle", "running", "paused", "completed", "failed", "cancelled"]);
@@ -12,7 +14,9 @@ import { normalizeOutputLanguage } from "./output-language.js";
 export { normalizeOutputLanguage } from "./output-language.js";
 
 export * from "./model-catalog-resolver.js";
+export * from "./model-capability-catalog.js";
 export * from "./model-thinking-levels.js";
+export { anthropicRequestModelId } from "./anthropic-model-id.js";
 
 export * from "./memory-runtime.js";
 export * from "./memory-canonical-json.js";
@@ -1224,6 +1228,7 @@ export type MemoryRuntimeModelSettings = z.infer<typeof MemoryRuntimeModelSettin
 
 /** Schema for model config view. */
 export const ModelConfigViewSchema = z.object({
+    capabilityCatalog: ModelCapabilityCatalogSchema.optional(),
     /** Write-response-only aliases, resolved by the server using real credentials. */
     endpointAliases: z.record(z.string(), z.record(z.string(), z.string())).optional(),
     configRevision: z.string().min(1),
@@ -1813,7 +1818,15 @@ export const PluginCapabilitySnapshotSseEventSchema = z.object({
     })
 });
 
+export const ModelCapabilityCatalogUpdatedSseEventSchema = z.object({
+    id: z.string(),
+    type: z.literal("model_catalog.updated"),
+    timestamp: z.string().datetime(),
+    payload: z.object({ catalogVersion: z.number().int().positive().safe() })
+});
+
 export const SseEventSchema = z.discriminatedUnion("type", [
+    ModelCapabilityCatalogUpdatedSseEventSchema,
     ConnectedSseEventSchema,
     HeartbeatSseEventSchema,
     ScanProgressSseEventSchema,

@@ -22,6 +22,8 @@ describe("local agent memory smoke plan", () => {
     expect(result.memoryIds).toEqual([result.memoryId]);
     expect(result.recallHitCount).toBe(1);
     expect(result.panelItemCount).toBe(1);
+    expect(result.l3ProcessedMemoryIds).toEqual(result.memoryIds);
+    expect(result.l3UpdateCalls).toBeGreaterThan(0);
   });
 
   it("keeps the executable local-Agent and Cursor smoke entrypoints wired", () => {

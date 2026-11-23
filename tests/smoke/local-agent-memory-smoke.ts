@@ -51,6 +51,8 @@ export interface LocalAgentMemorySmokeResult {
   scannedMessages: number;
   memoryId: string;
   memoryIds: string[];
+  l3ProcessedMemoryIds: string[];
+  l3UpdateCalls: number;
   recallHitCount: number;
   panelItemCount: number;
 }
@@ -102,11 +104,37 @@ export async function runLocalAgentMemorySmoke(
 
     db = new MemoryDb({ path: memoryDbPath });
     const { llm } = createTurnJudgeLlm();
+    const complete = llm.complete.bind(llm);
+    let l3UpdateCalls = 0;
+    llm.complete = async (messages, options) => {
+      if (options.operation === "l3_field.unit_update") {
+        l3UpdateCalls += 1;
+        return JSON.stringify({
+          reason: "The synthetic release checklist contains no durable machine or project facts.",
+          ops: []
+        });
+      }
+      return complete(messages, options);
+    };
+    const homeDir = join(root, "home");
+    mkdirSync(homeDir, { recursive: true });
     const service = new MemoryService({
       db,
       mode: "dev",
       config,
       configLoader: () => ({ config, path: configPath }),
+      l3FieldEnvironment: () => ({ machineId: "a".repeat(64), homeDir, tempRoots: [root] }),
+      l3MachineProbe: async () => ({
+        os: "linux",
+        osVersion: "1.0.0",
+        arch: "x64",
+        shell: "sh",
+        tools: {
+          node: "22.0.0", python3: null, git: null, npm: null, brew: null,
+          pnpm: null, yarn: null, uv: null, conda: null, docker: null,
+          java: null, go: null, rustc: null
+        }
+      }),
       llm,
       skillLlm: llm,
       embedder: createSmokeEmbedder(),
@@ -128,7 +156,8 @@ export async function runLocalAgentMemorySmoke(
     const memoryIdsBySource = readImportedMemoryIds(service, fixtures);
     const memoryIds = sourceIds.map((sourceId) => requireMapValue(memoryIdsBySource, sourceId));
     assertImportedDetails(service, fixtures, memoryIdsBySource);
-    await drainImportedMemoryWorkers(service, memoryIds);
+    const l3ProcessedMemoryIds = await drainImportedMemoryWorkers(service, db, memoryIds);
+    assert(l3UpdateCalls > 0, "Scanned source memories must invoke the new L3 unit update model");
     for (const memoryId of memoryIds) {
       assert(service.getMemory(memoryId).status === "activated", "Processed source memory must be activated");
     }
@@ -248,6 +277,8 @@ export async function runLocalAgentMemorySmoke(
       scannedMessages,
       memoryId: firstMemoryId,
       memoryIds,
+      l3ProcessedMemoryIds: memoryIds.filter((id) => l3ProcessedMemoryIds.has(id)),
+      l3UpdateCalls,
       recallHitCount: directHits.length,
       panelItemCount
     };
@@ -592,7 +623,11 @@ function assertSerializedDetailIsRedacted(detail: unknown, fixture: SyntheticSou
   assert(!serialized.includes(fixture.rawSecret), `${fixture.sourceId} detail must not expose the raw synthetic secret`);
 }
 
-async function drainImportedMemoryWorkers(service: MemoryService, memoryIds: readonly string[]): Promise<void> {
+async function drainImportedMemoryWorkers(
+  service: MemoryService,
+  db: MemoryDb,
+  memoryIds: readonly string[]
+): Promise<Set<string>> {
   for (let cycle = 0; cycle < 12; cycle += 1) {
     const states = service.memoryProcessingStatus(memoryIds).items;
     const failed = states.find((item) => item.state === "failed");
@@ -600,19 +635,27 @@ async function drainImportedMemoryWorkers(service: MemoryService, memoryIds: rea
       !failed,
       `Imported memory processing failed for ${failed?.memoryId ?? "unknown"}: ${failed?.errorCode ?? "unknown"} ${failed?.errorMessage ?? ""}`
     );
+    const appliedBatches = db.db.prepare(
+      "SELECT l1_memory_ids_json FROM l3_unit_batches WHERE status = 'applied'"
+    ).all() as Array<{ l1_memory_ids_json: string }>;
+    const l3ProcessedMemoryIds = new Set(appliedBatches.flatMap((batch) =>
+      JSON.parse(batch.l1_memory_ids_json) as string[]
+    ));
     if (
       states.length === memoryIds.length &&
-      states.every((item) => item.state === "ready" || item.state === "ready_text_only")
+      states.every((item) => item.state === "ready" || item.state === "ready_text_only") &&
+      memoryIds.every((id) => l3ProcessedMemoryIds.has(id))
     ) {
-      return;
+      return l3ProcessedMemoryIds;
     }
-    // Native captures also queue episode assignment jobs without a target memory id.
+    // Native captures also queue episode assignment and L3 jobs without a target memory id.
     const worker = await service.runWorkerOnce(20);
     assert(worker.failed === 0, "Imported memory worker jobs must not fail");
     assert(worker.embeddingRetries.failed === 0, "Imported memory embedding retries must not fail");
   }
   const states = service.memoryProcessingStatus(memoryIds).items;
-  throw new Error(`Imported memories did not reach a ready state: ${JSON.stringify(states)}`);
+  const l3Batches = db.db.prepare("SELECT status, l1_memory_ids_json FROM l3_unit_batches").all();
+  throw new Error(`Imported memories did not reach a ready L1/L3 state: ${JSON.stringify({ memories: states, l3Batches })}`);
 }
 
 interface ExecutorSourceStateSnapshot {

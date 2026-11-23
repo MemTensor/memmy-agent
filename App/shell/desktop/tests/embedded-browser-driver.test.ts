@@ -4,10 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { expect, it, vi } from 'vitest';
-import { EMBEDDED_BROWSER_REQUEST, parseEmbeddedBrowserTabMention,
+import { EMBEDDED_BROWSER_REQUEST, parseEmbeddedBrowserTabMention, normalizeBrowserCdpReadCall,
   type EmbeddedBrowserRequest } from '@memmy/local-api-contracts';
 import { EmbeddedBrowserDriver } from '../src/main/embedded-browser-driver.js';
 import { BrowserHistoryStore } from '../src/main/browser-history-store.js';
+import { runApprovedEmbeddedCdpRead } from '../src/main/browser-embedded-cdp-access.js';
 
 function harness(selected = true) {
   let url = 'https://example.com/';
@@ -59,6 +60,21 @@ function harness(selected = true) {
     focusFrame: (frame: { frameTreeNodeId: number } | null) => { focusedFrame = frame; },
     navigate: (target: string) => { url = target; }, focus: (value: boolean) => { focused = value; } };
 }
+
+it.each([
+  ['Runtime.evaluate', { expression: '1+1' }],
+  ['DOM.getDocument', { depth: 2 }],
+])('passes normalized %s through embedded approval and driver validation', async (method, params) => {
+  const { driver, request, sendCommand } = harness();
+  try {
+    await driver.handle(request('allowOrigin', { origin: 'https://example.com' }));
+    const call = normalizeBrowserCdpReadCall(method, params);
+    await runApprovedEmbeddedCdpRead(request('cdpCall', call), driver, async () => true,
+      () => true, () => true);
+    expect(sendCommand.mock.calls.filter(([sentMethod]) => sentMethod === method))
+      .toEqual([[method, call.params]]);
+  } finally { driver.dispose(); }
+});
 
 it('keeps inactive guests and history without selecting or losing an approved background tab', async () => {
   const { driver, guest, host, browserSession } = harness(false);

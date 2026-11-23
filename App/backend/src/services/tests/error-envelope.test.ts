@@ -78,6 +78,32 @@ describe("withErrorEnvelope", () => {
     });
   });
 
+  it("preserves the upstream Memory request id separately from the local request id", async () => {
+    app = Fastify({ logger: false });
+    app.post(
+      "/fail",
+      withErrorEnvelope(async () => {
+        throw new MemoryLayerError("memory_starting", 503, "Memory is starting", undefined, "memory-req-1");
+      })
+    );
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/fail",
+      payload: { requestId: "desktop-req-1" }
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({
+      error: {
+        code: "memory_starting",
+        message: "Memory is starting",
+        requestId: "desktop-req-1",
+        upstreamRequestId: "memory-req-1"
+      }
+    });
+  });
+
   it("maps ordinary errors to internal", async () => {
     app = Fastify({ logger: false });
     app.post(

@@ -8,7 +8,7 @@ import {
   resolveOpenclawConfigPath,
   resolveOpenclawStateDirectory
 } from "../../agent-paths.js";
-import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import { pathExists, removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
@@ -75,10 +75,16 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
       const workspace = await resolveOpenclawWorkspaceDirectory(root, configPath, deps.workspaceDirectory);
       const filePath = join(workspace, TARGET_FILE_NAME);
       const existing = await readTextFile(filePath);
-      if (existing.includes(START_MARKER)) {
-        await writeFileAtomically(filePath, removeMarkerBlock(existing));
-      }
+      const next = removeMarkerBlock(removeCliMarkerBlock(existing));
+      if (next !== existing) await writeFileAtomically(filePath, next);
       await removeMemmySkillDirectory(root);
+    },
+
+    async isLegacySkillInstalled() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      const workspace = await resolveOpenclawWorkspaceDirectory(root, configPath, deps.workspaceDirectory);
+      return (await readTextFile(join(workspace, TARGET_FILE_NAME))).includes(LEGACY_CLI_START_MARKER);
     },
 
     async isInstalled(_targetId) {
@@ -89,6 +95,13 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
 
       const workspace = await resolveOpenclawWorkspaceDirectory(root, configPath, deps.workspaceDirectory);
       return (await readTextFile(join(workspace, TARGET_FILE_NAME))).includes(START_MARKER);
+    },
+
+    async isPluginInstalled() {
+      if (await pathExists(join(rootDirectory, "extensions", PLUGIN_DIRECTORY_NAME, "index.mjs"))) return true;
+      const config = await readJsonConfig(configPath);
+      const plugins = toMutableRecord(config.plugins);
+      return PLUGIN_ID in toMutableRecord(plugins.entries) || PLUGIN_ID in toMutableRecord(plugins.installs);
     },
 
     async installPlugin(_targetId) {
@@ -139,7 +152,7 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
 
       await rm(join(root, "extensions", PLUGIN_DIRECTORY_NAME), { recursive: true, force: true });
       await removeOpenclawPluginConfig(configPath);
-      await removeMemmySkillDirectory(root);
+      await this.uninstall(_targetId);
     },
 
     async detectMemoryPluginConflict() {
@@ -403,11 +416,11 @@ function upsertMarkerBlock(existing: string, manifest: SkillManifest): string {
 }
 
 function removeMarkerBlock(existing: string): string {
-  return existing.replace(createMarkerBlockPattern(START_MARKER), "");
+  return existing.replace(new RegExp(createMarkerBlockPattern(START_MARKER), "gm"), "");
 }
 
 function removeCliMarkerBlock(existing: string): string {
-  return existing.replace(createMarkerBlockPattern(LEGACY_CLI_START_MARKER, LEGACY_CLI_END_MARKER), "");
+  return existing.replace(new RegExp(createMarkerBlockPattern(LEGACY_CLI_START_MARKER, LEGACY_CLI_END_MARKER), "gm"), "");
 }
 
 function renderMarkerBlock(manifest: SkillManifest): string {
@@ -415,7 +428,7 @@ function renderMarkerBlock(manifest: SkillManifest): string {
 }
 
 function createMarkerBlockPattern(startMarker: string, endMarker = END_MARKER): RegExp {
-  return new RegExp(`${escapeRegExp(startMarker)}\\n[\\s\\S]*?${escapeRegExp(endMarker)}\\n?`, "m");
+  return new RegExp(`${escapeRegExp(startMarker)}\\r?\\n[\\s\\S]*?${escapeRegExp(endMarker)}(?:\\r?\\n)?`, "m");
 }
 
 async function writeFileAtomically(filePath: string, content: string): Promise<void> {

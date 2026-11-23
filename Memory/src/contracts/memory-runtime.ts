@@ -57,6 +57,7 @@ export const JobTypeSchema = z.enum([
   "l2_induction",
   "l3_abstraction",
   "l3_world_model_update",
+  "l3_unit_update",
   "project_environment_profile",
   "skill_crystallization",
   "skill_cluster_assign",
@@ -158,7 +159,9 @@ export type RecallEvidenceOutput = z.infer<typeof RecallEvidenceOutputSchema>;
 export const MemoryMetricsSchema = z.object({
   value: z.number().optional(),
   alpha: z.number().optional(),
-  reflectionDone: z.boolean()
+  reflectionDone: z.boolean(),
+  valuePending: z.boolean().optional(),
+  alphaPending: z.boolean().optional()
 });
 export type MemoryMetrics = z.infer<typeof MemoryMetricsSchema>;
 
@@ -425,6 +428,7 @@ export const StartTurnInputSchema = RuntimeRequestFieldsSchema.extend({
   query: NonEmptyStringSchema,
   turnId: NonEmptyStringSchema.optional(),
   contextHints: UnknownRecordSchema.optional(),
+  /** Estimated recalled-context token limit; fixed task instructions are exempt. Default: 1800. */
   contextBudget: z.number().int().nonnegative().optional()
 });
 export type StartTurnInput = z.infer<typeof StartTurnInputSchema>;
@@ -491,6 +495,7 @@ export const SearchInputSchema = RuntimeRequestFieldsSchema.extend({
   episodeId: z.string().optional(),
   turnId: z.string().optional(),
   layers: z.array(MemoryLayerSchema).optional(),
+  recordEvent: z.boolean().optional(),
   verbose: z.boolean().optional()
 });
 export type SearchInput = z.infer<typeof SearchInputSchema>;
@@ -1012,6 +1017,9 @@ export const ApiErrorCodeSchema = z.enum([
   "rate_limited",
   "internal",
   "memory_layer_unavailable",
+  "memory_starting",
+  "memory_upgrading",
+  "memory_scan_upgrade_required",
   "missing_idempotency_key",
   "idempotency_body_mismatch",
   "scan_not_permitted",
@@ -1022,7 +1030,8 @@ export const ApiErrorCodeSchema = z.enum([
   "toolkit_unsupported",
   "model_config_changed",
   "config_write_busy",
-  "account_model_preset_conflict"
+  "account_model_preset_conflict",
+  "plugin_entitlement_required"
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 
@@ -1031,7 +1040,8 @@ export const ApiErrorBodySchema = z.object({
   error: z.object({
     code: ApiErrorCodeSchema,
     message: z.string(),
-    requestId: NonEmptyStringSchema
+    requestId: NonEmptyStringSchema.optional(),
+    upstreamRequestId: NonEmptyStringSchema.optional()
   })
 });
 export type ApiErrorBody = z.infer<typeof ApiErrorBodySchema>;

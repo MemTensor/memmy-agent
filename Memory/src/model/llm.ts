@@ -1,4 +1,6 @@
 import { get_encoding } from "tiktoken";
+import { randomUUID } from "node:crypto";
+import { openCodeGoLlmHeaders } from "./opencode-go.js";
 import { MEMORY_SUMMARY_MAX_TOKENS, type LlmConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { resolveMemoryAgentRegion } from "./agent-region.js";
@@ -13,6 +15,7 @@ import {
 import type { LlmClient, LlmCompletionOptions, LlmMessage, ModelStatus } from "./types.js";
 
 const logger = createMemoryLogger("llm");
+const PROCESS_FALLBACK_SESSION_ID = randomUUID();
 
 interface OpenAiResponsesResponse {
   status?: string;
@@ -92,6 +95,7 @@ interface ThinkingControl {
 let summaryEncoder: ReturnType<typeof get_encoding> | undefined;
 
 export interface CreateLlmClientOptions {
+  fallbackSessionId?: string;
   modelRole?: MemoryLlmModelRole;
   onBudgetedUsage?: (event: MemoryModelUsageEvent) => void;
   usageRecorder?: MemoryTokenUsageSink;
@@ -111,6 +115,11 @@ class HttpLlmClient implements LlmClient {
     this.usageRecorder = options.usageRecorder ?? new HttpByokTokenUsageRecorder({
       onBudgetedUsage: options.onBudgetedUsage
     });
+  }
+
+  private providerHeaders(options: LlmCompletionOptions): Record<string, string> {
+    return openCodeGoLlmHeaders(this.config,
+      options.sessionId ?? this.options.fallbackSessionId ?? PROCESS_FALLBACK_SESSION_ID);
   }
 
   isConfigured(): boolean {
@@ -201,6 +210,13 @@ class HttpLlmClient implements LlmClient {
     const retryTokenCeiling = typeof options.retryTokenCeiling === "number"
       && Number.isFinite(options.retryTokenCeiling) && options.retryTokenCeiling > 0
       ? Math.floor(options.retryTokenCeiling) : undefined;
+    const mandatoryThinkingSummary = options.operation === "capture.summarize"
+      && isMiniMaxM31FlashThinkingOnlyModel(this.config.model ?? "");
+    if (mandatoryThinkingSummary) {
+      // Mandatory thinking shares the output budget with the summary text.
+      maxTokens = Math.min(SUMMARY_OUTPUT_TOKEN_LIMIT, retryTokenCeiling ?? SUMMARY_OUTPUT_TOKEN_LIMIT,
+        Math.max(maxTokens ?? MEMORY_SUMMARY_MAX_TOKENS, 2_048));
+    }
     let jsonAttempt = 0;
 
     while (true) {
@@ -224,10 +240,12 @@ class HttpLlmClient implements LlmClient {
       );
       const expandedMaxTokens = truncated && !lengthRetryUsed
         ? doubleMaxTokens(maxTokens, Math.min(retryTokenCeiling ?? Number.MAX_SAFE_INTEGER,
-          this.options.modelRole === "memory_summary" ? SUMMARY_OUTPUT_TOKEN_LIMIT : Number.MAX_SAFE_INTEGER))
+          this.options.modelRole === "memory_summary" || mandatoryThinkingSummary
+            ? SUMMARY_OUTPUT_TOKEN_LIMIT : Number.MAX_SAFE_INTEGER))
         : undefined;
       const cappedLengthRetry = truncated && !lengthRetryUsed && retryTokenCeiling !== undefined
-        && maxTokens !== undefined && Number.isFinite(maxTokens) && maxTokens > 0;
+        && maxTokens !== undefined && Number.isFinite(maxTokens) && maxTokens > 0
+        && (!mandatoryThinkingSummary || Boolean(result.text.trim()));
       if (expandedMaxTokens !== undefined || cappedLengthRetry) {
         const nextMaxTokens = expandedMaxTokens ?? Math.min(maxTokens!, retryTokenCeiling!);
         logger.warn("json.truncated_retry", {
@@ -251,7 +269,13 @@ class HttpLlmClient implements LlmClient {
         continue;
       }
 
-      if (parseError === undefined && parsed !== undefined) {
+      const truncationError = truncated && mandatoryThinkingSummary && !result.text.trim()
+        ? new Error("Reasoning exhausted the summary output token budget")
+        : truncated && (options.requireCompleteJson || mandatoryThinkingSummary)
+          ? new Error("LLM JSON output remained truncated after length retry")
+          : undefined;
+
+      if (!truncationError && parseError === undefined && parsed !== undefined) {
         if (jsonAttempt > 1) {
           logger.info("json.recovered", {
             role: this.options.modelRole ?? "unspecified",
@@ -264,8 +288,8 @@ class HttpLlmClient implements LlmClient {
         }
         return parsed;
       }
-      lastError = parseError;
-      if (malformedRetriesRemaining > 0) {
+      lastError = truncationError ?? parseError;
+      if (!truncationError && malformedRetriesRemaining > 0) {
         logger.warn("json.malformed_retry", {
           role: this.options.modelRole ?? "unspecified",
           operation: options.operation,
@@ -369,11 +393,12 @@ class HttpLlmClient implements LlmClient {
         url,
         headers: {
           ...bearer(this.config.apiKey),
-          ...(this.config.extraHeaders ?? {}),
+          ...this.providerHeaders(options),
           ...(agentRegion ? { "X-Agent-Region": agentRegion } : {})
         },
         timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
         maxRetries: options.maxRetries ?? this.config.maxRetries,
+        ...(memmyAccount ? { businessEnvelope: "memmy_account" as const } : {}),
         body: {
           model: this.config.model,
           messages,
@@ -381,6 +406,11 @@ class HttpLlmClient implements LlmClient {
           max_tokens: options.maxTokens ?? this.config.maxTokens,
           stream: false,
           ...thinking.fields,
+          ...(options.operation === "capture.summarize" && isMiniMaxM31FlashThinkingOnlyModel(model) && !memmyAccount
+            ? (openAiCompatibleThinkingStyle(this.config.vendor ?? "", base, model) === "reasoning"
+              ? { reasoning: { effort: "low" } }
+              : { reasoning_effort: "low" })
+            : {}),
           ...(thinkingBudget !== undefined ? { thinking_budget: thinkingBudget } : {}),
           ...(responseFormat ? { response_format: { type: responseFormat } } : {}),
           ...(this.config.extraBody ?? {})
@@ -412,6 +442,11 @@ class HttpLlmClient implements LlmClient {
         typeof reasoningContent === "string" &&
         reasoningContent.trim()
       ) {
+        if (isMiniMaxM31FlashThinkingOnlyModel(model) && options.jsonMode
+          && normalizeFinishReason(choice?.finish_reason) === "length") {
+          this.recordTokenUsage(response, options);
+          return { text: "", finishReason: "length" };
+        }
         throw new Error("Reasoning exhausted the summary output token budget");
       }
       throw new Error("openai_compatible response missing choices[0].message.content");
@@ -432,7 +467,7 @@ class HttpLlmClient implements LlmClient {
       url,
       headers: {
         ...bearer(this.config.apiKey),
-        ...(this.config.extraHeaders ?? {})
+        ...this.providerHeaders(options)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -498,7 +533,7 @@ class HttpLlmClient implements LlmClient {
       operation: options.operation,
       model: this.config.model,
       url,
-      headers: this.config.extraHeaders,
+      headers: this.providerHeaders(options),
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       body
@@ -535,13 +570,16 @@ class HttpLlmClient implements LlmClient {
       headers: {
         "x-api-key": this.config.apiKey,
         "anthropic-version": "2023-06-01",
-        ...(this.config.extraHeaders ?? {})
+        ...this.providerHeaders(options)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
       body: {
         model: this.config.model || "claude-3-5-haiku-latest",
         ...thinking.fields,
+        ...(options.operation === "capture.summarize" && isMiniMaxM31FlashThinkingOnlyModel(this.config.model ?? "")
+          ? { output_config: { effort: "low" } }
+          : {}),
         ...(!thinking.enabled && !isAnthropicFixedTemperatureModel(this.config.model || "")
           ? { temperature: options.temperature ?? this.config.temperature }
           : {}),
@@ -587,7 +625,7 @@ class HttpLlmClient implements LlmClient {
       url: `${base}/model/${model}/converse`,
       headers: {
         ...(this.config.apiKey ? { authorization: this.config.apiKey } : {}),
-        ...(this.config.extraHeaders ?? {})
+        ...this.providerHeaders(options)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -631,7 +669,7 @@ class HttpLlmClient implements LlmClient {
       url: this.config.endpoint,
       headers: {
         ...bearer(this.config.apiKey),
-        ...(this.config.extraHeaders ?? {})
+        ...this.providerHeaders(options)
       },
       timeoutMs: options.timeoutMs ?? this.config.timeoutMs,
       maxRetries: options.maxRetries ?? this.config.maxRetries,
@@ -1061,6 +1099,7 @@ function isOpenAiCompatibleThinkingOnlyModel(vendor: string, endpoint: string, m
   if (slug.startsWith("kimi-k2.7-code")) return true;
   if (/^gemini-3(?:[.-]|$)/.test(slug) || slug.startsWith("gemini-2.5-pro")) return true;
   if (isAnthropicAlwaysThinkingModel(slug) || isMiniMaxM2ThinkingOnlyModel(slug)) return true;
+  if (isMiniMaxM31FlashThinkingOnlyModel(slug)) return true;
   if (slug.startsWith("qwq") || (slug.includes("-thinking") && !slug.startsWith("ernie-"))) return true;
   if (slug === "qwen3.7-max-preview" || slug.includes("qwen3.7-max-2026-05-17")) return true;
   return vendor === "minimax" && endpoint.toLowerCase().includes("minimax.io") &&
@@ -1094,6 +1133,10 @@ function isMiniMaxM2ThinkingOnlyModel(model: string): boolean {
 
 function isMiniMaxM3Model(model: string): boolean {
   return /^minimax-m3(?:[.\-]|$)/.test(modelSlug(model));
+}
+
+function isMiniMaxM31FlashThinkingOnlyModel(model: string): boolean {
+  return /^minimax-m3[.\-]1-flash(?:[-:]|$)/.test(modelSlug(model));
 }
 
 // Custom presets can point at the account gateway under another provider name.

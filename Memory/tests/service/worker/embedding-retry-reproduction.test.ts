@@ -89,6 +89,7 @@ describe("v1.2.6 embedding retry reproduction", () => {
     vi.spyOn(service, "nextWorkerRunAt").mockReturnValue(undefined);
     const run = vi.spyOn(service, "runWorkerOnce");
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       configPath: `${createTestRoot()}/config.yaml`,
       service, workerStartupFallbackMs: 0, workerIdlePollMs: 20, startAgentSourceAutomation: false
     });
@@ -213,6 +214,7 @@ describe("v1.2.6 embedding retry reproduction", () => {
       changeSeq: 0, syncCursor: "0", serverTime: new Date().toISOString()
     });
     const server = createMemoryHttpServer({
+      auth: { allowAnonymous: true },
       configPath: `${createTestRoot()}/config.yaml`,
       service,
       workerStartupFallbackMs: 3_600_000,

@@ -60,7 +60,7 @@ describe("provider initialization", () => {
     expect(explicitProvider.generation.maxTokens).toBe(1234);
   });
 
-  it("propagates mapped BYOK token defaults into provider snapshots and signatures", () => {
+  it("propagates explicit BYOK token settings into provider snapshots and signatures", () => {
     const config = new Config({
       agents: { defaults: { modelPreset: "known" } },
       providers: {
@@ -76,6 +76,8 @@ describe("provider initialization", () => {
       },
       modelPresets: {
         known: {
+          maxTokens: 128_000,
+          contextWindowTokens: 1_050_000,
           endpoint: "chat",
           model: "gpt-5.6",
           provider: "openai",

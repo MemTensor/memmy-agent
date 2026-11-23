@@ -351,6 +351,32 @@ describe("memmy memory tools", () => {
     expect(getResult).not.toContain("embedding");
   });
 
+  it("keeps the source directory line of an imported skill in memory get output", async () => {
+    const client = new MemmyMemoryClient(
+      { baseUrl: "http://memory.test", timeoutMs: 1000 },
+      vi.fn(async () => response({
+        id: "skill_123",
+        kind: "skill",
+        memoryLayer: "Skill",
+        title: "memory-systems",
+        body: "# Memory systems\nRun scripts/check.sh.\n\nsource dir: /home/me/.codex/skills/memory-systems"
+      })) as any,
+    );
+    const runtime: MemmyMemoryToolRuntime = {
+      requestEnvelope: () => ({}),
+      currentSessionId: () => "session-1",
+      currentEpisodeId: () => "episode-1",
+      currentTurnId: () => "turn-1",
+      currentUserText: () => "current task",
+    };
+    const registry = new ToolRegistry();
+    registerMemmyMemoryTools(registry, client, runtime);
+
+    const getResult = await registry.get("memmy_memory_get")!.execute({ id: "skill_123" });
+
+    expect(getResult).toContain("source dir: /home/me/.codex/skills/memory-systems");
+  });
+
   it("maps empty search runtime session id to the active memory runtime session", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const client = new MemmyMemoryClient(

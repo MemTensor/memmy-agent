@@ -18,11 +18,6 @@ export type NativeAppApproval = NativeAppIdentity & { allowedAt: string };
 const APP_ID = /^[\w.!-]{1,256}$/;
 const MAX_FILE_BYTES = 128 * 1024;
 const MAX_ENTRIES = 200;
-const BLOCKED_MAC_IDS = new Set(['com.apple.Terminal', 'com.googlecode.iterm2', 'com.openai.codex']);
-const BLOCKED_WINDOWS_IDS = new Set(['cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe',
-  'wt', 'wt.exe', 'windowsterminal', 'windowsterminal.exe', 'chatgpt', 'chatgpt.exe',
-  'applicationframehost', 'applicationframehost.exe',
-  'microsoft.windowsterminal_8wekyb3d8bbwe!app', 'microsoft.windowsterminalpreview_8wekyb3d8bbwe!app']);
 
 function validIdentity(value: unknown): value is NativeAppIdentity {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -30,13 +25,6 @@ function validIdentity(value: unknown): value is NativeAppIdentity {
   return (app.platform === 'darwin' || app.platform === 'win32')
     && typeof app.appId === 'string' && APP_ID.test(app.appId)
     && typeof app.displayName === 'string' && app.displayName.trim().length > 0 && app.displayName.length <= 256;
-}
-
-export function isBlockedNativeApp(app: NativeAppIdentity): boolean {
-  const id = app.appId.toLowerCase();
-  return app.platform === 'darwin'
-    ? [...BLOCKED_MAC_IDS].some(value => value.toLowerCase() === id)
-    : BLOCKED_WINDOWS_IDS.has(id);
 }
 
 type WindowsAppCandidate = { app: ResolvedNativeApp; selectors: string[] };
@@ -68,10 +56,6 @@ function windowsAppCandidates(listResult: unknown): WindowsAppCandidate[] | null
     const identity = JSON.stringify([app.appId.toLowerCase(), processName.toLowerCase()]);
     if (identities.has(resolved.runtimeSelector) && identities.get(resolved.runtimeSelector) !== identity) return null;
     identities.set(resolved.runtimeSelector, identity);
-    // A shared UWP host does not identify the app whose window it owns. Also
-    // prevent a package ID from hiding a protected terminal process.
-    if (isBlockedNativeApp(resolved)
-      || isBlockedNativeApp({ platform: 'win32', appId: processName, displayName })) continue;
     const candidate = { app: resolved, selectors: [app.appId, displayName, processName,
       `${processName}.exe`, ...aliases].map(value => value.toLocaleLowerCase()) };
     const previous = candidates.get(resolved.runtimeSelector);
@@ -118,7 +102,7 @@ export function resolveNativeAppIdentity(listResult: unknown, target: string,
         app = { platform, displayName: line.slice(0, divider),
           appId: line.slice(divider + 3).replace(/ \[[^\]]*\]$/, '') };
       }
-      if (!validIdentity(app) || isBlockedNativeApp(app)) continue;
+      if (!validIdentity(app)) continue;
       if (app.displayName.toLocaleLowerCase() === wanted || app.appId.toLocaleLowerCase() === wantedProcess
         || app.runtimeSelector === wanted) matches.push(app);
     }
@@ -174,7 +158,6 @@ export async function resolveInstalledAppIdentity(target: string, platform: 'dar
   const { appId, displayName } = response.app as Record<string, unknown>;
   const app = { platform, appId, displayName };
   if (!validIdentity(app)) throw new InstalledAppIdentityLookupError('invalid-response');
-  if (isBlockedNativeApp(app)) throw new InstalledAppIdentityLookupError('blocked');
   if (response.pid === undefined) return app;
   if (platform !== 'win32' || typeof response.pid !== 'number' || !Number.isSafeInteger(response.pid)
     || response.pid <= 0 || response.pid > 0x7fffffff) throw new InstalledAppIdentityLookupError('invalid-response');
@@ -195,7 +178,7 @@ export class NativeAppApprovalStore {
       if (!Array.isArray(entries) || entries.length > MAX_ENTRIES) return [];
       return entries.filter((entry): entry is NativeAppApproval => validIdentity(entry)
         && 'allowedAt' in entry && typeof entry.allowedAt === 'string'
-        && !Number.isNaN(Date.parse(entry.allowedAt)) && !isBlockedNativeApp(entry));
+        && !Number.isNaN(Date.parse(entry.allowedAt)));
     } catch { return []; }
   }
   isAllowed(app: NativeAppIdentity): boolean {
@@ -203,7 +186,7 @@ export class NativeAppApprovalStore {
       && entry.appId.toLowerCase() === app.appId.toLowerCase());
   }
   allow(app: NativeAppIdentity): NativeAppApproval[] {
-    if (!validIdentity(app) || isBlockedNativeApp(app)) throw new Error('Invalid native app approval identity');
+    if (!validIdentity(app)) throw new Error('Invalid native app approval identity');
     const entries = this.list().filter(entry => !(entry.platform === app.platform
       && entry.appId.toLowerCase() === app.appId.toLowerCase()));
     if (entries.length >= MAX_ENTRIES) throw new Error('Native app approval limit reached');
@@ -272,7 +255,7 @@ export class NativeAppApprovalGate {
     private readonly ask: (app: NativeAppIdentity) => Promise<NativeAppAccessDecision> = requestNativeAppAccess) {}
 
   async authorize(app: NativeAppIdentity, context: RequestContext | null): Promise<void> {
-    if (!validIdentity(app) || isBlockedNativeApp(app)) throw new NativeAppApprovalDenied();
+    if (!validIdentity(app)) throw new NativeAppApprovalDenied();
     const turn = nativeAppTurnKey(context);
     if (!turn) throw new NativeAppApprovalDenied('Computer Use needs a current interactive user request for this app.');
     if (this.store.isAllowed(app)) return;

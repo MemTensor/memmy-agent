@@ -11,6 +11,7 @@ import {
   AddMemoryInputSchema,
   AddMemoryOutputSchema,
   DeleteMemoryOutputSchema,
+  SkillArchiveStateOutputSchema,
   DeletePanelTaskOutputSchema,
   GetMemoryOutputSchema,
   MemoryApiLogsInputSchema,
@@ -103,6 +104,14 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "DELETE /api/v1/panel/tasks/:id"
 ] as const;
 
+/** Skill status after an archive or reactivate from the panel. */
+export interface SkillArchiveState {
+  ok: true;
+  id: string;
+  status: "activated" | "resolving" | "archived" | "deleted";
+  serverTime: string;
+}
+
 export interface MemoryRuntimeClient {
   prefetchPanel?(section:string,signal:AbortSignal):Promise<boolean | void>;
   listPanelLogs?(input:PanelLogsInput,signal?:AbortSignal):Promise<PanelLogsOutput>;
@@ -124,6 +133,8 @@ export interface MemoryRuntimeClient {
   getPanelMemory?(id:string, signal?:AbortSignal):Promise<GetMemoryOutput>;
   deleteMemory(id: string): Promise<DeleteMemoryOutput>;
   approveObservedSkill?(id: string): Promise<{ id: string; status: "activated"; serverTime: string }>;
+  archiveSkill?(id: string): Promise<SkillArchiveState>;
+  reactivateSkill?(id: string): Promise<SkillArchiveState>;
   updateObservedSkill?(id: string, input: { body: string; expectedVersion: number }): Promise<{ id: string; status: "activated"; version: number; serverTime: string }>;
   recallEvidence(queryId: string): Promise<RecallEvidenceOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
@@ -240,6 +251,16 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
       });
       invalidatePanel();
       return result;
+    },
+
+    async archiveSkill(id) {
+      return requestJson({ config, path: `/api/v1/skills/${encodeURIComponent(id)}/archive`,
+        schema: SkillArchiveStateOutputSchema, body: {} });
+    },
+
+    async reactivateSkill(id) {
+      return requestJson({ config, path: `/api/v1/skills/${encodeURIComponent(id)}/reactivate`,
+        schema: SkillArchiveStateOutputSchema, body: {} });
     },
 
     async approveObservedSkill(id) {

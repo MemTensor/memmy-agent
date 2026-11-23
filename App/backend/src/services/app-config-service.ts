@@ -11,6 +11,7 @@ import type {
   ModelConfigTestInput,
   ModelConfigTestResult,
   ModelConfigView,
+  ModelCapabilityCatalog,
   OnboardingStateDto,
   PatchAppSettingsInput,
   PatchOnboardingInput,
@@ -33,6 +34,8 @@ import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import { createHttpModelConfigTester, type ModelConfigTester, type ResolvedModelConfigTestInput } from "./model-config-tester.js";
 
 export interface AppConfigService {
+  setScanPermissionReconciler?(reconcile: () => Promise<void>): void;
+  isScanAllowed?(): boolean;
   updateSettings(input: PatchAppSettingsInput): Promise<AppSettingsDto>;
   updatePrivacy(input: PatchPrivacyInput): Promise<PrivacySettingsDto>;
   getScanPreferences(): Promise<ScanPreferences>;
@@ -67,6 +70,7 @@ export interface CreateAppConfigServiceOptions {
   memmyConfigWriter?: MemmyConfigWriter;
   memoryClient?: Pick<MemoryClient, "reloadConfig">;
   scanPreferencesStore?: ScanPreferencesStore;
+  getModelCapabilityCatalog?: () => Promise<ModelCapabilityCatalog | null>;
 }
 
 const BUILT_IN_AVATARS = AvatarOptionSchema.array().parse([
@@ -92,8 +96,21 @@ const BUILT_IN_AVATARS = AvatarOptionSchema.array().parse([
 /** Creates create app config service. */
 export function createAppConfigService(options: CreateAppConfigServiceOptions): AppConfigService {
   const modelConfigTester = options.modelConfigTester ?? createHttpModelConfigTester();
+  let scanSettingsWrite = Promise.resolve();
+  let reconcileBackendPermission: (() => Promise<void>) | undefined;
+  function serializeScanSettings<T>(operation: () => Promise<T>): Promise<T> {
+    const result = scanSettingsWrite.then(operation);
+    scanSettingsWrite = result.then(() => undefined, () => undefined);
+    return result;
+  }
 
   return {
+    setScanPermissionReconciler(reconcile) { reconcileBackendPermission = reconcile; },
+    isScanAllowed() {
+      const permission = options.scanPreferencesStore?.getScanPermission()
+        ?? options.bootstrapRepository.getOnboardingState().scanPermission;
+      return permission === "scan_only" || permission === "scan_and_write_skill";
+    },
     async updateSettings(input) {
       const previousOnboarding = input.userMode === "byok" ? options.bootstrapRepository.getOnboardingState() : null;
       if (input.userMode) {
@@ -133,13 +150,24 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
     },
 
     async updateScanPreferences(input) {
-      return options.scanPreferencesStore
+      return serializeScanSettings(async () => options.scanPreferencesStore
         ? options.scanPreferencesStore.updateScanPreferences(input)
-        : options.bootstrapRepository.updateScanPreferences(input);
+        : options.bootstrapRepository.updateScanPreferences(input));
     },
 
     async updateOnboarding(input) {
-      return options.bootstrapRepository.updateOnboarding(input);
+      return serializeScanSettings(async () => {
+        // Publish the authorization and automation switches together before advancing
+        // the guide. A later failure leaves the durable refusal in place for restart.
+        if (input.scanPermission !== undefined) {
+          await options.scanPreferencesStore?.setScanPermission(input.scanPermission, input.currentStep === "scan_permission_required");
+          if (input.scanPermission === "none" || input.scanPermission === "unset") {
+            await reconcileBackendPermission?.();
+          }
+          await options.memoryClient?.reloadConfig({ reason: "scan_permission_saved" });
+        }
+        return options.bootstrapRepository.updateOnboarding(input);
+      });
     },
 
     async setImprovementProgram(input) {
@@ -181,7 +209,9 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
       if (!options.memmyConfigWriter?.readModelConfig) {
         throw new Error("Memmy config writer is not configured");
       }
-      return options.memmyConfigWriter.readModelConfig();
+      const config = await options.memmyConfigWriter.readModelConfig();
+      const capabilityCatalog = await options.getModelCapabilityCatalog?.();
+      return { ...config, ...(capabilityCatalog ? { capabilityCatalog } : {}) };
     },
 
     async setModelConfig(input) {
@@ -190,7 +220,8 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
       }
       const config = await options.memmyConfigWriter.writeModelConfig(input);
       await options.memoryClient?.reloadConfig({ reason: "model_config_saved" });
-      return config;
+      const capabilityCatalog = await options.getModelCapabilityCatalog?.();
+      return { ...config, ...(capabilityCatalog ? { capabilityCatalog } : {}) };
     },
 
     async testModelConfig(input) {

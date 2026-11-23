@@ -63,7 +63,7 @@ describe("HTTP automatic continuous admission", () => {
       maximumLeased = Math.max(maximumLeased, leased);
       return context.run(job.targetMemoryId ?? "", () => original(job));
     };
-    const base = await listen(createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 }));
+    const base = await listen(createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 60_000 }));
     try {
       expect((await post(base, "/api/v1/worker/import-summaries/enqueue", { memoryIds: targets })).status).toBe(200);
       await waitFor(() => summaryStarted.includes(targets[4]!));
@@ -78,7 +78,7 @@ describe("HTTP automatic continuous admission", () => {
   it("preserves the manual HTTP budget and target filter without turning it into an automatic drain", async () => {
     const { service, db } = fixture.createTestService({ llm: controlledCloudLlm() });
     const targets = Array.from({ length: 3 }, (_, i) => addAgentSourceImport(service, namespace, `manual target ${i}`, `manual-bound-${i}`).id);
-    const base = await listen(createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 }));
+    const base = await listen(createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 60_000 }));
     const response = await post(base, "/api/v1/worker/run", { limit: 1, targetMemoryIds: [targets[1]] });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ leased: 1, succeeded: 1, embeddingRetries: { leased: 0 } });
@@ -100,7 +100,7 @@ describe("HTTP automatic continuous admission", () => {
     };
     const { service, db } = fixture.createTestService({ llm, skillLlm: llm });
     const targets = Array.from({ length: 3 }, (_, i) => addAgentSourceImport(service, namespace, `shutdown import ${i}`, `continuous-stop-${i}`).id);
-    const server = createMemoryHttpServer({ service, workerStartupFallbackMs: 60_000 });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service, workerStartupFallbackMs: 60_000 });
     const base = await listen(server);
     let closed = false, closing: Promise<void> | undefined;
     try {

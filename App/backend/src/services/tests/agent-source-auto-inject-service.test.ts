@@ -10,6 +10,27 @@ const enabledPreferences: ScanPreferences = {
 };
 
 describe("agent source auto inject service", () => {
+  it("refuses an outdated DSH update when permission is revoked during freshness checking", async () => {
+    const calls: string[] = [];
+    let allowed = true;
+    const service = createAgentSourceAutoInjectService({
+      isScanAllowed: () => allowed,
+      agentSources: {
+        ...createAgentSources(calls),
+        async list() { return [source("deepseek_harness", "plugin_installed", true)]; },
+        async isInstalledHookCurrent() { allowed = false; return false; }
+      },
+      permissionManager: { async canWriteAgentSkill() { return true; } },
+      getScanPreferences: () => enabledPreferences
+    });
+
+    await expect(service.runOnce()).resolves.toMatchObject({
+      installed: [],
+      failed: [{ sourceId: "deepseek_harness", reason: "Automatic integration permission revoked" }]
+    });
+    expect(calls).toEqual([]);
+  });
+
   it("skips when auto inject is disabled", async () => {
     const calls: string[] = [];
     const service = createAgentSourceAutoInjectService({
@@ -393,3 +414,39 @@ function source(sourceId: string, status: AgentSourceView["status"], builtin: bo
     lastScannedAt: null
   };
 }
+
+it.each(["discovery", "permission", "install"])("revocation drains desktop auto-injection during %s and invalidates the old run", async stage => {
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const hold = async (point: string) => { if (point === stage) { entered(); await held; } };
+  let allowed = true;
+  const installed: string[] = [];
+  const service = createAgentSourceAutoInjectService({
+    isScanAllowed: () => allowed,
+    getScanPreferences: () => enabledPreferences,
+    permissionManager: { async canWriteAgentSkill() { await hold("permission"); return true; } },
+    agentSources: {
+      async list() { await hold("discovery"); return [source("cursor", "not_connected", true), source("codex", "not_connected", true)]; },
+      async isInstalledHookCurrent() { return true; },
+      async installPlugin(id, _action, beforeInstall) { beforeInstall?.(); await hold("install"); installed.push(id); },
+      async installSkill() { throw new Error("unexpected skill"); }
+    }
+  });
+  const running = service.runOnce();
+  await waiting;
+  allowed = false;
+  let acknowledged = false;
+  const revocation = service.reconcilePermission!().then(() => { acknowledged = true; });
+  await Promise.resolve();
+  expect(acknowledged).toBe(false);
+  allowed = true;
+  release();
+  await revocation;
+  await running;
+  expect(installed).toEqual(stage === "install" ? ["cursor"] : []);
+  allowed = false;
+  await service.runOnce();
+  expect(installed).toEqual(stage === "install" ? ["cursor"] : []);
+});

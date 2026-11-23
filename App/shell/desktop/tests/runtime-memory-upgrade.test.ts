@@ -28,6 +28,7 @@ async function fixture(options: {
   bundledVersion?: string;
   delay?: number;
   independent?: boolean;
+  legacyAuth?: boolean;
   identity?: boolean;
   shutdownDelay?: number;
   wrongConfig?: boolean;
@@ -60,7 +61,7 @@ async function fixture(options: {
   const config: PackagedRuntimeConfig = {
     configPath: join(home, "config.yaml"), agentWorkspace: join(home, "workspace"),
     memoryDatabasePath: join(home, "memory.sqlite"), memoryBaseUrl: `http://127.0.0.1:${port}`,
-    memoryToken: "", memoryListenHost: "127.0.0.1", memoryListenPort: port,
+    memoryToken: "fixture-service-token", memoryListenHost: "127.0.0.1", memoryListenPort: port,
     agentGatewayBaseUrl: "http://127.0.0.1:18980", agentGatewayHealthHost: "127.0.0.1",
     agentGatewayHealthPort: 18970, agentGatewayBootstrapSecret: "fixture",
   };
@@ -77,6 +78,10 @@ async function fixture(options: {
     // A non-Memory endpoint lacks the health contract; `ok: false` is valid for a degraded Memory service.
     "    const health = hasMemoryIdentity ? { ok: true, protocolVersion: 1, serviceVersion: version } : { serviceVersion: version };",
     "    response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(health)); return;",
+    "  }",
+    "  if (request.url === '/api/v1/auth/check' && process.env.FIXTURE_LEGACY_AUTH !== 'true') {",
+    "    const authenticated = request.headers.authorization === 'Bearer fixture-service-token';",
+    "    response.writeHead(authenticated ? 200 : 401); response.end(JSON.stringify({ authenticated, authVersion: 1 })); return;",
     "  }",
     "  if (request.url === '/api/v1/admin/shutdown') { response.end('{}'); setImmediate(shutdown); return; }",
     "  response.writeHead(404); response.end();",
@@ -123,6 +128,7 @@ async function fixture(options: {
     "fs.writeFileSync(path.join(home, 'memory-service', 'current.json'), JSON.stringify({ version, protocolVersion: 1, runtimeDir, entrypoint, runtimeExecutable: process.execPath }));",
   ].join("\n"));
   const old = spawnNodeService("memory", entry, ["--config", config.configPath, "--db", config.memoryDatabasePath, "--port", String(port)], {
+    FIXTURE_LEGACY_AUTH: String(options.legacyAuth ?? false),
     FIXTURE_VERSION: options.version ?? "2.1.0", FIXTURE_DELAY: String(options.delay ?? 0),
     FIXTURE_IDENTITY: String(options.identity ?? true),
     FIXTURE_SHUTDOWN_DELAY: String(options.shutdownDelay ?? 0), FIXTURE_WRONG_CONFIG: String(options.wrongConfig ?? false),
@@ -245,8 +251,15 @@ describe("bundled Memory upgrades", () => {
     expect(running.old.process.exitCode).toBeNull();
   });
 
+  it("leaves an independently launched legacy service alive when authentication cannot be verified", async () => {
+    const running = await fixture({ independent: true, legacyAuth: true });
+    await expect(running.ensure()).rejects.toThrow("its own installer");
+    expect(running.old.process.exitCode).toBeNull();
+    expect(running.children).toHaveLength(0);
+  });
+
   it("replaces a healthy older Desktop runtime before reusing its endpoint", async () => {
-    const running = await fixture();
+    const running = await fixture({ legacyAuth: true });
     await running.ensure();
     expect(await running.version()).toBe("2.1.1");
     expect(running.children).toHaveLength(1);

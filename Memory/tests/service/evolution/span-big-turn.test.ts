@@ -1,3 +1,4 @@
+import { Repositories } from "../../../src/storage/repositories.js";
 import { assignedEpisodeId, settleCaptureAssignments } from "../../fixtures/memory-service-fixture.js";
 import { LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -287,7 +288,8 @@ describe("MemoryService / evolution / span big turn", () => {
       text.includes("定位构建失败的根本原因") &&
       text.includes("确认失败来自版本冲突")
     )).toBe(true);
-    const l1Items = service.panelItems({ namespace, layer: "L1" }).items;
+    expect(service.panelItems({ namespace, layer: "L1" }).items.some(item => item.kind === "span")).toBe(false);
+    const l1Items = storedL1Items(db);
     expect(l1Items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ title: "定位构建失败的根本原因" }),
@@ -338,8 +340,9 @@ describe("MemoryService / evolution / span big turn", () => {
   it.each([
     { name: "after the parent trace was deleted", deleteParent: true, splitAgain: false },
     { name: "after a second successful split with different ranges", deleteParent: false, splitAgain: true },
-    { name: "after both re-splitting and deleting the parent", deleteParent: true, splitAgain: true }
-  ])("deletes all task spans $name", async ({ deleteParent, splitAgain }) => {
+    { name: "after both re-splitting and deleting the parent", deleteParent: true, splitAgain: true },
+    { name: "after revised tools no longer qualify", deleteParent: false, splitAgain: false, shorten: true }
+  ])("deletes all task spans $name", async ({ deleteParent, splitAgain, shorten }) => {
     const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
     const firstSplit = {
       spans: [
@@ -406,7 +409,25 @@ describe("MemoryService / evolution / span big turn", () => {
     await reward(task);
     const originalSpans = spanIds(assignedEpisodeId(service, task));
     expect(originalSpans).toHaveLength(3);
+    const retryRepos = new Repositories(db.db);
+    const originalJob = retryRepos.runtime.listJobs(undefined, 100).find(job => job.jobType === "span_big_turn" && job.targetMemoryId === task.l1MemoryId)!;
+    retryRepos.runtime.enqueueJob({ ...originalJob, id: "647-span-same-input", dedupeKey: undefined, status: "queued", attempts: 0 });
+    await runWorkerRounds(service, 2);
+    expect(retryRepos.runtime.getJob("647-span-same-input")?.status).toBe("succeeded");
+    expect(calls.filter(call => call.options.operation === "span.big_turn.v1")).toHaveLength(1);
+
+    if (shorten) {
+      const repos = new Repositories(db.db);
+      const raw = repos.runtime.getRawTurn(task.rawTurnId)!;
+      repos.runtime.updateRawTurn({ ...raw, toolCalls: raw.toolCalls.slice(0, 2), toolResults: raw.toolResults.slice(0, 2) });
+      await reward(task);
+      expect(calls.filter(call => call.options.operation === "span.big_turn.v1")).toHaveLength(1);
+      expect(originalSpans.filter(id => repos.memories.get(id)?.status === "activated")).toEqual([]);
+    }
+
     if (splitAgain) {
+      const raw = retryRepos.runtime.getRawTurn(task.rawTurnId)!;
+      retryRepos.runtime.updateRawTurn({ ...raw, assistantText: raw.assistantText + " 修订：合并分析与修改阶段，再独立验证。" });
       await reward(task);
       expect(calls.filter((call) => call.options.operation === "span.big_turn.v1")).toHaveLength(2);
       const parent = db.db.prepare("SELECT properties_json FROM memories WHERE id = ?")
@@ -414,6 +435,9 @@ describe("MemoryService / evolution / span big turn", () => {
       const latestIds = JSON.parse(parent.properties_json).internal_info.trace.span_ids as string[];
       expect(latestIds).toHaveLength(2);
       expect(latestIds.every((id) => !originalSpans.includes(id))).toBe(true);
+      const activeOriginal = db.db.prepare("SELECT COUNT(*) AS count FROM memories WHERE id IN (SELECT value FROM json_each(?)) AND status = 'activated' AND deleted_at IS NULL")
+        .get(JSON.stringify(originalSpans));
+      expect(activeOriginal).toEqual({ count: 0 });
     }
     const targetIds = spanIds(assignedEpisodeId(service, task));
     expect(targetIds).toHaveLength(splitAgain ? 5 : 3);
@@ -505,7 +529,7 @@ describe("MemoryService / evolution / span big turn", () => {
     await runWorkerRounds(service, 8);
 
     expect(calls.filter((call) => call.options.operation === "span.big_turn.v1")).toHaveLength(1);
-    expect(service.panelItems({ namespace, layer: "L1" }).items.filter(
+    expect(storedL1Items(db).filter(
       (item) => item.kind === "span"
     )).toEqual([]);
     db.close();
@@ -580,7 +604,7 @@ describe("MemoryService / evolution / span big turn", () => {
     vi.setSystemTime(Date.parse(retry.available_at));
     await runWorkerRounds(service, 8);
 
-    const spans = service.panelItems({ namespace, layer: "L1" }).items.filter(
+    const spans = storedL1Items(db).filter(
       (item) => item.kind === "span"
     );
     expect(calls.filter((call) => call.options.operation === "span.big_turn.v1")).toHaveLength(2);
@@ -652,7 +676,7 @@ describe("MemoryService / evolution / span big turn", () => {
     await runWorkerRounds(service, 8);
 
       expect(calls.some((call) => call.options.operation === "span.big_turn.v1")).toBe(false);
-      expect(service.panelItems({ namespace, layer: "L1" }).items.some(
+      expect(storedL1Items(db).some(
         (item) => item.kind === "span"
       )).toBe(false);
       db.close();
@@ -729,7 +753,7 @@ describe("MemoryService / evolution / span big turn", () => {
     }
 
     expect(calls.filter((call) => call.options.operation === "span.big_turn.v1")).toHaveLength(3);
-    expect(service.panelItems({ namespace, layer: "L1" }).items.some(
+    expect(storedL1Items(db).some(
       (item) => item.kind === "span"
     )).toBe(false);
     expect(service.panelJobs({ userId: namespace.userId }).items).toEqual(
@@ -744,3 +768,8 @@ describe("MemoryService / evolution / span big turn", () => {
     db.close();
   });
 });
+
+function storedL1Items(db: { db: ConstructorParameters<typeof Repositories>[0] }) {
+  const repos = new Repositories(db.db);
+  return repos.memories.list({ memoryLayer: "L1" }).map(memory => repos.memories.toListItem(memory));
+}

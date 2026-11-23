@@ -50,7 +50,7 @@ describe("memmy CLI", () => {
       embedder: createTestEmbedder(),
       fetchAppMemoryBudget: async () => null
     });
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", () => {
@@ -202,7 +202,7 @@ describe("memmy CLI", () => {
       embedder: createTestEmbedder(),
       fetchAppMemoryBudget: async () => null
     });
-    const server = createMemoryHttpServer({ service });
+    const server = createMemoryHttpServer({ auth: { allowAnonymous: true }, service });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", () => {

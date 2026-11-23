@@ -3,6 +3,24 @@ import {MemoryDb} from '../../src/storage/db.js';
 import {repairFts,writeFts,installFtsMappings,retryFtsRepairs} from '../../src/storage/fts-maintenance.js';
 import {Repositories} from '../../src/storage/repositories.js';
 function add(db:MemoryDb,id:string){db.db.prepare("INSERT INTO memories(id,user_id,timeline,memory_value,memory_layer,created_at,updated_at) VALUES(?,'u','now','original keyword','L1','now','now')").run(id);repairFts(db.db,'memories',id);}
+it('keeps imported registration bodies and new L3 snapshots excluded during durable repair and index migration',()=>{
+ const db=new MemoryDb({path:':memory:'});try{
+ add(db,'ordinary');
+ const insert=db.db.prepare("INSERT INTO memories(id,user_id,timeline,memory_value,memory_layer,properties_json,created_at,updated_at) VALUES(?,'u','now',?,?,?,'now','now')");
+ insert.run('cold-plugin','private imported guide','Skill',JSON.stringify({internal_info:{memory_layer:'Skill',read_only:true,source_kind:'plugin',source_agent_id:'codex',source_skill_id:'cold-plugin'}}));
+ insert.run('l3-snapshot','private snapshot body','L3',JSON.stringify({internal_info:{memory_layer:'L3',l3_field:{unit_key:'project:unit'}}}));
+ for(const id of ['cold-plugin','l3-snapshot']){
+  writeFts(db.db,'memories',id,[id,'stale searchable body','']);
+  db.db.prepare("INSERT INTO fts_repair_queue(kind,memory_id) VALUES('memories',?)").run(id);
+ }
+ retryFtsRepairs(db.db);
+ expect(db.db.prepare('SELECT id FROM memories_fts ORDER BY id').pluck().all()).toEqual(['ordinary']);
+ db.db.exec('DROP TRIGGER memories_fts_delete;DROP TABLE memories_fts_ids');
+ installFtsMappings(db.db);
+ expect(db.db.prepare('SELECT id FROM memories_fts ORDER BY id').pluck().all()).toEqual(['ordinary']);
+ expect(db.db.prepare('SELECT count(*) FROM fts_repair_queue').pluck().get()).toBe(0);
+ }finally{db.close();}
+});
 it('reuses rowids through updates, soft deletion and restoration, and removes mappings on physical deletion',()=>{
  const db=new MemoryDb({path:':memory:'});try{
  add(db,'a');const rowid=db.db.prepare('SELECT rowid FROM memories_fts WHERE id=?').pluck().get('a');

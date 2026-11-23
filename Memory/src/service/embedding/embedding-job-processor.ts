@@ -1,5 +1,7 @@
+import { isImportedSkill } from "../../storage/imported-skill.js";
 import type { EpisodeSelectionContext } from "../session/episode-selection.js";
 import { embeddingIdentity, vectorEmbeddingIdentity } from "../../model/embedding-identity.js";
+import { l2VectorCacheKey, readL2VectorCache } from "./l2-vector-cache.js";
 import { isRecord } from "../../utils/json.js";
 
 export class SummaryModelUnconfiguredError extends Error {
@@ -58,6 +60,7 @@ import {
   updateMemoryVectorField
 } from "./embedding-pipeline.js";
 import { canonicalWorkMemoryText } from "../work-memory/work-memory-pipeline.js";
+import { isL3FieldSnapshotMemory } from "../l3-field/snapshot-memory.js";
 import { isObservationMemory, isObservationMemoryProcessed, observationJobPayload } from "../observation-memory-state.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
@@ -102,6 +105,7 @@ export interface PreparedEmbeddingJob {
   role: "document" | "query";
   vectorField: EmbeddingRetryVectorField;
   sourceHash?: string;
+  l2VectorCacheKey?: string;
 }
 
 export interface EnqueueWorkerJobInput {
@@ -140,7 +144,7 @@ export interface ScheduleEmbeddingAfterTextUpdateInput {
 
 /** The host supplies cross-domain policy rather than this module reaching into MemoryService. */
 export interface EmbeddingJobProcessorDeps {
-  repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime">;
+  repos: Pick<Repositories, "isImportedSkillEligibleForEmbedding" | "transaction" | "memories" | "userMemories" | "processing" | "runtime">;
   embedder: Embedder;
   llm: LlmClient;
   capture: { embedAfterCapture: boolean };
@@ -255,9 +259,14 @@ export class EmbeddingJobProcessor {
     const memory = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
     if (!memory) {
       if (job.targetMemoryId && this.isRejectedCaptureTarget(job.targetMemoryId)) return null;
+      // A deleted imported skill has nothing left to embed.
+      const deleted = job.targetMemoryId ? this.deps.repos.memories.getIncludingDeleted(job.targetMemoryId) : undefined;
+      if (deleted && isImportedSkill(deleted)) return null;
       throw new Error(`embedding target not found: ${job.targetMemoryId ?? "unknown"}`);
     }
     if (!processingJobMatchesMemory(job, memory)) return null;
+    if (!this.deps.repos.isImportedSkillEligibleForEmbedding(memory)) return null;
+    if (isL3FieldSnapshotMemory(memory)) return null;
 
     if (isObservationMemory(memory)) {
       if (!isObservationMemoryProcessed(memory)) return null;
@@ -291,7 +300,7 @@ export class EmbeddingJobProcessor {
     }
 
     const text = embeddingTextForMemory(memory);
-    return {
+    const item: PreparedEmbeddingJob = {
       job,
       memory,
       text,
@@ -299,26 +308,58 @@ export class EmbeddingJobProcessor {
       vectorField: "vec",
       sourceHash: memory.memoryLayer === "Skill" || memory.memoryLayer === "L3"
         ? retrievalDocumentSourceHash(memory)
-        : undefined
+        : undefined,
+      l2VectorCacheKey: memory.memoryLayer === "L2" ? l2VectorCacheKey(this.deps.embedder.config, "query", text) : undefined
     };
+    if (item.l2VectorCacheKey) {
+      const cached = readL2VectorCache(this.deps.repos.runtime, item.l2VectorCacheKey, this.deps.embedder.config);
+      if (cached) {
+        this.applyEmbeddingVector(item, cached);
+        return null;
+      }
+    }
+    return item;
   }
 
   applyEmbeddingVector(item: PreparedEmbeddingJob, vector: number[]): void {
-    const current = this.deps.repos.memories.get(item.memory.id);
-    if (!current) {
-      if (this.isRejectedCaptureTarget(item.memory.id)) return;
-      throw new Error(`embedding target not found: ${item.memory.id}`);
-    }
-    if (!processingJobMatchesMemory(item.job, current)) return;
-    if (item.sourceHash && retrievalDocumentSourceHash(current) !== item.sourceHash) return;
-    this.persistEmbeddingVector({
-      memoryId: current.id,
-      vectorField: item.vectorField,
-      vector,
-      attemptCount: item.job.attempts,
-      source: "worker.embedding",
-      sourceHash: item.sourceHash,
-      allowedProcessingStates: ["embedding_pending", "embedding"]
+    this.deps.repos.transaction(() => {
+      const current = this.deps.repos.memories.get(item.memory.id);
+      if (isImportedSkill(item.memory) && (!current || !this.deps.repos.isImportedSkillEligibleForEmbedding(current))) {
+        this.deps.repos.memories.deleteVector(item.memory.id, item.vectorField);
+        this.deps.repos.runtime.deleteEmbeddingRetriesForMemory(item.memory.id);
+        return;
+      }
+      if (!current) {
+        if (this.isRejectedCaptureTarget(item.memory.id)) return;
+        throw new Error(`embedding target not found: ${item.memory.id}`);
+      }
+      if (!processingJobMatchesMemory(item.job, current)) return;
+      // L2 text may have been revised while this embedding request was in flight.
+      if (current.memoryLayer === "L2" && embeddingTextForMemory(current) !== item.text) return;
+      if (item.sourceHash && retrievalDocumentSourceHash(current) !== item.sourceHash) {
+        if (isImportedSkill(current)) {
+          const retry = this.deps.enqueueEmbeddingRetry(current, embeddingTextForMemory(current), this.deps.nowIso(), item.vectorField);
+          this.deps.appendEmbeddingRetryChange(retry, "queued");
+        }
+        return;
+      }
+      if (item.l2VectorCacheKey && item.l2VectorCacheKey === l2VectorCacheKey(this.deps.embedder.config, item.role, item.text)) {
+        const actual = vectorEmbeddingIdentity(vector);
+        const expected = embeddingIdentity(this.deps.embedder.config);
+        if ((!actual || (actual.provider === expected.provider && actual.model === expected.model))
+          && vector.length && vector.every(Number.isFinite) && vector.some((value) => value !== 0)) {
+          this.deps.repos.runtime.setKv(item.l2VectorCacheKey, vector, this.deps.nowIso());
+        }
+      }
+      this.persistEmbeddingVector({
+        memoryId: current.id,
+        vectorField: item.vectorField,
+        vector,
+        attemptCount: item.job.attempts,
+        source: "worker.embedding",
+        sourceHash: item.sourceHash,
+        allowedProcessingStates: ["embedding_pending", "embedding"]
+      });
     });
   }
 
@@ -351,18 +392,27 @@ export class EmbeddingJobProcessor {
   }
 
   enqueueEmbeddingRetryAfterFailure(item: PreparedEmbeddingJob, error: unknown): boolean {
-    if (this.deps.repos.processing.get(item.memory.id)) return false;
-    const retry = this.deps.enqueueEmbeddingRetry(
-      item.memory,
-      item.text,
-      this.deps.nowIso(),
-      item.vectorField
-    );
-    this.deps.appendEmbeddingRetryChange(retry, "queued", undefined, {
-      code: "embedding_error",
-      message: error instanceof Error ? error.message : String(error)
+    return this.deps.repos.transaction(() => {
+      let memory = item.memory;
+      let text = item.text;
+      if (isImportedSkill(memory)) {
+        const current = this.deps.repos.memories.get(memory.id);
+        if (!current || !this.deps.repos.isImportedSkillEligibleForEmbedding(current)) {
+          this.deps.repos.memories.deleteVector(memory.id, item.vectorField);
+          this.deps.repos.runtime.deleteEmbeddingRetriesForMemory(memory.id);
+          return true;
+        }
+        memory = current;
+        text = embeddingTextForMemory(current);
+      }
+      if (this.deps.repos.processing.get(memory.id)) return false;
+      const retry = this.deps.enqueueEmbeddingRetry(memory, text, this.deps.nowIso(), item.vectorField);
+      this.deps.appendEmbeddingRetryChange(retry, "queued", undefined, {
+        code: "embedding_error",
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return true;
     });
-    return true;
   }
 
   async summarizeImportedTrace(job: EvolutionJobRecord): Promise<void> {

@@ -16,6 +16,7 @@ import {
   resolveModelSelection,
   type ResolvedModelSelection,
 } from "../providers/model-catalog.js";
+import { isGuiImChannel } from "../entrypoints/frontend-bridge/gui-session-projection.js";
 import { handlePairingCommand } from "../integrations/channel-auth/store.js";
 import { buildStatusContent, type RuntimeStatusSnapshot } from "../utils/helpers.js";
 import { fetchSearchUsage } from "../utils/searchusage.js";
@@ -523,9 +524,10 @@ export async function cmdGoal(ctx: CommandContext): Promise<OutboundMessage> {
       turnId,
     });
     ctx.loop.scheduleGoalWork?.(ctx.key, goal);
-    return reply(ctx, `Goal created.\n${goalStatusText(goal)}`, {
+    const fromIm = isGuiImChannel(ctx.msg.channel);
+    return reply(ctx, fromIm ? "Goal created." : `Goal created.\n${goalStatusText(goal)}`, {
       renderAs: "text",
-      ...(ctx.msg.channel === "websocket" && ctx.msg.metadata?.webui === true
+      ...(fromIm || (ctx.msg.channel === "websocket" && ctx.msg.metadata?.webui === true)
         ? { webuiGoalCreateAck: true }
         : {}),
     });

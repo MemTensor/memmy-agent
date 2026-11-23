@@ -5,7 +5,7 @@ import { memoryDisplayedSourceSql } from "./panel-source-sql.js";
 import { RAW_SOURCE_SQL } from "./memory-relations.js";
 import type { MemoryStatsRow } from "../types.js";
 /** Rebuildable presentation data. Source tables and their authorization remain authoritative. */
-export const PANEL_CACHE_VERSION = 3;
+export const PANEL_CACHE_VERSION = 4;
 export type PanelCachePart = "memories" | "logs" | "metrics" | "visibility";
 const cacheConnections = new WeakMap<Database.Database, Database.Database>();
 export function bindPanelCache(source: Database.Database, cache: Database.Database): void { cacheConnections.set(source,cache); }
@@ -151,7 +151,9 @@ export function fillPanelCacheBatch(source: Database.Database, part: PanelCacheP
       :part==="memories"?`WITH projected AS MATERIALIZED (
         SELECT id,memory_layer,status,created_at,updated_at,session_id,conversation_id,agent_id,app_id,
           jsonb(info_json) AS info_json,jsonb(properties_json) AS properties_json
-        FROM memories WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL)
+        FROM memories WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL
+          AND COALESCE(json_extract(properties_json,'$.internal_info.memory_kind'),'') != 'span'
+          AND NOT (memory_layer='Skill' AND COALESCE(json_extract(properties_json,'$.internal_info.source_kind'),'')='plugin'))
         SELECT m.id,m.memory_layer,m.status,m.created_at,m.updated_at,
         panel_source(${displayed},CASE WHEN json_type(properties_json,'$.internal_info.source')='text' THEN json_extract(properties_json,'$.internal_info.source') END,session_id,conversation_id,agent_id,app_id),${RAW_SOURCE_SQL},m.session_id FROM projected m`
       :`SELECT id,tool_name,source_agent,called_at,duration_ms,success,

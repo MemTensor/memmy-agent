@@ -106,8 +106,6 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
     dispatch(appActions.navigate("/settings"));
   }
 
-  const thinkingConfig = resolveThinkingConfigForModel(workspace, resolved.candidate);
-
   return (
     <div
       className={`agent-model-selector${locked ? " agent-model-selector--locked" : ""}`}
@@ -128,15 +126,19 @@ export function AgentModelSelector(props: AgentModelSelectorProps) {
         className="select-control--compact select-control--subtle agent-model-selector__control"
         buttonClassName="agent-model-selector__button"
         menuClassName="agent-model-selector__menu"
-        optionAside={(option) => (
-          option.value === resolved.candidateId && thinkingConfig
+        optionAside={(option) => {
+          const candidate = candidates.find((item) => item.id === option.value)
+            ?? (resolved.candidate?.id === option.value ? resolved.candidate : null);
+          const thinkingConfig = resolveThinkingConfigForModel(workspace, candidate);
+          return thinkingConfig
             ? <AgentThinkingControl
                 scopeKey={props.scopeKey}
                 thinkingConfig={thinkingConfig}
                 disabled={props.disabled}
+                onActivate={option.value !== resolved.candidateId ? () => selectModel(option.value) : undefined}
               />
-            : null
-        )}
+            : null;
+        }}
         menuFooter={locked ? undefined : ({ close }) => (
           <div className="agent-model-selector__footer">
             <button

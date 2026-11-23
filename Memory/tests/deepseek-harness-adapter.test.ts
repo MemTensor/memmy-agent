@@ -85,11 +85,14 @@ async function adapterHarness() {
   const schema = { default: () => schema, min: () => schema, max: () => schema };
   const source = readFileSync(resolve(import.meta.dirname, "../adapters/dsh/index.js"), "utf8")
     .replace(/^import .+;\n/gm, "")
-    .replace(/^export /gm, "");
+    .replace(/^export /gm, "")
+    .replaceAll("import.meta.url", "adapterUrl");
   // Execute the shipped adapter with its DSH peer services supplied by the harness.
   const apply = runInNewContext(`${source}\napply;`, {
     Schema: { object: (value: unknown) => value, boolean: () => schema, string: () => schema, number: () => schema },
     defineTool: (value: unknown) => value,
+    adapterUrl: new URL("../adapters/dsh/index.js", import.meta.url).href,
+    readAdapterConnection: async () => ({ endpoint: "http://memory.test", token: "fixture-token" }),
     fetch: fetchMock,
     AbortSignal,
     process: { env: {} }

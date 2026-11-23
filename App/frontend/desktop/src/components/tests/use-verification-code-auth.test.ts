@@ -28,19 +28,19 @@ describe("useVerificationCodeAuth helpers", () => {
   });
 
   it("shows structured cloud business messages for email verification", () => {
-    const error = new ApiRequestError("请求过于频繁，请60秒后再试", 429, "rate_limited");
+    const error = new ApiRequestError("邮箱格式错误", 400, "invalid_argument");
 
     expect(resolveAuthErrorMessage(error, "email", (key) => `translated:${key}`, "login.sendCodeFailed"))
-      .toBe("请求过于频繁，请60秒后再试");
+      .toBe("邮箱格式错误");
   });
 
-  it("keeps generic messages for phone and internal errors", () => {
+  it("localizes throttling and keeps internal details private", () => {
     const rateLimitedError = new ApiRequestError("请求过于频繁，请60秒后再试", 429, "rate_limited");
     const internalError = new ApiRequestError("database connection failed", 500, "internal");
     const translate = (key: MessageKey, _values?: MessageValues) => `translated:${key}`;
 
     expect(resolveAuthErrorMessage(rateLimitedError, "phone", translate, "login.sendCodeFailed"))
-      .toBe("translated:login.sendCodeFailed");
+      .toBe("translated:login.error.rateLimited");
     expect(resolveAuthErrorMessage(internalError, "email", translate, "login.sendCodeFailed"))
       .toBe("translated:login.sendCodeFailed");
   });

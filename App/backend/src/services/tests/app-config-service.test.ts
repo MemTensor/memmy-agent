@@ -16,6 +16,31 @@ import type {
 } from "@memmy/local-api-contracts";
 
 describe("AppConfigService", () => {
+  it("adds the current capability snapshot to views without writing it to model configuration", async () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-capability-view-"));
+    const store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
+    try {
+      const configPath = join(root, "config.yaml");
+      const writer = createMemmyConfigWriter({ configPath });
+      const catalog = { catalogVersion: 21, models: {} };
+      let available = true;
+      const service = createAppConfigService({
+        bootstrapRepository: store.repositories.bootstrap, memmyConfigWriter: writer,
+        getModelCapabilityCatalog: async () => available ? catalog : null
+      });
+      const view = await service.getModelConfig();
+      expect(view.capabilityCatalog).toEqual(catalog);
+      const input = { configRevision: view.configRevision, providers: view.providers.filter(p => !p.accountManaged), modelAssignments: view.modelAssignments };
+      expect((await service.setModelConfig(input)).capabilityCatalog).toEqual(catalog);
+      expect(readFileSync(configPath, "utf8")).not.toContain("capabilityCatalog");
+      expect((await writer.readModelConfig()).configRevision).toBe((await service.getModelConfig()).configRevision);
+      available = false;
+      expect(await service.getModelConfig()).not.toHaveProperty("capabilityCatalog");
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   it.each(["byok", "account"] as const)("reloads Memory after persisting %s mode to YAML and SQLite", async (userMode) => {
     const root = mkdtempSync(join(tmpdir(), "memmy-mode-reload-"));
     const configPath = join(root, "config.yaml");

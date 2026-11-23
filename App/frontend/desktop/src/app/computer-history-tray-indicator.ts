@@ -38,6 +38,10 @@ export function useComputerHistoryTrayIndicator(client: MemmyAgentClient | null)
       inFlight = true;
       try {
         const status = await client.getComputerHistoryObservationStatus();
+        if (active && status.state === "stopped") {
+          writeComputerHistoryTrayIndicator(false);
+          return;
+        }
         if (active && readComputerHistoryTrayIndicator()) window.memmy?.setComputerHistoryTrayIndicator?.({
           enabled: true,
           recording: status.state === "running",

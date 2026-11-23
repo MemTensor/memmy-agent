@@ -14,6 +14,7 @@ import {
   renderMemmyProjectHookConfig
 } from "../project-hook/install.js";
 import {
+  pathExists,
   removeMemmyResumeSkillDirectory,
   removeMemmyProjectSkillDirectory,
   removeMemmySkillDirectory,
@@ -83,6 +84,15 @@ export function createCursorSkillTarget(deps: CreateCursorSkillTargetDeps = {}):
         bridgePath: join(hookDirectory, WORKSPACE_BRIDGE_FILE_NAME),
         configPath: join(hookDirectory, HOOK_CONFIG_FILE_NAME)
       });
+    },
+
+    async isPluginInstalled() {
+      if (await pathExists(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, HOOK_SCRIPT_FILE_NAME))
+        || await pathExists(join(cursorRootDirectory, HOOK_DIRECTORY_NAME, LEGACY_HOOK_SCRIPT_FILE_NAME))) return true;
+      const config = await readJsonConfig(join(cursorRootDirectory, HOOKS_FILE_NAME));
+      const hooks = isRecord(config.hooks) ? config.hooks : {};
+      return Object.values(hooks).some((entries) => Array.isArray(entries) &&
+        entries.some(isMemmyResumeHook));
     },
 
     async isMemoryHookInstalled() {

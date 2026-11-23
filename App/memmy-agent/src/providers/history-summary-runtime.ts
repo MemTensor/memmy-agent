@@ -2,14 +2,17 @@ import { FallbackProvider } from "./fallback-provider.js";
 import type { ResolvedModelSelection } from "./model-catalog.js";
 import { OpenAICompatProvider } from "./openai-compat-provider.js";
 import { memmyAccountApiBase } from "./registry.js";
-import { staticLlmRuntime, type LLMRuntimeResolver } from "../utils/llm-runtime.js";
+import { LLMRuntime, type LLMRuntimeResolver } from "../utils/llm-runtime.js";
+import { createRuntimeModelCapabilityCatalog } from "./model-capability-catalog.js";
+import { resolveTurnModelCapabilities } from "./turn-model-capabilities.js";
 import { LLMProvider, LLMResponse } from "./base.js";
 import { HistorySummaryUsageGuard, HistorySummaryUsageBlockedError } from "../integrations/byok-token-usage/history-summary-usage.js";
 import { createByokTokenUsageClient, resolveHistorySummaryUsagePath } from "../integrations/byok-token-usage/register.js";
 import type { ByokTokenUsageInstallOptions } from "../integrations/byok-token-usage/types.js";
 
 /** History uses the configured text summary model independently of Agent chats. */
-export function historySummaryRuntime(selection: ResolvedModelSelection, usageOptions: ByokTokenUsageInstallOptions = {}): LLMRuntimeResolver {
+export function historySummaryRuntime(selection: ResolvedModelSelection, usageOptions: ByokTokenUsageInstallOptions = {},
+  catalog = createRuntimeModelCapabilityCatalog()): LLMRuntimeResolver {
   if (selection.capability !== "memory_summary" || selection.snapshot.provider instanceof FallbackProvider) {
     throw new Error("summary_model_selection_unavailable");
   }
@@ -26,12 +29,30 @@ export function historySummaryRuntime(selection: ResolvedModelSelection, usageOp
       thinking: { type: "disabled" },
     };
   }
-  const summaryProvider = selection.source === "byok"
-    ? new BudgetedHistorySummaryProvider(provider, selection, new HistorySummaryUsageGuard({
+  const usage = selection.source === "byok"
+    ? new HistorySummaryUsageGuard({
       client: createByokTokenUsageClient(usageOptions), outboxPath: resolveHistorySummaryUsagePath(usageOptions),
-    }))
-    : provider;
-  return staticLlmRuntime(summaryProvider, selection.snapshot.model);
+    }) : null;
+  const budgeted = (current: LLMProvider) => usage ? new BudgetedHistorySummaryProvider(current, selection, usage) : current;
+  const runtime = new LLMRuntime({
+    provider: budgeted(provider), model: selection.snapshot.model,
+    prepare: async (options = {}) => {
+      const state = await catalog.load();
+      const resolved = resolveTurnModelCapabilities({
+        state, model: selection.model ?? selection.snapshot.model,
+        ...selection.capabilityConfig,
+        providerReasoningEffort: provider.generation.reasoningEffort,
+        sessionThinking: options.thinkingEnabled !== undefined ? { enabled: options.thinkingEnabled } : undefined,
+      });
+      const modelCapabilities = Object.freeze({ ...resolved,
+        ...(options.maxTokens !== undefined ? { taskMaxTokens: options.maxTokens } : {}) });
+      // Official aliases require both switches; isolate them so concurrent tasks keep their own snapshot.
+      const current = accountGateway && provider instanceof OpenAICompatProvider && modelCapabilities.thinkingEnabled === true
+        ? provider.withExtraBody({ ...provider.extraBody, enable_thinking: true, thinking: { type: "enabled" } }) : provider;
+      return new LLMRuntime({ provider: budgeted(current), model: selection.snapshot.model, modelCapabilities, capabilityCatalogState: state });
+    },
+  });
+  return () => runtime;
 }
 
 class BudgetedHistorySummaryProvider extends LLMProvider {

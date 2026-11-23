@@ -352,7 +352,8 @@ describe("CLI command helpers", () => {
     expect(fs.existsSync(path.join(workspace, "AGENTS.md"))).toBe(true);
     const raw = YAML.parse(fs.readFileSync(configPath, "utf8"));
     expect(config.agents.defaults.maxTokens).toBe(65_536);
-    expect(raw.agents.defaults.maxTokens).toBe(65_536);
+    expect(raw.agents.defaults).not.toHaveProperty("maxTokens");
+    expect(raw.agents.defaults).not.toHaveProperty("contextWindowTokens");
     expect(raw.channels.websocket).toEqual(expect.objectContaining({ enabled: true }));
     expect(raw.channels.slack).toEqual(expect.objectContaining({ enabled: false }));
     expect(raw.fileMemory).toEqual({ enabled: false });

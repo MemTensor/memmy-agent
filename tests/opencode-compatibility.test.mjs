@@ -18,10 +18,10 @@ function fixture(factory) {
   const root = mkdtempSync(join(tmpdir(), "memmy-opencode-upgrade-")); roots.push(root);
   return { root, target: factory({ rootDirectory: root, memmyConfigPath: join(root, "missing.yaml") }) };
 }
-async function load(root) {
+async function load(root, name = "test-runtime") {
   // Import the installed artifact unchanged: real bridge, real Zod, no SDK substitution.
   const source = readFileSync(join(root, "plugins/memmy-memory.js"), "utf8");
-  const path = join(root, "plugins/test-runtime.mjs"); writeFileSync(path, source);
+  const path = join(root, "plugins", name + ".mjs"); writeFileSync(path, source);
   return (await import(pathToFileURL(path).href)).default;
 }
 
@@ -145,6 +145,158 @@ describe.each([["Backend", backend], ["Memory", memory]])("%s OpenCode upgrade",
     expect(requests.filter(r => r.path === "/api/v1/source-turns/complete")).toHaveLength(1);
   });
 });
+
+describe.each([["Backend", backend], ["Memory", memory]])("%s memory search", (_, factory) => {
+  describe.each(["V1", "V2"])("%s entry", generation => {
+    it("recalls snippet-only hits from the 2.1.7 verbose envelope after regeneration", async () => {
+      const { root, target } = fixture(factory);
+      vi.stubEnv("MEMMY_CONFIG", join(root, "missing.yaml"));
+      await target.installPlugin("opencode");
+      const configPath = join(root, "plugins/memmy-memory-config.json");
+      const originalConfig = readFileSync(configPath, "utf8");
+      const requests = [];
+      vi.stubGlobal("fetch", vi.fn(async (url, init) => {
+        const path = new URL(url).pathname;
+        const body = init?.body ? JSON.parse(init.body) : {};
+        requests.push({ path, body });
+        if (path === "/api/v1/sessions/open") return Response.json({ sessionId: "memory-search-session" });
+        if (path !== "/api/v1/memory/search") return Response.json({});
+        const injectedContext = "Historical deployment decision";
+        // Match the real service: structured hits are absent without verbose.
+        return Response.json(body.verbose === true ? {
+          injectedContext,
+          debug: { hits: [{ id: "trace-search", kind: "trace", memoryLayer: "L1", title: "Deployment decision",
+            snippet: "Deploy only after the staging checks pass.", score: 0.9, tags: ["deployment"] }] }
+        } : { injectedContext });
+      }));
+
+      for (const name of ["search-installed", "search-regenerated"]) {
+        if (name === "search-regenerated") await target.installPlugin("opencode");
+        const search = await searchTool(await load(root, name), root, generation);
+        try {
+          const result = await search.execute({ query: "  deployment decision  ", layers: ["L1"] });
+          expect(requests.at(-1)).toMatchObject({ path: "/api/v1/memory/search", body: {
+            query: "deployment decision", layers: ["L1"], verbose: true, source: "opencode", sessionId: "memory-search-session"
+          } });
+          expect(result).toContain("[L1] Deployment decision (trace-search)");
+          expect(result).toContain("Deploy only after the staging checks pass.");
+          expect(result).not.toContain("No relevant Memmy memories found.");
+          expect(result).toContain('<memmy_memory_context source="tool_search">');
+          expect(result).toContain("<current_user_request>\ndeployment decision\n</current_user_request>");
+        } finally { await search.dispose(); }
+      }
+      expect(requests.filter(request => request.path === "/api/v1/memory/search")).toHaveLength(2);
+      expect(readFileSync(configPath, "utf8")).toBe(originalConfig);
+      expect(await target.isInstalledHookCurrent()).toBe(true);
+    });
+
+    it.each([
+      ["hits", "summary"], ["results", "body"], ["memories", "content"], ["items", "snippet"]
+    ])("keeps legacy %s responses with %s text readable", async (field, textField) => {
+      const { search } = await setupSearch(factory, generation);
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+        [field]: [{ id: "legacy-memory", memoryLayer: "L2", title: "Stored preference",
+          ...(textField === "snippet" ? {} : { snippet: "Lower priority snippet" }), [textField]: "Keep release notes concise." }]
+      })));
+      try {
+        const result = await search.execute({ query: "release notes" });
+        expect(result).toContain("[L2] Stored preference (legacy-memory)");
+        expect(result).toContain("Keep release notes concise.");
+        expect(result).not.toContain("Lower priority snippet");
+        expect(result).not.toContain("No relevant Memmy memories found.");
+      } finally { await search.dispose(); }
+    });
+
+    it("reports no relevant memories when the service returns no hits", async () => {
+      const { search } = await setupSearch(factory, generation);
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({ injectedContext: "", debug: { hits: [] } })));
+      try {
+        const result = await search.execute({ query: "unknown memory" });
+        expect(result).toContain("No relevant Memmy memories found.");
+        expect(result).toContain("<current_user_request>\nunknown memory\n</current_user_request>");
+      } finally { await search.dispose(); }
+    });
+
+    it.each(["Relevant historical context", { markdown: "Relevant historical context" }])(
+      "surfaces context-only envelopes when structured hits are unavailable: %j", async injectedContext => {
+        const { root, search } = await setupSearch(factory, generation);
+        vi.stubGlobal("fetch", vi.fn(async () => Response.json({ injectedContext })));
+        try {
+          const result = await search.execute({ query: "historical context" });
+          expect(result).toContain("Relevant historical context");
+          expect(result).not.toContain("No relevant Memmy memories found.");
+        } finally { await search.dispose(); }
+      }
+    );
+
+    it("maps concurrent host searches and turns to their own Memory sessions", async () => {
+      const { root, search } = await setupSearch(factory, generation);
+      const requests = [];
+      vi.stubGlobal("fetch", vi.fn(async (url, init) => {
+        const path = new URL(url).pathname;
+        const body = init?.body ? JSON.parse(init.body) : {};
+        requests.push({ path, body });
+        if (path === "/api/v1/sessions/open") return Response.json({ sessionId: "memory-" + (body.namespace?.sessionKey || body.sessionId) });
+        if (path === "/api/v1/turns/start") return Response.json({ turnId: body.turnId });
+        return Response.json({ debug: { hits: [] } });
+      }));
+      try {
+        await Promise.all(["a", "b"].map(sessionID => search.execute({ query: "lookup-" + sessionID }, { sessionID, agent: "build" })));
+        // Host tool contexts may omit agent; resolve it from the host session.
+        await search.execute({ query: "repeat-a" }, { sessionID: "a" });
+        await search.beginTurn({ sessionID: "a", messageID: "turn-a", agent: "build" });
+        const searches = requests.filter(r => r.path === "/api/v1/memory/search");
+        const first = searches.find(r => r.body.query === "lookup-a").body.sessionId;
+        const second = searches.find(r => r.body.query === "lookup-b").body.sessionId;
+        expect(first).toBeTruthy(); expect(second).toBeTruthy(); expect(first).not.toBe(second);
+        expect(searches.find(r => r.body.query === "repeat-a").body.sessionId).toBe(first);
+        expect(requests.find(r => r.path === "/api/v1/turns/start").body.sessionId).toBe(first);
+        expect(requests.filter(r => r.path === "/api/v1/sessions/open")).toHaveLength(2);
+        await search.execute({ query: "no-session" }, {});
+        expect(requests.filter(r => r.path === "/api/v1/memory/search").at(-1).body.sessionId).toBeUndefined();
+      } finally { await search.dispose(); }
+    });
+  });
+});
+
+async function setupSearch(factory, generation) {
+  const { root, target } = fixture(factory);
+  vi.stubEnv("MEMMY_CONFIG", join(root, "missing.yaml"));
+  await target.installPlugin("opencode");
+  return { root, target, search: await searchTool(await load(root), root, generation) };
+}
+
+async function searchTool(plugin, root, generation) {
+  const context = { sessionID: "search-session", agent: "build" };
+  if (generation === "V1") {
+    const hooks = await plugin.server({ directory: root, worktree: root,
+      client: { session: { async get() { return { data: { agent: "build" } }; } } } });
+    return { execute: (args, current = context) => hooks.tool.memmy_memory_search.execute(args, current),
+      beginTurn: input => hooks["chat.message"](input, { parts: [{ type: "text", text: "Inspect README" }] }),
+      dispose: () => hooks.dispose() };
+  }
+  let search, promptHook;
+  const registration = () => ({ dispose() {} });
+  const dispose = await plugin.setup({
+    location: { directory: root },
+    tool: { async transform(fn) { fn({ add(tool) { if (tool.name === "memmy_memory_search") search = tool; } }); return registration(); } },
+    command: { async transform() { return registration(); } },
+    session: { async get() { return { agent: "build" }; }, async hook(name, hook) { if (name === "prompt") promptHook = hook; return registration(); } },
+    event: { async *subscribe({ signal }) {
+      if (!signal.aborted) await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+    } }
+  });
+  expect(search, "V2 must register memmy_memory_search").toBeDefined();
+  return {
+    async execute(args, current = context) {
+      const result = await search.execute(args, current);
+      expect(result).toHaveProperty("content");
+      return result.content;
+    },
+    beginTurn: input => promptHook({ ...input, prompt: { text: "Inspect README" } }),
+    dispose
+  };
+}
 
 describe("V2 native completion boundaries", () => {
   it.each(["unfinished", "tool-only", "interrupted", "failed-after-tool", "subagent", "reverted"])("handles %s without capturing an invalid turn", async (kind) => {

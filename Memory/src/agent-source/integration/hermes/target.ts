@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import YAML from "yaml";
-import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import { pathExists, removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
@@ -50,7 +50,7 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       }
 
       const filePath = join(root, TARGET_FILE_NAME);
-      const existing = await readTextFile(filePath);
+      const existing = removeCliMarkerBlock(await readTextFile(filePath));
       await writeFileAtomically(filePath, upsertMarkerBlock(existing, manifest));
       await replaceMemmySkillDirectory(root, manifest);
     },
@@ -63,12 +63,18 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
 
       const filePath = join(root, TARGET_FILE_NAME);
       const existing = await readTextFile(filePath);
-      if (!existing.includes(START_MARKER)) {
-        return;
-      }
-
-      await writeFileAtomically(filePath, removeMarkerBlock(existing));
+      const next = removeMarkerBlock(removeCliMarkerBlock(existing));
+      if (next !== existing) await writeFileAtomically(filePath, next);
       await removeMemmySkillDirectory(root);
+      await removeLegacyAgentInstructions(root);
+    },
+
+    async isLegacySkillInstalled() {
+      for (const fileName of [TARGET_FILE_NAME, LEGACY_TARGET_FILE_NAME]) {
+        const content = await readTextFile(join(rootDirectory, fileName));
+        if (content.includes(START_MARKER) || content.includes(LEGACY_CLI_START_MARKER)) return true;
+      }
+      return false;
     },
 
     async isInstalled(_targetId) {
@@ -78,6 +84,14 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       }
 
       return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(START_MARKER);
+    },
+
+    async isPluginInstalled() {
+      if (await pathExists(join(rootDirectory, "plugins", PLUGIN_ID, "plugin.yaml"))
+        || await pathExists(join(rootDirectory, "plugins", COMMAND_PLUGIN_ID, "plugin.yaml"))
+        || await pathExists(join(rootDirectory, "plugins", LEGACY_COMMAND_PLUGIN_ID, "plugin.yaml"))) return true;
+      const config = await readYamlConfig(join(rootDirectory, CONFIG_FILE_NAME));
+      return toMutableRecord(config.memory).provider === PLUGIN_ID;
     },
 
     async installPlugin(_targetId) {
@@ -103,7 +117,7 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       const filePath = join(root, TARGET_FILE_NAME);
       await writeFileAtomically(
         filePath,
-        upsertMarkerBlock(await readTextFile(filePath), renderMemmySkillBootstrapManifest(manifest))
+        upsertMarkerBlock(removeCliMarkerBlock(await readTextFile(filePath)), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
       await removeLegacyAgentInstructions(root);
@@ -119,8 +133,7 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       await rm(join(root, "plugins", COMMAND_PLUGIN_ID), { recursive: true, force: true });
       await rm(join(root, "plugins", LEGACY_COMMAND_PLUGIN_ID), { recursive: true, force: true });
       await removeHermesMemoryProviderConfig(join(root, CONFIG_FILE_NAME));
-      await removeMemmySkillDirectory(root);
-      await removeLegacyAgentInstructions(root);
+      await this.uninstall(_targetId);
     },
 
     async detectMemoryPluginConflict() {
@@ -255,23 +268,18 @@ function upsertMarkerBlock(existing: string, manifest: SkillManifest): string {
 }
 
 function removeMarkerBlock(existing: string): string {
-  return existing.replace(createMarkerBlockPattern(START_MARKER), "");
+  return existing.replace(new RegExp(createMarkerBlockPattern(START_MARKER), "gm"), "");
+}
+
+function removeCliMarkerBlock(existing: string): string {
+  return existing.replace(new RegExp(createMarkerBlockPattern(LEGACY_CLI_START_MARKER, LEGACY_CLI_END_MARKER), "gm"), "");
 }
 
 async function removeLegacyAgentInstructions(rootDirectory: string): Promise<void> {
   const filePath = join(rootDirectory, LEGACY_TARGET_FILE_NAME);
   const existing = await readTextFile(filePath);
-  if (!existing.includes(LEGACY_CLI_START_MARKER) && !existing.includes(START_MARKER)) {
-    return;
-  }
-  const withoutLegacyCli = existing.replace(
-    createMarkerBlockPattern(LEGACY_CLI_START_MARKER, LEGACY_CLI_END_MARKER),
-    ""
-  );
-  const withoutMemmyBlock = withoutLegacyCli.replace(createMarkerBlockPattern(START_MARKER), "");
-  if (withoutMemmyBlock !== existing) {
-    await writeFileAtomically(filePath, withoutMemmyBlock);
-  }
+  const next = removeMarkerBlock(removeCliMarkerBlock(existing));
+  if (next !== existing) await writeFileAtomically(filePath, next);
 }
 
 function renderMarkerBlock(manifest: SkillManifest): string {
@@ -279,7 +287,7 @@ function renderMarkerBlock(manifest: SkillManifest): string {
 }
 
 function createMarkerBlockPattern(startMarker: string, endMarker = END_MARKER): RegExp {
-  return new RegExp(`${escapeRegExp(startMarker)}\\n[\\s\\S]*?${escapeRegExp(endMarker)}\\n?`, "m");
+  return new RegExp(`${escapeRegExp(startMarker)}\\r?\\n[\\s\\S]*?${escapeRegExp(endMarker)}(?:\\r?\\n)?`, "m");
 }
 
 async function writeFileAtomically(filePath: string, content: string): Promise<void> {

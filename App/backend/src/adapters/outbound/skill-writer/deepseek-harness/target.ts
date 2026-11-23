@@ -5,6 +5,7 @@ import { basename, dirname, join } from "node:path";
 import YAML from "yaml";
 import { resolveDeepseekHarnessHomeDirectory } from "../../agent-paths.js";
 import {
+  pathExists,
   removeMemmyResumeSkillDirectory,
   removeMemmyProjectSkillDirectory,
   removeMemmySkillDirectory,
@@ -91,6 +92,11 @@ export function createDeepseekHarnessSkillTarget(
       return config.bridgeIntegrity === undefined
         ? bridge === await loadMemmyWorkspaceBridgeRuntimeAsset()
         : config.bridgeIntegrity === bridgeIntegrity(bridge);
+    },
+
+    async isPluginInstalled() {
+      return await pathExists(join(pluginDirectory, "index.mjs"))
+        || (await readTextFile(patchPath)).includes(PATCH_START);
     },
 
     async installPlugin() {

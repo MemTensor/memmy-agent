@@ -1,3 +1,5 @@
+import type { SkillTarget } from "./types.js";
+import { renderMemmyDefaultSkillManifest } from "./templates/memmy-default.js";
 import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
@@ -62,7 +64,7 @@ function temporarySiblingPath(path: string): string {
   return join(dirname(path), `.${basename(path)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
 }
 
-async function pathExists(path: string): Promise<boolean> {
+export async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path);
     return true;
@@ -76,4 +78,47 @@ async function pathExists(path: string): Promise<boolean> {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+export interface SkillInstallationState {
+  skillInstalled: boolean;
+  pluginInstalled: boolean | undefined;
+}
+
+export async function readSkillInstallationState(
+  target: SkillTarget,
+  sourceId: string,
+  onPluginReadError?: (error: unknown) => void
+): Promise<SkillInstallationState> {
+  const root = await target.resolveRootDirectory();
+  const skillInstalled = await target.isInstalled(sourceId)
+    || (await target.isLegacySkillInstalled?.() ?? false)
+    || (root !== null && await pathExists(join(root, "skills", "memmy-memory", "SKILL.md")));
+  let pluginInstalled: boolean | undefined = target.installPlugin ? undefined : false;
+  if (target.isPluginInstalled) {
+    try {
+      pluginInstalled = await target.isPluginInstalled();
+    } catch (error) {
+      if (!onPluginReadError) throw error;
+      onPluginReadError(error);
+    }
+  }
+  return { skillInstalled, pluginInstalled };
+}
+
+/** Remove only integrations confirmed absent before this connection attempt. */
+export async function rollbackSkillInstallation(
+  target: SkillTarget,
+  sourceId: string,
+  kind: "skill" | "plugin",
+  before: SkillInstallationState
+): Promise<void> {
+  if (kind === "skill") {
+    if (!before.skillInstalled && before.pluginInstalled === false) await target.uninstall(sourceId);
+    return;
+  }
+  if (before.pluginInstalled !== false) return;
+  await target.uninstallPlugin?.(sourceId);
+  if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
+  if (before.skillInstalled) await target.install(renderMemmyDefaultSkillManifest(sourceId));
 }

@@ -1,6 +1,8 @@
 import type Database from "better-sqlite3";
 import { retrievalDocumentForMemory } from "../algorithm/plugin-algorithms.js";
 import type { MemoryRow } from "../types.js";
+import { hasRestrictedImportedSkillContent, isIdentityOnlyImportedSkill } from "./imported-skill.js";
+import { isL3FieldSnapshotMemory } from "../service/l3-field/snapshot-memory.js";
 
 type Kind = "memories" | "user_memories";
 /** A savepoint also protects callers already inside a business transaction. */
@@ -52,7 +54,10 @@ export function repairFts(db: Database.Database, kind: Kind, id: string): void {
       {id:string;memory_layer:MemoryRow["memoryLayer"];memory_key:string|null;memory_value:string;tags_json:string;info_json:string;properties_json:string;status:string;deleted_at:string|null} | undefined;
     const memory = row && {id:row.id,memoryLayer:row.memory_layer,memoryKey:row.memory_key,memoryValue:row.memory_value,
       tags:stringArray(row.tags_json),info:jsonObject(row.info_json),properties:jsonObject(row.properties_json)} as MemoryRow | undefined;
-    writeFts(db,kind,id,row && memory && row.status !== "deleted" && !row.deleted_at ? [id,retrievalDocumentForMemory(memory),memory.tags.join(" ")] : undefined);
+    writeFts(db,kind,id,row && memory && row.status !== "deleted" && !row.deleted_at
+      && !isIdentityOnlyImportedSkill(memory) && !hasRestrictedImportedSkillContent(memory)
+      && !isL3FieldSnapshotMemory(memory)
+      ? [id,retrievalDocumentForMemory(memory),memory.tags.join(" ")] : undefined);
   }
 }
 

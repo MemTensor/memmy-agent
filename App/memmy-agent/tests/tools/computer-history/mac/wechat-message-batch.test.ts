@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   normalizeWeChatBatch, WeChatMessageBatchReader, WeChatReaderError,
 } from "../../../../src/tools/computer-history/mac/wechat-message-batch.js";
@@ -284,4 +284,24 @@ process.exit(2);
     expect(fs.readdirSync(fixture.cursorFile)).toEqual(["retained.txt"]);
     expect(fs.readFileSync(path.join(fixture.cursorFile, "retained.txt"), "utf8")).toBe("fixture contents");
   });
+});
+
+
+it("terminates a running reader subprocess on cancellation without advancing its cursor", async () => {
+  const fixture = createReadFixture();
+  const helper = fixture.options.helper;
+  const pidFile = path.join(path.dirname(helper), "reader-pid.txt");
+  fs.writeFileSync(helper, `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid)); setInterval(()=>{},1000);`);
+  const pending = fixture.reader.read().then(() => "unexpected success", error => error);
+  await vi.waitFor(() => expect(fs.existsSync(pidFile)).toBe(true));
+  const pid = Number(fs.readFileSync(pidFile, "utf8"));
+  try {
+    expect(() => process.kill(pid, 0)).not.toThrow();
+    fixture.reader.cancel();
+    expect(await pending).toBeInstanceOf(WeChatReaderError);
+    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow());
+    expect(fs.existsSync(fixture.cursorFile)).toBe(false);
+  } finally {
+    fixture.reader.cancel();
+  }
 });
