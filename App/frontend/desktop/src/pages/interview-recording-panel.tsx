@@ -6,8 +6,8 @@
  * finished it switches to the diarized transcript and lets the user play the
  * audio back against it.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronLeft, Pause, Play, Square } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from "react";
+import { ArrowDown, ChevronLeft, Pause, Play, Square } from "lucide-react";
 import type { AsrTranscriptSegment } from "@memmy/local-api-contracts";
 import type { AsrLiveLine } from "../lib/asr-live-transcription.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -15,6 +15,7 @@ import { SidebarResizeHandle, useResizableSidebar } from "./sidebar-resize.js";
 
 /** Shared with the workspace preview so both panels reopen at the same width. */
 const RECORDING_PANEL_WIDTH_STORAGE_KEY = "memmy.interviewRecordingPanel.width";
+const TRANSCRIPT_BOTTOM_TOLERANCE_PX = 4;
 
 /** The finished transcript of a recording. */
 export interface RecordingPanelTranscript {
@@ -146,7 +147,7 @@ export function InterviewRecordingPanel(props: InterviewRecordingPanelProps): Re
       */}
       {props.bar ? <div className="recording-panel__bar-slot">{props.bar}</div> : null}
 
-      <div className="recording-panel__body">
+      <div className={session && !session.transcript ? "recording-panel__body recording-panel__body--live" : "recording-panel__body"}>
         {recording ? (
           <div className="recording-panel__status" role="status">
             <span className="recording-panel__pulse" aria-hidden="true" />
@@ -163,7 +164,10 @@ export function InterviewRecordingPanel(props: InterviewRecordingPanelProps): Re
             <TranscriptTurns transcript={session.transcript} onSeek={session.audioUrl ? (ms) => setSeek((current) => ({ ms, sequence: (current?.sequence ?? 0) + 1 })) : undefined} />
           </>
         ) : session ? (
-          <LiveLines lines={session.lines} pending={session.status === "transcribing"} pendingLabel={t("plugin.ui.audio.transcribing")} />
+          <LiveRecordingTranscript
+            lines={session.lines}
+            pendingLabel={session.status === "transcribing" ? t("plugin.ui.audio.transcribing") : undefined}
+          />
         ) : (
           <p className="recording-panel__empty">{t("recording.pane.idle")}</p>
         )}
@@ -173,28 +177,104 @@ export function InterviewRecordingPanel(props: InterviewRecordingPanelProps): Re
   );
 }
 
-/** Transcript lines from the in-progress recording. */
-function LiveLines(props: { lines: AsrLiveLine[]; pending: boolean; pendingLabel: string }): ReactNode {
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+/** Follows live transcript updates until the reader scrolls away from the latest line. */
+export function LiveRecordingTranscript({ lines, emptyLabel, pendingLabel }: {
+  lines: readonly AsrLiveLine[];
+  emptyLabel?: string;
+  pendingLabel?: string;
+}): ReactNode {
+  const { t } = useTranslation();
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const followingRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  const [showJump, setShowJump] = useState(false);
+  const jumpLabel = t("home.scrollToLatest");
+
+  const followLatest = useCallback(() => {
+    const viewport = scrollRef.current;
+    if (!viewport || viewport.clientHeight === 0) return;
+    const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    if (!followingRef.current) {
+      if (bottom > 0) return;
+      followingRef.current = true;
+      setShowJump(false);
+    }
+    // A transcript update can render before the browser delivers an upward scroll event.
+    if (viewport.scrollTop < lastScrollTopRef.current && bottom - viewport.scrollTop > TRANSCRIPT_BOTTOM_TOLERANCE_PX) {
+      lastScrollTopRef.current = viewport.scrollTop;
+      followingRef.current = false;
+      setShowJump(true);
+      return;
+    }
+    viewport.scrollTop = bottom;
+    lastScrollTopRef.current = viewport.scrollTop;
+  }, []);
+
+  useLayoutEffect(followLatest, [followLatest, lines, emptyLabel, pendingLabel]);
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [props.lines.length]);
+    const viewport = scrollRef.current;
+    if (!viewport || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(followLatest);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [followLatest]);
+
+  const trackScroll = ({ currentTarget }: UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = currentTarget;
+    // A delayed event from our own scroll may arrive after the text grows.
+    if (scrollTop === lastScrollTopRef.current) return;
+    lastScrollTopRef.current = scrollTop;
+    const atBottom = scrollTop + clientHeight >= scrollHeight - TRANSCRIPT_BOTTOM_TOLERANCE_PX;
+    followingRef.current = atBottom;
+    setShowJump(!atBottom);
+  };
 
   return (
-    <div className="recording-panel__lines">
-      {props.lines.map((line) => (
-        <p key={line.startMs} className="recording-panel__line">
-          <span className="recording-panel__line-time">{formatClock(line.startMs)}</span>
-          <span>{line.text}</span>
-        </p>
-      ))}
-      {props.lines.length === 0 || props.pending ? (
-        <p className="recording-panel__line recording-panel__line--pending">
-          <span className="recording-panel__line-time">{formatClock(props.lines.at(-1)?.endMs ?? 0)}</span>
-          <span>{props.pending ? props.pendingLabel : "…"}</span>
-        </p>
+    <div className="recording-panel__transcript">
+      <div
+        ref={scrollRef}
+        className="recording-panel__transcript-scroll"
+        role="region"
+        aria-label={t("plugin.ui.audio.transcript")}
+        tabIndex={0}
+        onScroll={trackScroll}
+      >
+        <div className="recording-panel__lines">
+          {lines.map((line) => (
+            <p key={line.startMs} className="recording-panel__line">
+              <span className="recording-panel__line-time">{formatClock(line.startMs)}</span>
+              <span>{line.text}</span>
+            </p>
+          ))}
+          {lines.length === 0 && emptyLabel && !pendingLabel ? <p className="recording-panel__empty">{emptyLabel}</p> : null}
+          {pendingLabel || (lines.length === 0 && !emptyLabel) ? (
+            <p className="recording-panel__line recording-panel__line--pending">
+              <span className="recording-panel__line-time">{formatClock(lines.at(-1)?.endMs ?? 0)}</span>
+              <span>{pendingLabel ?? "…"}</span>
+            </p>
+          ) : null}
+        </div>
+      </div>
+      {showJump ? (
+        <button
+          type="button"
+          className="agent-scroll-to-bottom-fab recording-panel__jump-to-latest"
+          aria-label={jumpLabel}
+          title={jumpLabel}
+          onClick={() => {
+            const viewport = scrollRef.current;
+            if (!viewport) return;
+            lastScrollTopRef.current = viewport.scrollTop;
+            followingRef.current = true;
+            setShowJump(false);
+            followLatest();
+            viewport.focus({ preventScroll: true });
+          }}
+        >
+          <ArrowDown size={16} aria-hidden="true" />
+        </button>
       ) : null}
-      <div ref={bottomRef} />
     </div>
   );
 }
@@ -244,9 +324,8 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
     const mediaDurationMs = validDurationMs(audio.duration * 1_000);
     if (mediaDurationMs === 0) return;
     // MediaRecorder WebM metadata is sometimes finite but implausibly short.
-    // Never let it shorten the independently measured capture duration; for
-    // uploaded files it can still extend the transcript-derived fallback.
-    setDurationMs(Math.max(fallbackDurationMs, mediaDurationMs));
+    // Keep the displayed duration while the demuxer is still discovering it.
+    setDurationMs((current) => Math.max(current, mediaDurationMs));
   };
 
   useEffect(() => {
@@ -286,15 +365,12 @@ export function RecordingPlayer(props: { src: string; durationMs?: number; seek?
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={(event) => {
-          // The independently measured capture duration can be slightly
-          // longer than the playable media clock. Once the media has ended,
-          // treat it as semantically complete instead of leaving the thumb a
-          // few percent short of the end.
-          const completedDurationMs = Math.max(
-            durationMs,
-            validDurationMs(event.currentTarget.duration * 1_000),
-            validCurrentTimeMs(event.currentTarget.currentTime),
-          );
+          // Once playback ends, its final position gives the playable duration
+          // even for older recordings saved with an inflated capture time.
+          const audio = event.currentTarget;
+          const completedDurationMs = validCurrentTimeMs(audio.currentTime)
+            || validDurationMs(audio.duration * 1_000)
+            || durationMs;
           setDurationMs(completedDurationMs);
           setCurrentMs(completedDurationMs);
           setPlaying(false);

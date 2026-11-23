@@ -23,7 +23,7 @@ import { useTranslation } from "../i18n/use-translation.js";
 import { enUSMessages, zhCNMessages } from "../i18n/messages.js";
 import { mergeLiveLines, type AsrLiveLine } from "../lib/asr-live-transcription.js";
 import type { RecordingPanelTranscript } from "./interview-recording-panel.js";
-import { formatClock, RecordingPlayer, TranscriptTurns } from "./interview-recording-panel.js";
+import { formatClock, LiveRecordingTranscript, RecordingPlayer, TranscriptTurns } from "./interview-recording-panel.js";
 import { blobToAudioBase64, isLiveAsrTimeout, useAsrRecorder } from "./asr-recorder.js";
 import { pushWaveformLevel } from "../lib/audio-pcm-tap.js";
 import { persistRecording } from "../lib/recording-deliverables.js";
@@ -967,7 +967,7 @@ function LiveView(props: { session: RecordingEntrySession }): ReactNode {
   const failed = session.live?.status === "failed";
   const completed = session.status === "idle" && session.live?.status === "ready";
   return (
-    <div className="recording-page">
+    <div className="recording-page recording-page--live">
       <header className="recording-page__bar">
         <button type="button" className="recording-page__back" aria-label={t("recording.page.backToList")} onClick={session.back}>
           <ChevronLeft size={16} aria-hidden="true" />
@@ -1006,16 +1006,7 @@ function LiveView(props: { session: RecordingEntrySession }): ReactNode {
         </span>
         <span className="recording-panel__status-time">{formatClock(session.elapsedMs)}</span>
       </div>
-      <div className="recording-panel__lines">
-        {session.lines.length === 0
-          ? <p className="recording-panel__empty">{t("recording.page.listening")}</p>
-          : session.lines.map((line) => (
-            <p key={`${line.startMs}:${line.text}`} className="recording-panel__line">
-              <span className="recording-panel__line-time">{formatClock(line.startMs)}</span>
-              <span>{line.text}</span>
-            </p>
-          ))}
-      </div>
+      <LiveRecordingTranscript lines={session.lines} emptyLabel={t("recording.page.listening")} />
       {session.error ? <p className="recording-page__error" role="alert">{session.error}</p> : null}
     </div>
   );
