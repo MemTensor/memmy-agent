@@ -21,6 +21,7 @@ const WEB_SEARCH_PROVIDER_OPTIONS = [
   { name: "jina", label: "Jina", credential: "api_key" },
   { name: "kagi", label: "Kagi", credential: "api_key" },
   { name: "olostep", label: "Olostep", credential: "api_key" },
+  { name: "keenable", label: "Keenable (free, optional key)", credential: "optional_api_key" },
 ] as const;
 
 const WEB_SEARCH_PROVIDER_BY_NAME: Map<string, (typeof WEB_SEARCH_PROVIDER_OPTIONS)[number]> = new Map(
@@ -507,8 +508,10 @@ export function updateWebSearchSettings(query: QueryParams): Record<string, any>
     if (!apiKey && previousProvider === providerName && searchConfig.apiKey) {
       apiKey = searchConfig.apiKey;
     }
-    if (!apiKey) throw new WebUISettingsError("api_key is required");
-    setSearchValue("apiKey", apiKey);
+    if (!apiKey && providerOption.credential !== "optional_api_key") {
+      throw new WebUISettingsError("api_key is required");
+    }
+    setSearchValue("apiKey", apiKey ?? "");
     setSearchValue("baseUrl", "");
   }
 

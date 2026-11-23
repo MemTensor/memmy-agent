@@ -512,9 +512,10 @@ export class WebSearchTool extends Tool {
             const methods: Record<string, (q: string, n: number, signal?: AbortSignal) => Promise<string>> = {
               duckduckgo: worker.searchDuckduckgo, brave: worker.searchBrave, tavily: worker.searchTavily,
               searxng: worker.searchSearxng, jina: worker.searchJina, kagi: worker.searchKagi, olostep: worker.searchOlostep,
+              keenable: worker.searchKeenable,
             };
             if (!methods[provider]) throw new WebFailure("configuration", "Unknown search provider", "configuration");
-            if (provider !== "duckduckgo" && !(provider === "searxng" ? worker.config.baseUrl.trim() : worker.config.apiKey)) {
+            if (provider !== "duckduckgo" && provider !== "keenable" && !(provider === "searxng" ? worker.config.baseUrl.trim() : worker.config.apiKey)) {
               throw new WebFailure("configuration", "Missing search credentials or endpoint", "configuration");
             }
             return await this.health.run(key, signal, () => methods[provider].call(worker, query, n, signal));
@@ -628,6 +629,30 @@ export class WebSearchTool extends Tool {
         content: String(item.content ?? "").slice(0, 500),
       }));
       return formatResults(query, items, n);
+  }
+
+  async searchKeenable(query: string, n: number, signal?: AbortSignal): Promise<string> {
+    // Keenable works keyless via its public endpoint; a key is optional and lifts the per-IP limit.
+    const apiKey = this.config.apiKey || process.env.KEENABLE_API_KEY || "";
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "User-Agent": this.userAgent,
+      "X-Keenable-Title": "Memmy Agent",
+    };
+    if (apiKey) headers["X-API-Key"] = apiKey;
+    const data = await requestJson(
+      apiKey ? "https://api.keenable.ai/v1/search" : "https://api.keenable.ai/v1/search/public",
+      { method: "POST", signal, headers, body: JSON.stringify({ query, max_results: n }) },
+    );
+    const items = searchItems(data.results).slice(0, n).map((item: Record<string, any>) => {
+      const text = String(item.description || item.snippet || "");
+      return {
+        title: item.title ?? "",
+        url: item.url ?? "",
+        content: text.length > 500 ? `${text.slice(0, 500)}…` : text,
+      };
+    });
+    return formatResults(query, items, n);
   }
 
   async searchKagi(query: string, n: number, signal?: AbortSignal): Promise<string> {
