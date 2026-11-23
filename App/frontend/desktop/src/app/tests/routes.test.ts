@@ -99,6 +99,7 @@ describe("desktop route table", () => {
       "/tools",
       "/memory",
       "/knowledge",
+      "/collab",
       "/memory-sources",
       "/plugin",
       "/settings"
@@ -514,6 +515,165 @@ describe("desktop route table", () => {
 
     expect(reconciled.onboarding).toMatchObject(buildAccountOnboardingStartPatch(staleCompletedBootstrap.onboarding));
     expect(resolveInitialView({ bootstrap: reconciled, preferredMode: "full", accountSession: unfinishedAccountSession })).toBe("/onboarding");
+  });
+
+  it("restores the finished cloud guide instead of restarting onboarding on a fresh install", () => {
+    const freshInstallBootstrap = AppBootstrapResponseSchema.parse({
+      ...baseBootstrap,
+      app: { ...baseBootstrap.app, userMode: "account" },
+      onboarding: {
+        ...baseBootstrap.onboarding,
+        completed: false,
+        currentStep: "scan_permission_required" as const,
+        firstEncounterReportStatus: "pending" as const
+      }
+    });
+    const finishedAccountSession = {
+      authenticated: true as const,
+      isNewUser: false,
+      profile: {
+        userId: "old-user",
+        email: "old@example.com",
+        phoneNumber: null,
+        nickname: "Old User",
+        avatarUrl: null,
+        planType: null,
+        hasFinishedGuide: true,
+        region: null,
+        registeredAt: "2025-01-01T00:00:00.000Z"
+      }
+    };
+
+    const reconciled = reconcileInitialOnboarding({
+      bootstrap: freshInstallBootstrap,
+      accountSession: finishedAccountSession
+    });
+
+    expect(reconciled.onboarding).toMatchObject({
+      completed: true,
+      currentStep: "completed",
+      firstEncounterReportStatus: "skipped",
+      hasAcceptedTerms: false,
+      scanPermission: "unset",
+      improvementProgram: "unset"
+    });
+    expect(reconciled.onboarding.completedAt).toEqual(expect.any(String));
+    expect(resolveInitialView({
+      bootstrap: reconciled,
+      preferredMode: "full",
+      accountSession: finishedAccountSession
+    })).toBe("/main");
+  });
+
+  it("keeps an already recorded first encounter report and completion time when restoring", () => {
+    const restoredSourceBootstrap = AppBootstrapResponseSchema.parse({
+      ...baseBootstrap,
+      app: { ...baseBootstrap.app, userMode: "account" },
+      onboarding: {
+        ...baseBootstrap.onboarding,
+        completed: false,
+        currentStep: "scan_permission_required" as const,
+        firstEncounterReportStatus: "shown" as const,
+        completedAt: "2025-12-31T00:00:00.000Z"
+      }
+    });
+    const reconciled = reconcileInitialOnboarding({
+      bootstrap: restoredSourceBootstrap,
+      accountSession: {
+        authenticated: true as const,
+        isNewUser: false,
+        profile: {
+          userId: "old-user",
+          email: "old@example.com",
+          phoneNumber: null,
+          nickname: "Old User",
+          avatarUrl: null,
+          planType: null,
+          hasFinishedGuide: true,
+          region: null,
+          registeredAt: "2025-01-01T00:00:00.000Z"
+        }
+      }
+    });
+
+    expect(reconciled.onboarding.firstEncounterReportStatus).toBe("shown");
+    expect(reconciled.onboarding.completedAt).toBe("2025-12-31T00:00:00.000Z");
+  });
+
+  it("is idempotent once the restored guide state is completed", () => {
+    const completedBootstrap = AppBootstrapResponseSchema.parse({
+      ...baseBootstrap,
+      app: { ...baseBootstrap.app, userMode: "account" },
+      onboarding: {
+        ...baseBootstrap.onboarding,
+        completed: true,
+        currentStep: "completed" as const,
+        firstEncounterReportStatus: "skipped" as const,
+        completedAt: "2026-01-01T00:00:00.000Z"
+      }
+    });
+    const finishedAccountSession = {
+      authenticated: true as const,
+      isNewUser: false,
+      profile: {
+        userId: "old-user",
+        email: "old@example.com",
+        phoneNumber: null,
+        nickname: "Old User",
+        avatarUrl: null,
+        planType: null,
+        hasFinishedGuide: true,
+        region: null,
+        registeredAt: "2025-01-01T00:00:00.000Z"
+      }
+    };
+
+    const once = reconcileInitialOnboarding({ bootstrap: completedBootstrap, accountSession: finishedAccountSession });
+    const twice = reconcileInitialOnboarding({ bootstrap: once, accountSession: finishedAccountSession });
+
+    expect(once.onboarding).toEqual(completedBootstrap.onboarding);
+    expect(twice.onboarding).toEqual(once.onboarding);
+  });
+
+  it("still resets a locally completed guide when the account has not finished it", () => {
+    const carriedBootstrap = AppBootstrapResponseSchema.parse({
+      ...baseBootstrap,
+      app: { ...baseBootstrap.app, userMode: "account" },
+      onboarding: {
+        ...baseBootstrap.onboarding,
+        completed: true,
+        currentStep: "completed" as const,
+        firstEncounterReportStatus: "pending" as const,
+        completedAt: "2026-06-04T00:00:00.000Z"
+      }
+    });
+    const newUserAccountSession = {
+      authenticated: true as const,
+      isNewUser: true,
+      profile: {
+        userId: "user-3",
+        email: null,
+        phoneNumber: "13800138001",
+        nickname: "New User",
+        avatarUrl: null,
+        planType: null,
+        hasFinishedGuide: false,
+        region: null,
+        registeredAt: "2026-06-04T00:00:00.000Z"
+      }
+    };
+
+    const reconciled = reconcileInitialOnboarding({
+      bootstrap: carriedBootstrap,
+      accountSession: newUserAccountSession
+    });
+
+    expect(reconciled.onboarding).toMatchObject({
+      completed: false,
+      currentStep: "scan_permission_required",
+      firstEncounterReportStatus: "pending",
+      completedAt: null
+    });
   });
 
   it("reads Electron launch mode from query string", () => {

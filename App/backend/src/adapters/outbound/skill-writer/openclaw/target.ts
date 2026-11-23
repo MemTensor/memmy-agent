@@ -8,7 +8,20 @@ import {
   resolveOpenclawConfigPath,
   resolveOpenclawStateDirectory
 } from "../../agent-paths.js";
-import { pathExists, removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import {
+  pathExists,
+  removeMemmyProjectSkillDirectory,
+  removeMemmySkillDirectory,
+  replaceMemmyProjectSkillDirectory,
+  replaceMemmySkillDirectory
+} from "../skill-directory.js";
+import {
+  MEMMY_PROJECT_BOOTSTRAP_START_MARKER,
+  MEMMY_PROJECT_SKILL_DIRECTORY_NAME,
+  removeMemmyProjectBootstrapBlock,
+  renderMemmyProjectBootstrapBlock,
+  upsertMemmyProjectBootstrapBlock
+} from "../templates/memmy-project-skill.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
@@ -64,6 +77,7 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
       const existing = removeCliMarkerBlock(await readTextFile(filePath));
       await writeFileAtomically(filePath, upsertMarkerBlock(existing, manifest));
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
     },
 
     async uninstall(_targetId) {
@@ -78,6 +92,7 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
       const next = removeMarkerBlock(removeCliMarkerBlock(existing));
       if (next !== existing) await writeFileAtomically(filePath, next);
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
     },
 
     async isLegacySkillInstalled() {
@@ -102,6 +117,44 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
       const config = await readJsonConfig(configPath);
       const plugins = toMutableRecord(config.plugins);
       return PLUGIN_ID in toMutableRecord(plugins.entries) || PLUGIN_ID in toMutableRecord(plugins.installs);
+    },
+
+    async writeProjectSkillBootstrap() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        throw new Error("OpenClaw is not installed or its directory is unavailable");
+      }
+
+      const workspace = await resolveOpenclawWorkspaceDirectory(root, configPath, deps.workspaceDirectory);
+      const filePath = join(workspace, TARGET_FILE_NAME);
+      // 这里的指令文件在 workspace 下、技能在 state 目录下，相对路径会指错地方，因此写绝对路径。
+      const options = { skillFilePath: join(root, "skills", MEMMY_PROJECT_SKILL_DIRECTORY_NAME, "SKILL.md") };
+      await writeFileAtomically(filePath, upsertMemmyProjectBootstrapBlock(await readTextFile(filePath), options));
+    },
+
+    async removeProjectSkillBootstrap() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        return;
+      }
+
+      const workspace = await resolveOpenclawWorkspaceDirectory(root, configPath, deps.workspaceDirectory);
+      const filePath = join(workspace, TARGET_FILE_NAME);
+      const existing = await readTextFile(filePath);
+      if (!existing.includes(MEMMY_PROJECT_BOOTSTRAP_START_MARKER)) {
+        return;
+      }
+      await writeFileAtomically(filePath, removeMemmyProjectBootstrapBlock(existing));
+    },
+
+    async isProjectSkillBootstrapCurrent() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      const workspace = await resolveOpenclawWorkspaceDirectory(root, configPath, deps.workspaceDirectory);
+      const expected = renderMemmyProjectBootstrapBlock({
+        skillFilePath: join(root, "skills", MEMMY_PROJECT_SKILL_DIRECTORY_NAME, "SKILL.md")
+      });
+      return (await readTextFile(join(workspace, TARGET_FILE_NAME))).includes(expected);
     },
 
     async installPlugin(_targetId) {
@@ -142,6 +195,7 @@ export function createOpenclawSkillTarget(deps: CreateOpenclawSkillTargetDeps = 
         upsertMarkerBlock(removeCliMarkerBlock(await readTextFile(filePath)), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
     },
 
     async uninstallPlugin(_targetId) {

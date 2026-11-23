@@ -10,8 +10,12 @@ on:
       - "Memory/tests/service/read-model/panel-stats-migration.test.ts"
       - "Memory/tests/fixtures/panel-cache-fixture.ts"
       - "App/shell/desktop/src/main/windows-launch-at-login.ts"
+      - "App/shell/desktop/src/main/windows-update-launcher.ts"
+      - "App/shell/desktop/build/installer-win-unsigned.nsh"
       - "App/shell/desktop/src/main/main.ts"
       - "App/shell/desktop/tests/windows-launch-at-login*.test.ts"
+      - "App/shell/desktop/tests/windows-update-launcher.test.ts"
+      - "App/shell/desktop/tests/windows-installer-launcher.test.ts"
       - "App/shell/desktop/tests/fixtures/windows-launch-at-login.cjs"
       - "App/native-computer-history/**"
       - "App/native-computer-use/**"
@@ -249,11 +253,11 @@ jobs:
           node node_modules/vitest/vitest.mjs run tests/windows-memory-workflow.test.ts tests/windows-provider-receipt-workflow.test.ts
           if ($LASTEXITCODE -ne 0) { throw 'Windows workflow and receipt contract regressions failed' }
           $loginResults = Join-Path $env:RUNNER_TEMP 'windows-login-results.json'
-          node node_modules/vitest/vitest.mjs run App/shell/desktop/tests/windows-launch-at-login.test.ts App/shell/desktop/tests/windows-launch-at-login-electron.test.ts --reporter=default --reporter=json --outputFile=$loginResults
-          if ($LASTEXITCODE -ne 0) { throw 'Windows Electron startup regression failed' }
+          node node_modules/vitest/vitest.mjs run App/shell/desktop/tests/windows-launch-at-login.test.ts App/shell/desktop/tests/windows-launch-at-login-electron.test.ts App/shell/desktop/tests/windows-update-launcher.test.ts App/shell/desktop/tests/windows-installer-launcher.test.ts --reporter=default --reporter=json --outputFile=$loginResults
+          if ($LASTEXITCODE -ne 0) { throw 'Windows launcher and Electron startup regressions failed' }
           $loginReport = Get-Content -LiteralPath $loginResults -Raw | ConvertFrom-Json
           if ($loginReport.numTotalTests -lt 1 -or $loginReport.numPendingTests -ne 0 -or $loginReport.numPassedTests -ne $loginReport.numTotalTests) {
-            throw 'Windows Electron startup validation must execute every selected test; skips are not accepted.'
+            throw 'Windows launcher validation must execute every selected test; skips are not accepted.'
           }
           npm run build -w @memmy/agent-source-core
           if ($LASTEXITCODE -ne 0) { throw 'Memory fixture shared contracts build failed' }

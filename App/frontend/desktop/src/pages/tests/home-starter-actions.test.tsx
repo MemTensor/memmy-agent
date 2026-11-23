@@ -19,10 +19,10 @@ const legalScenarios: PluginScenarioTarget[] = [
 describe("home starter actions", () => {
   let root: Root;
   let container: HTMLDivElement;
-  const onSelect = vi.fn();
+  const onSend = vi.fn();
 
   beforeEach(() => {
-    onSelect.mockClear();
+    onSend.mockClear();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -32,31 +32,43 @@ describe("home starter actions", () => {
     container.remove();
   });
 
-  async function render(scenarios: PluginScenarioTarget[]) {
+  async function render(scenarios: PluginScenarioTarget[], disabled = false) {
     await act(async () => root.render(
-      <I18nProvider language="zh-CN"><HomeStarterActions scenarios={scenarios} onSelect={onSelect} /></I18nProvider>
+      <I18nProvider language="zh-CN"><HomeStarterActions scenarios={scenarios} disabled={disabled} onSend={onSend} /></I18nProvider>
     ));
   }
 
-  it("shows three generic prompts without active plugin scenarios", async () => {
+  it("restores the literature review when the legal diagnosis is unavailable", async () => {
     await render([]);
     const buttons = [...container.querySelectorAll<HTMLButtonElement>(".home-prompt-suggestions button")];
     expect(buttons.map((button) => button.textContent)).toEqual([
+      zhCNMessages["home.suggestion.two"],
       zhCNMessages["home.suggestion.one"],
+      zhCNMessages["home.suggestion.three"]
+    ]);
+    await act(async () => buttons[1]?.click());
+    expect(onSend).toHaveBeenCalledWith(zhCNMessages["home.suggestionPrompt.one"]);
+  });
+
+  it("prioritizes the legal diagnosis over literature review while keeping three prompts", async () => {
+    await render(legalScenarios);
+    expect(container.querySelector(".home-scenario-cards")).toBeNull();
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>(".home-prompt-suggestions button")];
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      zhCNMessages["home.suggestion.legalDiagnosis"],
       zhCNMessages["home.suggestion.two"],
       zhCNMessages["home.suggestion.three"]
     ]);
     await act(async () => buttons[0]?.click());
-    expect(onSelect).toHaveBeenCalledWith(zhCNMessages["home.suggestionPrompt.one"]);
+    expect(onSend).toHaveBeenCalledWith("生成诊断报告");
   });
 
-  it("replaces generic prompts with the installed plugin's scenarios", async () => {
-    await render(legalScenarios);
-    expect(container.querySelector(".home-prompt-suggestions")).toBeNull();
-    const buttons = [...container.querySelectorAll<HTMLButtonElement>(".home-scenario-card")];
-    expect(buttons.map((button) => button.querySelector(".home-scenario-card__title")?.textContent))
-      .toEqual(["用工风险诊断", "用工体系设计"]);
-    await act(async () => buttons[1]?.click());
-    expect(onSelect).toHaveBeenCalledWith("设计用工体系");
+  it("disables direct sending while the agent is unavailable", async () => {
+    await render(legalScenarios, true);
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>(".home-prompt-suggestions button")];
+    expect(buttons).toHaveLength(3);
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    await act(async () => buttons[0]?.click());
+    expect(onSend).not.toHaveBeenCalled();
   });
 });

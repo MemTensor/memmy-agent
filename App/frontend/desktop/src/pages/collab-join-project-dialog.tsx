@@ -1,0 +1,267 @@
+import { Cloud, Folder, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createHttpCollabClient, type CollabClient, type CollabInvitePreview, type CollabProject } from "../api/collab-client.js";
+import { useOptionalApiClients } from "../app/providers.js";
+import { Button } from "../components/button.js";
+import { Modal } from "../components/modal.js";
+import { useTranslation } from "../i18n/use-translation.js";
+import { isComposingKeyboardEvent } from "../utils/keyboard.js";
+import { memberColor } from "./collab-member-color.js";
+import styles from "./collab-page.module.css";
+
+const TOAST_MS = 2_400;
+/** Avatars on the project card; the prototype shows three. */
+const CARD_AVATARS = 3;
+
+/** One dialog for the whole app, opened from the sidebar's project menu. */
+export function CollabJoinProjectDialog(props: {
+  open: boolean;
+  onClose: () => void;
+  /** The person is in the project; the caller makes its local project and opens the board. */
+  onJoined: (project: CollabProject) => void;
+  /** 申请已提交。调用方把它放进侧边栏，显示项目名称和「申请中」。 */
+  onApplied?: (application: { projectId: string; projectName: string }) => void;
+  /** 加入时改了昵称：调用方把账号状态一并更新，界面上的名字立刻跟着变。 */
+  onNicknameChanged?: (nickname: string) => void;
+  /** 深链接带进来的邀请码：打开即预填并预览。 */
+  initialReference?: string;
+}) {
+  // Rendered by AppFrame, which also runs in tests and error states without providers.
+  const { clients } = useOptionalApiClients();
+  const collab = useMemo(() => (clients ? createHttpCollabClient(clients.runtimeConfig) : null), [clients]);
+  if (!collab) return null;
+  return <JoinProjectModal {...props} collab={collab} />;
+}
+
+/**
+ * Paste an invite link, then decide: the project, who invited, what joining shares, and where tasks will run. The
+ * project's join mode decides whether the button joins at once or sends a request (PRD 3.4).
+ */
+export function JoinProjectModal(props: {
+  open: boolean;
+  collab: CollabClient;
+  onClose: () => void;
+  onJoined: (project: CollabProject) => void;
+  onApplied?: (application: { projectId: string; projectName: string }) => void;
+  /** 加入时改了昵称：调用方把账号状态一并更新，界面上的名字立刻跟着变。 */
+  onNicknameChanged?: (nickname: string) => void;
+  /**
+   * 带着邀请码打开：浏览器里的邀请链接经 memmy://invite/<code> 拉起桌面端时用。
+   * 直接预填并预览，用户点开链接就是想加入，不必再粘贴一次。
+   */
+  initialReference?: string;
+}) {
+  const { t } = useTranslation();
+  const [reference, setReference] = useState("");
+  const [preview, setPreview] = useState<CollabInvitePreview | null>(null);
+  const [directory, setDirectory] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  /** 加入时顺手改的昵称：留空就沿用账号原来的名字，所以不给默认值。 */
+  const [nickname, setNickname] = useState("");
+  /** 加入被拒的原因（重名、成员已满）就写在字段下：它们都是这次提交里能改的东西。 */
+  const [joinError, setJoinError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  /** 预览一条邀请：手动粘贴与深链接带进来走同一条路。 */
+  const loadInvite = useCallback(async (value: string) => {
+    const text = value.trim();
+    if (!text) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setPreview(await props.collab.previewInvite(text));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  }, [props.collab]);
+
+  const initialReference = props.initialReference?.trim() ?? "";
+  useEffect(() => {
+    if (!props.open) return;
+    setReference(initialReference);
+    setPreview(null);
+    setDirectory(null);
+    setError(null);
+    setNickname("");
+    setJoinError(null);
+    if (initialReference) void loadInvite(initialReference);
+  }, [props.open, initialReference, loadInvite]);
+
+  useEffect(() => () => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+  }, []);
+
+  function showToast(message: string) {
+    setToast(message);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), TOAST_MS);
+  }
+
+  async function readInvite() {
+    if (!reference.trim() || busy) return;
+    await loadInvite(reference);
+  }
+
+  async function chooseDirectory() {
+    const picked = await window.memmy?.selectProjectDirectory?.().catch(() => null);
+    if (picked && !picked.canceled) setDirectory(picked.path);
+  }
+
+  async function join() {
+    if (!preview || busy) return;
+    setBusy(true);
+    setError(null);
+    setJoinError(null);
+    try {
+      const wanted = nickname.trim();
+      const result = await props.collab.joinProject(reference.trim(), directory ?? undefined, wanted || undefined);
+      // 昵称已在云端写进去了：先把本地的账号状态改掉，界面上的名字不用等刷新。
+      if (wanted) props.onNicknameChanged?.(wanted);
+      if (result.status === "pending") {
+        props.onApplied?.({ projectId: result.projectId, projectName: preview.projectName });
+        props.onClose();
+        showToast(t("collab.join.applied"));
+        return;
+      }
+      if (result.project) {
+        props.onClose();
+        showToast(t("collab.join.joined", { name: result.project.name }));
+        props.onJoined(result.project);
+      }
+    } catch (cause) {
+      // 加入阶段能改的错（比如成员满了）写在字段下面，别的错误留在弹窗底部。
+      const message = messageOf(cause);
+      if (nickname.trim()) setJoinError(message);
+      else setError(message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const pending = preview?.status === "pending";
+  // 已成员也显示「加入」：从邀请链接进来的人看到的就是加入这个动作，点下去直接打开项目。
+  const primaryLabel = !preview
+    ? t("collab.join.next")
+    : pending
+      ? t("collab.join.pending")
+      : preview.status === "member" || preview.joinMode === "direct"
+        ? t("collab.join.join")
+        : t("collab.join.apply");
+
+  return (
+    <>
+      <Modal
+        open={props.open}
+        title={preview ? t("collab.join.title", { name: preview.inviterName }) : t("collab.join.pasteTitle")}
+        onClose={props.onClose}
+        closeLabel={t("common.close")}
+        closeContent={<X size={16} aria-hidden="true" />}
+        initialFocusRef={inputRef}
+        className={`${styles.createModal} ${styles.simpleCreateModal} ${styles.joinModal}`}
+        backdropClassName={styles.backdrop}
+        bodyClassName={styles.joinBody}
+        footerClassName={styles.simpleCreateFooter}
+        footer={(
+          <>
+            <span />
+            <span className={styles.footerButtons}>
+              <Button variant="ghost" className={styles.simpleCreateFooterButton} onClick={props.onClose}>
+                {preview ? t("collab.join.later") : t("collab.cancel")}
+              </Button>
+              <Button
+                variant="primary"
+                className={styles.simpleCreateFooterButton}
+                disabled={busy || pending || (!preview && !reference.trim())}
+                onClick={() => void (preview ? join() : readInvite())}
+              >
+                {primaryLabel}
+              </Button>
+            </span>
+          </>
+        )}
+      >
+        {preview ? (
+          <>
+            <div className={styles.joinCard}>
+              <span className={styles.joinCardIcon} aria-hidden="true"><Cloud size={20} /></span>
+              <span className={styles.joinCardName}>{preview.projectName}</span>
+              <span className={styles.avatarStack} aria-label={preview.memberNames.join("、")}>
+                {preview.memberNames.slice(0, CARD_AVATARS).map((name, index) => (
+                  <span key={`${name}-${index}`} className={styles.avatar} style={{ background: memberColor(name) }} aria-hidden="true">
+                    {Array.from(name.trim())[0] ?? "?"}
+                  </span>
+                ))}
+              </span>
+            </div>
+            <p className={styles.joinNote}>{t("collab.join.noteSessions")}</p>
+            {preview.status === "member" ? null : (
+              <div className={styles.field}>
+                {/* 与本机目录同一种写法：可选写在标签里，不做成单独的徽标 */}
+                <span>{t("collab.join.nicknameLabel")}</span>
+                <input
+                  className={`${styles.joinNicknameInput} ${joinError ? styles.joinNicknameInvalid : ""}`}
+                  value={nickname}
+                  maxLength={32}
+                  placeholder={t("collab.join.nicknamePlaceholder")}
+                  aria-label={t("collab.join.nicknameLabel")}
+                  aria-invalid={joinError ? true : undefined}
+                  disabled={pending}
+                  onChange={(event) => {
+                    setNickname(event.target.value);
+                    // 改了字就把上一次的错误收起来：重名与否要看新输入的名字。
+                    if (joinError) setJoinError(null);
+                  }}
+                />
+                {joinError ? <p className={styles.joinNicknameError} role="alert">{joinError}</p> : null}
+                <small className={styles.fieldHint}>{t("collab.join.nicknameHint")}</small>
+              </div>
+            )}
+            {preview.status === "member" ? null : (
+              <div className={styles.field}>
+                <span>{t("collab.create.dirOptional")}</span>
+                <div className={styles.dirField}>
+                  <Folder size={15} aria-hidden="true" className={styles.dirIcon} />
+                  <span className={`${styles.dirPath} ${directory ? "" : styles.dirPlaceholder}`}>
+                    {directory ?? t("collab.create.dirUnset")}
+                  </span>
+                  <Button size="sm" variant="ghost" className={styles.dirPickButton} disabled={pending} onClick={() => void chooseDirectory()}>
+                    {directory ? t("collab.create.dirChange") : t("collab.create.dirPick")}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          // 第一步只给一个输入框：标题已经说了是加入项目，再写一行「邀请链接」是重复标签。
+          // 可访问名由 aria-label 提供，不靠视觉标签。
+          <label className={styles.field}>
+            <input
+              ref={inputRef}
+              value={reference}
+              aria-label={t("collab.join.linkLabel")}
+              placeholder={t("collab.join.pastePlaceholder")}
+              onChange={(event) => setReference(event.target.value)}
+              onKeyDown={(event) => {
+                // 回车确认输入法候选词时不要当成“读邀请”；粘贴链接本身不经过输入法。
+                if (event.key !== "Enter" || isComposingKeyboardEvent(event)) return;
+                void readInvite();
+              }}
+            />
+          </label>
+        )}
+        {error ? <p className={styles.error} role="alert">{error}</p> : null}
+      </Modal>
+      {toast ? <div className={styles.toast} role="status">{toast}</div> : null}
+    </>
+  );
+}
+
+function messageOf(cause: unknown): string {
+  const raw = cause instanceof Error ? cause.message.trim() : String(cause).trim();
+  return raw.startsWith("[") || raw.startsWith("{") ? "" : raw;
+}

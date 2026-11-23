@@ -77,3 +77,35 @@ it("keeps the update dot on the marketplace tab until the installed version catc
   await show("plugins", false);
   expect(container.querySelector('[aria-label="插件有可用更新"]')).toBeNull();
 });
+
+it("places one status filter beside the renamed main tabs", async () => {
+  const changeConnectionFilter = vi.fn();
+  const changePluginFilter = vi.fn();
+  const renderSection = async (section: ToolsSection) => act(async () => root.render(
+    <I18nProvider language="zh-CN">
+      <ToolsPageView tools={{ ...initialToolsState, status: "ready", connections: [
+        { id: "github-connected", toolkit: "github", status: "ACTIVE", surface: "integration" }
+      ] }} section={section}
+        pluginFilter="all" pluginInstalledCount={2} marketplace={<MarketplaceFixture />}
+        onPluginFilterChange={changePluginFilter} onConnectionFilterChange={changeConnectionFilter}
+        onSearchChange={() => {}} onCategoryChange={() => {}} onOpenIntegration={() => {}}
+        onModalClose={() => {}} onConnectionsChanged={() => {}} />
+    </I18nProvider>
+  ));
+  await renderSection("connections");
+  expect(Array.from(container.querySelectorAll('[role="tab"]')).map((tab) => tab.textContent)).toEqual(["应用工具", "IM 助理", "插件"]);
+  expect(container.querySelectorAll(".extension-catalog-toolbar")).toHaveLength(0);
+  expect(container.querySelector(".tools-page-navigation .tools-page-status-filter")).not.toBeNull();
+  expect(container.querySelector(".tools-page-navigation .extension-catalog-search")).not.toBeNull();
+  expect(container.querySelector(".tools-page-navigation .extension-catalog-category")).not.toBeNull();
+  expect(container.querySelector(".tools-page-navigation .tools-page-refresh")).not.toBeNull();
+  await act(async () => container.querySelector<HTMLButtonElement>(".tools-page-status-filter")!.click());
+  expect(changeConnectionFilter).toHaveBeenCalledWith("connected", "connections");
+  await renderSection("channels");
+  expect(container.querySelector<HTMLButtonElement>(".tools-page-status-filter")?.disabled).toBe(true);
+  await renderSection("plugins");
+  expect(container.querySelector(".extension-catalog-category")).toBeNull();
+  expect(container.querySelector<HTMLButtonElement>(".tools-page-status-filter")?.textContent).toBe("已安装 (2)");
+  await act(async () => container.querySelector<HTMLButtonElement>(".tools-page-status-filter")!.click());
+  expect(changePluginFilter).toHaveBeenCalledWith("installed");
+});

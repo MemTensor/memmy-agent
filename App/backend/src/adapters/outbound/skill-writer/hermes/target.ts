@@ -3,8 +3,20 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import YAML from "yaml";
-import { pathExists, removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
+import {
+  pathExists,
+  removeMemmyProjectSkillDirectory,
+  removeMemmySkillDirectory,
+  replaceMemmyProjectSkillDirectory,
+  replaceMemmySkillDirectory
+} from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
+import {
+  MEMMY_PROJECT_BOOTSTRAP_START_MARKER,
+  removeMemmyProjectBootstrapBlock,
+  renderMemmyProjectBootstrapBlock,
+  upsertMemmyProjectBootstrapBlock
+} from "../templates/memmy-project-skill.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { MemoryPluginConflict, SkillManifest, SkillTarget } from "../types.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
@@ -53,6 +65,7 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       const existing = removeCliMarkerBlock(await readTextFile(filePath));
       await writeFileAtomically(filePath, upsertMarkerBlock(existing, manifest));
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
     },
 
     async uninstall(_targetId) {
@@ -66,6 +79,7 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       const next = removeMarkerBlock(removeCliMarkerBlock(existing));
       if (next !== existing) await writeFileAtomically(filePath, next);
       await removeMemmySkillDirectory(root);
+      await removeMemmyProjectSkillDirectory(root);
       await removeLegacyAgentInstructions(root);
     },
 
@@ -94,6 +108,36 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
       return toMutableRecord(config.memory).provider === PLUGIN_ID;
     },
 
+    async writeProjectSkillBootstrap() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        throw new Error("Hermes is not installed or its directory is unavailable");
+      }
+
+      const filePath = join(root, TARGET_FILE_NAME);
+      await writeFileAtomically(filePath, upsertMemmyProjectBootstrapBlock(await readTextFile(filePath)));
+    },
+
+    async removeProjectSkillBootstrap() {
+      const root = await this.resolveRootDirectory();
+      if (!root) {
+        return;
+      }
+
+      const filePath = join(root, TARGET_FILE_NAME);
+      const existing = await readTextFile(filePath);
+      if (!existing.includes(MEMMY_PROJECT_BOOTSTRAP_START_MARKER)) {
+        return;
+      }
+      await writeFileAtomically(filePath, removeMemmyProjectBootstrapBlock(existing));
+    },
+
+    async isProjectSkillBootstrapCurrent() {
+      const root = await this.resolveRootDirectory();
+      if (!root) return false;
+      return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(renderMemmyProjectBootstrapBlock());
+    },
+
     async installPlugin(_targetId) {
       const root = await this.resolveRootDirectory();
       if (!root) {
@@ -120,6 +164,7 @@ export function createHermesSkillTarget(deps: CreateHermesSkillTargetDeps = {}):
         upsertMarkerBlock(removeCliMarkerBlock(await readTextFile(filePath)), renderMemmySkillBootstrapManifest(manifest))
       );
       await replaceMemmySkillDirectory(root, manifest);
+      await replaceMemmyProjectSkillDirectory(root);
       await removeLegacyAgentInstructions(root);
     },
 

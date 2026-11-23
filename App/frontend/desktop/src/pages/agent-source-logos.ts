@@ -8,6 +8,7 @@ import opencodeLogoUrl from "../assets/agent-logos/opencode.svg";
 import piLogoUrl from "../assets/agent-logos/pi.svg";
 import qwenworkLogoUrl from "../assets/agent-logos/qwenwork.svg";
 import workbuddyLogoUrl from "../assets/agent-logos/workbuddy.png";
+import memmyAppIconUrl from "../assets/memmy-app-icon.png";
 import memmyRiceLogoUrl from "../assets/mascot/memmy-rice.png";
 
 export const MEMORY_AGENT_SOURCE_VALUES = [
@@ -66,6 +67,15 @@ export function agentSourceDisplayName(value: string): string {
 
 export function agentSourceLogoUrl(value: string): string | undefined {
   return AGENT_SOURCE_LOGOS[normalizeAgentSourceId(value)];
+}
+
+/**
+ * 方块槽位里用的标志：Agent 列表里每个 Agent 都是一枚方块标志（22px 的圆角白底、15px 的图），
+ * 而 Memmy 在 {@link AGENT_SOURCE_LOGOS} 里是水彩插画（512×308 的横图，给记忆页那些宽槽位用），
+ * 塞进方块会被压成一条。这种槽位改用应用图标，与标题栏、启动卡上的 Memmy 一致。
+ */
+export function agentSourceSquareLogoUrl(value: string): string | undefined {
+  return isMemmyAgentSource(value) ? memmyAppIconUrl : agentSourceLogoUrl(value);
 }
 
 export function isMemmyAgentSource(value: string): boolean {

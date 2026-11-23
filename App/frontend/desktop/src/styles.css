@@ -194,25 +194,89 @@ body.memmy-window-fullscreen {
 }
 
 .home-empty-screen {
+  --agent-conversation-track: min(832px, 100cqw);
+  --home-mascot-width: 216px;
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(min-content, 1fr) auto minmax(min-content, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
   justify-items: center;
+  padding-bottom: 36px;
+  overflow-y: auto;
 }
 
 .home-empty-brand {
   grid-row: 1;
-  align-self: end;
-  margin-bottom: 2rem;
+  align-self: center;
+  position: relative;
+  top: clamp(8px, 2.4vh, 36px);
 }
 
-.home-empty-input {
+/* 空白页标题：带项目时整个标题仍是一行文字，长项目名换行不撑破栅格。 */
+.home-empty-title {
+  max-width: 100%;
+  font-size: 32px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+/* 标题里的项目名：与标题同字号，细虚线下划线说明可以悬停看完整路径。 */
+.home-empty-title__project {
+  padding-bottom: 1px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--color-text-ink) 38%, transparent);
+}
+
+/* Memmy sets an inline width; keep the home illustration responsive without changing other uses. */
+.home-empty-brand-mascot img {
+  width: var(--home-mascot-width) !important;
+  height: auto !important;
+}
+
+@media (max-height: 760px) {
+  .home-empty-screen { --home-mascot-width: 160px; padding-bottom: 12px; }
+  .home-empty-brand { top: 0; }
+  .home-empty-title { font-size: 28px; }
+}
+
+@container agent-workspace (max-width: 620px) {
+  .home-empty-screen { --home-mascot-width: 136px; padding-bottom: 16px; }
+  .home-empty-brand { top: 0; }
+  .home-empty-title { font-size: 26px; }
+}
+
+@media (max-height: 580px) {
+  .home-empty-screen {
+    grid-template-rows: auto auto auto auto;
+    align-content: start;
+    padding-top: calc(var(--codex-toolbar-height) + 4px);
+  }
+  .home-empty-brand { align-self: start; margin-bottom: 12px; }
+  .home-empty-brand-mascot { display: none; }
+  .home-empty-title { font-size: 20px; }
+}
+
+.home-empty-suggestions {
   grid-row: 2;
 }
 
-.home-empty-footer {
+.home-empty-input {
   grid-row: 3;
-  align-self: start;
+  position: relative;
+}
+
+.home-empty-footer {
+  position: absolute;
+  right: 0;
+  bottom: 8px;
+  left: 0;
+}
+
+.home-empty-connection-status {
+  margin: 0;
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
 }
 
 .home-empty-composer,
@@ -246,6 +310,14 @@ body.memmy-window-fullscreen {
    composer must NEVER get this: it is 76px tall single-line (12px padding
    multi-line), so an opaque 44px strip covers the text line itself — the
    field looks dead: invisible placeholder, invisible caret, "can't type". */
+.home-empty-composer textarea {
+  max-height: 352px;
+}
+
+.agent-conversation-composer textarea {
+  max-height: 300px;
+}
+
 .home-empty-composer.agent-composer-shell::after {
   content: "";
   position: absolute;
@@ -260,16 +332,20 @@ body.memmy-window-fullscreen {
 }
 
 .agent-operation-error-slot {
-  position: relative;
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  left: 0;
   z-index: 90;
   display: flex;
   min-height: 0;
   align-items: center;
   justify-content: center;
-  margin: 0 auto 6px;
+  margin: 0;
   font-size: 12px;
   line-height: 18px;
   text-align: center;
+  pointer-events: none;
 }
 
 .agent-operation-error-slot:empty {
@@ -315,14 +391,14 @@ body.memmy-window-fullscreen {
 }
 
 /* Outer frame: same width as the white composer; only the bottom strip peeks.
-   overflow stays visible so the workspace menu can open downward. */
+   overflow stays visible so the workspace menu can open upward. */
 .home-empty-composer-stack {
   display: flex;
   flex-direction: column;
   gap: 0;
   padding: 0;
   overflow: visible;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
+  border: 1px solid var(--border-content-panel);
   border-radius: var(--radius-composer);
   background: color-mix(in srgb, var(--color-canvas-oat) 72%, var(--color-background-paper));
   box-shadow: 0 8px 20px rgba(17, 29, 28, 0.03);
@@ -341,7 +417,7 @@ body.memmy-window-fullscreen {
 .home-composer-toolbar {
   --home-composer-toolbar-pad-inline: 14px;
   position: relative;
-  z-index: 45;
+  z-index: 60;
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -715,20 +791,40 @@ body.memmy-window-fullscreen {
   }
 }
 
-.composer-command-chip-slot {
-  position: absolute;
-  z-index: 10;
+/* Referenced-session and Goal chips: they belong to the + button, so they sit inside the composer action row
+   right after it rather than in the toolbar under the input. */
+.composer-mention-chips {
   display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
   align-items: center;
+  gap: 4px;
+  overflow: hidden;
 }
 
-.composer-command-chip-slot--home {
-  bottom: 12px;
-  left: 16px;
+/* + and its chips stay together at the left edge; the rest of the row keeps flowing to the right. */
+.home-composer-leading {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px;
+  margin-right: auto;
 }
 
-.composer-command-chip-slot--conversation {
-  left: 10px;
+/* `agent-composer-toolbar__leading` already groups the + button and the chips, so the row keeps
+   `space-between` and only has to let the group shrink when a task title is long. */
+.composer-mention-chips .composer-command-chip {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+/* The label has to be allowed to shrink as well: without `min-width: 0` a long task title
+   keeps the chip at its content width and it runs into the next control. */
+.composer-mention-chips .composer-command-chip__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .composer-command-chip {
@@ -750,6 +846,36 @@ body.memmy-window-fullscreen {
 .composer-command-chip:focus-within {
   background: color-mix(in srgb, var(--color-canvas-oat) 62%, var(--color-background-paper));
   color: var(--color-text-ink);
+}
+
+/*
+ * 引用任务的 chip 有两个状态，靠悬停 / 聚焦切换：
+ * 常规态只有绿色小图标 + 文字，不画底色；悬停或聚焦后变成灰色胶囊，图标换成 ×，点一下就移除。
+ * 这两段必须写在基础 `.composer-command-chip` 之后：选择器权重相同，写前面会被它的透明底色盖掉。
+ */
+.composer-mention-chip {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 84%, transparent);
+  font-size: 12px;
+}
+
+/* 选中态用中性灰：不能拿 --color-border-stone 混白，那个颜色本身带青，混出来是淡绿底。
+   6% 的 ink 落到白底上就是 rgb(241,241,241)，与本项目其他悬浮控件的灰底一致。 */
+.composer-mention-chip:hover,
+.composer-mention-chip:focus-within {
+  background: color-mix(in srgb, var(--color-text-ink) 6%, var(--color-background-paper));
+  color: var(--color-text-ink);
+}
+
+/* 常规态的绿色气泡图标只靠 `composer-mention-chip__icon` 挂上去（没有 `--target`），
+   所以基础规则不会帮它隐掉；悬停 / 聚焦时要手动换成 ×，否则两个图标会叠在一起。 */
+.composer-mention-chip:hover .composer-mention-chip__icon,
+.composer-mention-chip:focus-within .composer-mention-chip__icon {
+  opacity: 0;
+  transform: scale(0.75);
 }
 
 .composer-command-chip__icon {
@@ -809,7 +935,9 @@ body.memmy-window-fullscreen {
 .agent-composer-toolbar__leading {
   display: flex;
   min-width: 0;
+  flex: 0 1 auto;
   align-items: center;
+  gap: 4px;
 }
 
 .agent-composer-shell--expanded .agent-composer-toolbar {
@@ -839,6 +967,12 @@ body.memmy-window-fullscreen {
   right: 16px;
   justify-content: flex-end;
   min-width: 0;
+}
+
+/* + no longer pushes the row itself: `.home-composer-leading` wraps it with the chips and carries
+   the auto margin, so a referenced chip lands right beside the + instead of at the far right. */
+.home-composer-add-button {
+  flex: 0 0 auto;
 }
 
 .composer-action-btn {
@@ -874,6 +1008,48 @@ body.memmy-window-fullscreen {
 
 .composer-action-btn--active:hover:not(:disabled) {
   color: var(--color-action-sky-hover);
+}
+
+/*
+ * 任务级共享开关（输入框左侧）：默认关闭，打开后这条任务才进项目。
+ * 只画图标不写字，状态靠颜色区分，悬停时底色变实、图标加深，并用 tooltip 说明含义。
+ */
+.composer-share-chip {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-text-ink) 32%, transparent);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--duration-fast), color var(--duration-fast);
+}
+
+.composer-share-chip:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-canvas-oat) 96%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 68%, transparent);
+}
+
+.composer-share-chip--on {
+  border: 0;
+  background: transparent;
+  color: var(--color-action-sky);
+}
+
+.composer-share-chip--on:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
+  color: var(--color-action-sky);
+}
+
+.composer-share-chip:disabled {
+  cursor: progress;
+  opacity: 0.6;
 }
 
 .composer-action-submit {
@@ -1366,7 +1542,7 @@ body.memmy-window-fullscreen {
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
   font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 400;
@@ -1413,13 +1589,6 @@ body.memmy-window-fullscreen {
   opacity: 1;
 }
 
-.home-project-picker__trigger svg.home-project-picker__chevron {
-  display: block;
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-}
-
 .home-project-picker__label {
   display: inline-flex;
   min-width: 0;
@@ -1433,13 +1602,8 @@ body.memmy-window-fullscreen {
   line-height: 20px;
 }
 
-.home-project-picker__chevron {
-  opacity: 0.55;
-  transition: transform 140ms ease;
-}
-
-.home-project-picker__chevron--open {
-  transform: rotate(180deg);
+.home-project-picker__trigger--selected {
+  color: color-mix(in srgb, var(--color-text-ink) 72%, transparent);
 }
 
 /* Invisible hit target over the folder/X icon slot. */
@@ -1465,6 +1629,10 @@ body.memmy-window-fullscreen {
 }
 
 .home-project-picker__trigger:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--color-text-ink) 60%, transparent);
+}
+
+.home-project-picker__trigger--selected:hover:not(:disabled) {
   color: var(--color-text-ink);
 }
 
@@ -1477,8 +1645,8 @@ body.memmy-window-fullscreen {
 .home-project-picker__menu {
   --home-project-picker-separator: color-mix(in srgb, var(--color-border-stone) 44%, transparent);
   position: absolute;
-  top: calc(100% + 2px);
-  bottom: auto;
+  top: auto;
+  bottom: calc(100% + 6px);
   right: auto;
   /* Align with the selected trigger chip’s left edge. */
   left: 0;
@@ -1496,6 +1664,8 @@ body.memmy-window-fullscreen {
   border-radius: var(--radius-card);
   background: var(--color-background-paper);
   box-shadow: var(--shadow-popover);
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
 }
 
 .home-project-picker__search {
@@ -1503,10 +1673,15 @@ body.memmy-window-fullscreen {
   flex: 0 0 auto;
   min-height: 30px;
   align-items: center;
+  gap: 8px;
   margin: 0 2px 4px;
   padding: 0 6px 6px;
   border-bottom: var(--codex-separator-width) solid var(--home-project-picker-separator);
   color: color-mix(in srgb, var(--color-text-ink) 45%, transparent);
+}
+
+.home-project-picker__search-icon {
+  flex: 0 0 auto;
 }
 
 .home-project-picker__search input {
@@ -1564,10 +1739,12 @@ body.memmy-window-fullscreen {
   line-height: 16px;
   text-align: left;
   cursor: pointer;
+  -webkit-app-region: no-drag;
 }
 
 .home-project-picker__option--action {
-  min-height: 30px;
+  min-height: 40px;
+  padding: 9px 10px;
 }
 
 .home-project-picker__option svg {
@@ -1612,11 +1789,10 @@ body.memmy-window-fullscreen {
   outline-offset: -2px;
 }
 
-.home-project-picker__path {
+.home-project-picker__name {
   min-width: 0;
   flex: 1 1 auto;
   color: inherit;
-  text-align: left;
 }
 
 .home-project-picker__divider {
@@ -1711,6 +1887,35 @@ body.memmy-window-fullscreen {
   margin-inline: auto;
 }
 
+.home-empty-screen .home-empty-column {
+  width: clamp(
+    min(100%, 20rem),
+    calc(100cqw - 2 * var(--agent-column-min-gap, 80px)),
+    var(--home-column-max, 50rem)
+  );
+  max-width: 100%;
+}
+
+@container agent-workspace (width > 1200px) {
+  .home-empty-screen { --agent-conversation-track: 65cqw; }
+}
+
+@container agent-workspace (width > 1600px) {
+  .home-empty-screen { --agent-conversation-track: 60cqw; }
+}
+
+@container agent-workspace (width > 2000px) {
+  .home-empty-screen { --agent-conversation-track: min(55cqw, 1400px); }
+}
+
+@media (max-height: 760px) {
+  .home-empty-composer textarea { max-height: 96px; }
+}
+
+@media (max-height: 580px) {
+  .home-empty-composer textarea { max-height: 88px; }
+}
+
 /* The conversation track is 832px up to a 1200px workspace, then 65% / 60% /
    55% (at most 1400px) of it. Messages sit 40px inside the track and the
    composer 24px inside, so the composer overhangs the text by 16px a side. */
@@ -1742,10 +1947,6 @@ body.memmy-window-fullscreen {
   .agent-conversation-content {
     --agent-conversation-track: min(55cqw, 1400px);
   }
-}
-
-.home-empty-status-area {
-  min-height: 4.5rem;
 }
 
 .window-drag-region {
@@ -2154,7 +2355,7 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
 
 .agent-chat-bubble--user::selection,
 .agent-chat-bubble--user *::selection {
-  background: rgba(17, 29, 28, 0.32);
+  background: var(--color-action-sky);
   color: white;
 }
 
@@ -2605,8 +2806,8 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  border-left: 1px solid color-mix(in srgb, var(--color-border-stone) 40%, transparent);
-  background: var(--color-background-paper);
+  border-left: 1px solid var(--border-content-panel);
+  background: var(--color-content-base);
   color: var(--color-text-ink);
   font-family: var(--font-sans);
 }
@@ -2689,7 +2890,7 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   justify-content: space-between;
   gap: 8px;
   padding: 0 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border-stone) 36%, transparent);
+  border-bottom: 1px solid var(--border-content-panel);
 }
 
 .thread-panel--fullscreen .thread-panel__header {
@@ -2851,7 +3052,7 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   position: relative;
   width: 1px;
   flex: 0 0 1px;
-  background: color-mix(in srgb, var(--color-border-stone) 36%, transparent);
+  background: var(--border-content-panel);
   cursor: col-resize;
   touch-action: none;
   transition: background-color 120ms ease;
@@ -3020,6 +3221,32 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
 
 .thread-panel-empty--popover {
   padding: 16px;
+}
+
+.thread-files-empty {
+  display: flex;
+  box-sizing: border-box;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  color: color-mix(in srgb, var(--color-text-ink) 42%, transparent);
+  text-align: center;
+}
+
+.thread-files-empty--panel {
+  min-height: 100%;
+}
+
+.thread-files-empty--popover {
+  min-height: 160px;
+}
+
+.thread-files-empty p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .thread-overview {
@@ -3765,40 +3992,6 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   margin-bottom: 0;
 }
 
-/* A quiet running turn sweeps its last visible line after three seconds. */
-.agent-stall-shimmer {
-  background-image:
-    linear-gradient(90deg, transparent, var(--color-action-sky-hover), transparent),
-    linear-gradient(var(--agent-stall-ink), var(--agent-stall-ink));
-  background-repeat: no-repeat;
-  background-size: var(--agent-stall-band) var(--agent-stall-height), 100% 100%;
-  background-position: var(--agent-stall-from) var(--agent-stall-y), 0 0;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: agent-stall-sweep 1.8s linear infinite;
-}
-
-.agent-stall-shimmer :where(code, .agent-activity-diff, .agent-activity-diff *) {
-  -webkit-text-fill-color: currentColor;
-}
-
-@keyframes agent-stall-sweep {
-  from {
-    background-position: var(--agent-stall-from) var(--agent-stall-y), 0 0;
-  }
-  to {
-    background-position: var(--agent-stall-to) var(--agent-stall-y), 0 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-stall-shimmer {
-    animation: none;
-    background-position: calc((var(--agent-stall-from) + var(--agent-stall-to)) / 2) var(--agent-stall-y), 0 0;
-  }
-}
-
 .agent-thinking-pulse {
   display: inline-block;
   width: 6px;
@@ -4263,9 +4456,9 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
    stretching the whole conversation. One generic shape fits every tool. */
 .agent-activity-tool-card {
   margin: 4px 0 6px;
-  border: 1px solid color-mix(in srgb, var(--color-border-stone) 42%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border-stone) 32%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--color-background-paper) 62%, transparent);
+  background: transparent;
   overflow: hidden;
 }
 
@@ -4301,7 +4494,7 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
 .agent-message-content.agent-message-content--reasoning {
   font-size: var(--chat-md-root);
   line-height: 1.786;
-  color: color-mix(in srgb, var(--color-text-ink) 82%, transparent);
+  color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
   font-weight: 400;
 }
 
@@ -4368,6 +4561,10 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
 
 .agent-message-content.agent-message-content--reasoning :where(.agent-message-content__code-block, .agent-message-content__table-scroll, .agent-message-content__quote) {
   margin: 8px 0;
+}
+
+.agent-message-content.agent-message-content--reasoning .agent-message-content__quote {
+  color: color-mix(in srgb, var(--color-text-ink) 48%, transparent);
 }
 
 .agent-message-content.agent-message-content--reasoning .agent-message-content__separator {
@@ -4464,7 +4661,8 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
   bottom: 0;
   left: 0;
   z-index: 2;
-  padding: 40px var(--codex-content-padding-x) 0;
+  /* Preserve the former disclaimer's 36px footprint after removing its text. */
+  padding: 40px var(--codex-content-padding-x) 36px;
   pointer-events: none;
 }
 
@@ -4743,6 +4941,8 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
 }
 
 .agent-model-error-notice {
+  display: flex;
+  flex-direction: column;
   max-width: min(100%, 32rem);
   padding: 20px;
   border: 1px solid color-mix(in srgb, var(--color-status-error) 22%, transparent);
@@ -4802,6 +5002,7 @@ button.agent-activity-file-link.agent-activity-timeline-item__detail {
 
 .error-notice-detail__toggle {
   display: inline-flex;
+  align-self: flex-start;
   align-items: center;
   gap: 4px;
   margin: 12px 0 0 30px;
@@ -5328,15 +5529,6 @@ button {
 .agent-conversation-composer .agent-composer-shell--expanded .agent-composer-toolbar {
   min-height: 56px;
   padding: 12px;
-}
-
-.agent-conversation-disclaimer {
-  margin: 0;
-  padding: 8px;
-  color: color-mix(in srgb, var(--color-text-ink) 40%, transparent);
-  font-size: 12px;
-  line-height: 20px;
-  text-align: center;
 }
 
 .agent-delivered-files {
@@ -7164,6 +7356,7 @@ body.memmy-platform-windows .memory-drawer-backdrop__close {
 
 .memory-processing-failure__actions {
   display: flex;
+  flex-shrink: 0;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 14px;
@@ -9041,7 +9234,7 @@ body.memmy-platform-windows:not(.memmy-window-fullscreen) .memmy-notification-st
   margin: 0;
   min-width: 0;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 400;
   line-height: 18px;
   color: var(--color-text-ink);
 }
@@ -11764,6 +11957,7 @@ body.memmy-platform-windows :is(
   display: flex;
   flex-shrink: 0;
   align-items: center;
+  gap: 8px;
 }
 
 .app-frame-task-list__body {
@@ -11995,16 +12189,6 @@ body.memmy-platform-windows :is(
   color: color-mix(in srgb, var(--color-text-ink) 58%, transparent);
 }
 
-.app-frame-workspace-add.is-open {
-  background: color-mix(in srgb, var(--color-action-sky) 10%, transparent);
-  color: var(--color-action-sky-hover);
-}
-
-.app-frame-workspace-add.is-open:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-action-sky) 14%, transparent);
-  color: var(--color-action-sky-hover);
-}
-
 .app-frame-task-section-action:focus-visible,
 .app-frame-workspace-add:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--color-action-sky) 35%, transparent);
@@ -12064,13 +12248,64 @@ body.memmy-platform-windows :is(
   --sidebar-row-bg: color-mix(in srgb, var(--color-action-sky) 16%, var(--color-sidebar-bg));
 }
 
+/* 待审核的加入申请：能看见项目名和状态，但不能当成本机项目去打开；划过或点一下会静默重查。 */
+.app-frame-project-row--pending {
+  /* 这一行是按钮：光标和焦点环都按可点击处理，点下去只重查一次，不会有别的动作。 */
+  cursor: pointer;
+  border: 0;
+  padding: 0;
+  text-align: left;
+  /* 逐项继承而不是 font 简写：styles.css 不覆盖原型里的字体工具类，这条约束由原型对齐用例守住。 */
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  appearance: none;
+}
+
+.app-frame-project-row__mark {
+  display: flex;
+  flex: none;
+  align-items: center;
+  padding: var(--sidebar-rail-pad-y) 0 var(--sidebar-rail-pad-y) var(--sidebar-rail-pad-x);
+  color: color-mix(in srgb, var(--color-text-ink) 55%, transparent);
+}
+
+.app-frame-project-row__main--static {
+  cursor: default;
+}
+
+.app-frame-project-pending {
+  flex: none;
+  margin-right: var(--sidebar-rail-pad-x);
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-action-sky) 16%, transparent);
+  color: color-mix(in srgb, var(--color-action-sky) 72%, var(--color-text-ink));
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 600;
+}
+
+/* The icon is its own hit area: it expands the project's sessions, the rest of the row opens the board. */
+.app-frame-project-row__toggle {
+  display: flex;
+  flex: none;
+  align-items: center;
+  align-self: stretch;
+  padding: var(--sidebar-rail-pad-y) 0 var(--sidebar-rail-pad-y) var(--sidebar-rail-pad-x);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
 .app-frame-project-row__main {
   display: flex;
   min-width: 0;
   flex: 1;
   align-items: center;
   gap: var(--sidebar-rail-gap);
-  padding: var(--sidebar-rail-pad-y) var(--sidebar-rail-pad-x);
+  padding: var(--sidebar-rail-pad-y) var(--sidebar-rail-pad-x) var(--sidebar-rail-pad-y) var(--sidebar-rail-gap);
   border: 0;
   background: transparent;
   color: inherit;
@@ -12239,16 +12474,6 @@ body.memmy-platform-windows :is(
 .app-frame-project-show-more:hover {
   background: color-mix(in srgb, var(--color-text-ink) 5%, var(--color-sidebar-bg));
   color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
-}
-
-/* Sidebar add-workspace picker reuses home-project-picker chrome; portal needs fixed. */
-.app-frame-workspace-picker-menu.home-project-picker__menu {
-  position: fixed;
-  right: auto;
-  bottom: auto;
-  z-index: 9999;
-  /* Placement uses left/top only — keep intrinsic width like the home picker. */
-  width: max-content;
 }
 
 /* Match home-project-picker__menu / __option chrome so sidebar popovers feel one family. */

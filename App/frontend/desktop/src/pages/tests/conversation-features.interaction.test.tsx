@@ -12,7 +12,7 @@ import type { AgentChatMessage } from "../../state/agent-chat-slice.js";
 const mocks = vi.hoisted(() => ({
   chatId: null as string | null,
   invoke: vi.fn(async () => ({ callId: "guide-call" })),
-  list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(),
+  list: vi.fn(), dispatch: vi.fn(), openRecording: vi.fn(), recordingStart: vi.fn(),
   openArtifact: vi.fn(() => true),
   ensureConversation: vi.fn(async (_title: string) => "created-chat" as string | null),
   send: vi.fn(async () => true), sending: false,
@@ -23,6 +23,7 @@ activeTurnIdByChatId: {} as Record<string, string | null>,
 
   stageFiles: vi.fn(async () => undefined),
   stageExistingFiles: vi.fn(async () => undefined),
+  draft: vi.fn(),
   recordingDeliver: undefined as undefined | ((file: File, mode: "summarize" | "attach", persisted?: unknown) => void),
 }));
 vi.mock("../../app/providers.js", () => ({ useApiClients: () => ({ clients: clients }) }));
@@ -37,9 +38,11 @@ vi.mock("../recording-entry.js", async (original) => {
   return { ...actual, useRecordingEntry: (_asr: unknown, _upload: unknown, deliver: typeof mocks.recordingDeliver) => {
     mocks.recordingDeliver = deliver;
     const [compactOpen, setCompact] = useState(false);
-    return { compactOpen, toggleCompact: () => setCompact((open) => !open), closeCompact: () => setCompact(false),
-      close() {}, archive() {}, session: { status: "idle", elapsedMs: 0, live: null, error: null, lines: [], recordings: [],
-        start() {}, pause() {}, resume() {}, finish() {} } };
+    const session = { status: "idle", elapsedMs: 0, live: null, error: null, lines: [], recordings: [],
+      start: mocks.recordingStart, pause() {}, resume() {}, finish() {} };
+    return { compactOpen, compactSession: session, compactBlocked: false,
+      toggleCompact: () => setCompact((open) => !open), closeCompact: () => setCompact(false),
+      close() {}, archive() {}, session };
   } };
 });
 
@@ -59,7 +62,7 @@ describe("conversation feature integration", () => {
   let features: ReturnType<typeof useConversationFeatures>;
   function Harness() {
     ui = usePluginUi();
-    features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: vi.fn(),
+    features = useConversationFeatures({ scopeKey: mocks.chatId ?? "draft-1", agentMessages: mocks.messages, onDraft: mocks.draft,
       onStageFiles: mocks.stageFiles, onStageExistingFiles: mocks.stageExistingFiles, onOpenArtifact: mocks.openArtifact,
       onSend: mocks.send, onOpenRecording: mocks.openRecording, onEnsureConversation: mocks.ensureConversation });
 
@@ -132,17 +135,47 @@ describe("conversation feature integration", () => {
     expect(features.scenarios).toEqual([]);
   });
 
-  it("publishes an idle interview for the shared right task panel", async () => {
-    mocks.chatId = "legal-chat";
+  it("removes the legal home recommendation as soon as the plugin changes", async () => {
+    const scenario = { id: "labor-risk-diagnosis", name: "用工风险诊断", description: "生成诊断报告",
+      icon: "scale", prompt: "帮我生成诊断报告" };
+    mocks.list.mockResolvedValueOnce([{ ...plugin, manifest: { ...plugin.manifest, scenarios: [scenario] } }])
+      .mockResolvedValueOnce([]);
     await act(async () => render());
-    await act(async () => ui.receive({ pluginId: "legal-labor", capabilityId: "material-collect",
-      callId: "interview", conversationId: "legal-chat", origin: "agent",
-      event: { type: "interaction", request: { interactionId: "record", type: "audio-record", payload: {} } } }));
+    expect(features.scenarios).toEqual([{ ...scenario, pluginId: "legal-labor" }]);
 
-    expect(container.textContent).toContain("开始录音");
-    expect(features.sidePanel).toBeNull();
-    expect(features.sidePanelWidth).toBeNull();
-    expect(features.pluginRecordingSession?.status).toBe("idle");
+    await act(async () => window.dispatchEvent(new Event("memmy:plugin-change")));
+    expect(features.scenarios).toEqual([]);
+  });
+
+  it("opens the interview panel only after starting recording and clears it if startup fails", async () => {
+    let rejectMicrophone!: (error: Error) => void;
+    const getUserMedia = vi.fn(() => new Promise<MediaStream>((_resolve, reject) => { rejectMicrophone = reject; }));
+    vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
+    vi.stubGlobal("MediaRecorder", class {});
+    try {
+      mocks.chatId = "legal-chat";
+      await act(async () => render());
+      await act(async () => ui.receive({ pluginId: "legal-labor", capabilityId: "material-collect",
+        callId: "interview", conversationId: "legal-chat", origin: "agent",
+        event: { type: "interaction", request: { interactionId: "record", type: "audio-record", payload: {} } } }));
+
+      expect(container.textContent).toContain("开始录音");
+      expect(features.sidePanel).toBeNull();
+      expect(features.sidePanelWidth).toBeNull();
+      expect(features.pluginRecordingSession).toBeNull();
+      expect(getUserMedia).not.toHaveBeenCalled();
+
+      await act(async () => button("开始录音")!.click());
+      expect(getUserMedia).toHaveBeenCalledOnce();
+      expect(features.pluginRecordingSession?.status).toBe("starting");
+
+      await act(async () => rejectMicrophone(new Error("Microphone unavailable")));
+      expect(features.pluginRecordingSession).toBeNull();
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain("Microphone unavailable");
+      expect(button("开始录音")?.disabled).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("highlights the composer recording shortcut only for its own card", () => {
@@ -184,6 +217,48 @@ describe("conversation feature integration", () => {
     expect(mocks.stageFiles).toHaveBeenCalledWith([generated]);
   });
 
+  it("sends a summary with the persisted transcript without changing the composer", async () => {
+    await act(async () => render());
+    const persisted = { kind: "file" as const, path: "/workspace/recordings/transcript.txt", name: "transcript.txt",
+      mime: "text/plain" as const, bytes: 34, url: "/text" };
+    await act(async () => mocks.recordingDeliver?.(new File(["words"], "transcript.txt"), "summarize", persisted));
+    expect(mocks.send).toHaveBeenCalledWith(expect.any(String), [persisted]);
+    expect(clients.memmyAgent.uploadAgentMedia).not.toHaveBeenCalled();
+    expect(mocks.draft).not.toHaveBeenCalled();
+    expect(mocks.stageFiles).not.toHaveBeenCalled();
+    expect(mocks.stageExistingFiles).not.toHaveBeenCalled();
+  });
+
+  it("waits for a legacy transcript upload and ignores repeat summary clicks while pending", async () => {
+    const persisted = { kind: "file" as const, path: "/workspace/recordings/legacy.txt", name: "legacy.txt",
+      mime: "text/plain" as const, bytes: 34, url: "/text" };
+    let finishUpload!: (files: typeof persisted[]) => void;
+    clients.memmyAgent.uploadAgentMedia.mockImplementationOnce(() => new Promise((resolve) => { finishUpload = resolve; }));
+    await act(async () => render());
+    const file = new File(["words"], "legacy.txt", { type: "text/plain" });
+    act(() => { mocks.recordingDeliver?.(file, "summarize"); mocks.recordingDeliver?.(file, "summarize"); });
+    expect(clients.memmyAgent.uploadAgentMedia).toHaveBeenCalledTimes(1);
+    expect(mocks.send).not.toHaveBeenCalled();
+    await act(async () => finishUpload([persisted]));
+    expect(mocks.send).toHaveBeenCalledExactlyOnceWith(expect.any(String), [persisted]);
+    expect(mocks.draft).not.toHaveBeenCalled();
+  });
+
+  it("does not send an incomplete summary when upload fails and allows retry", async () => {
+    clients.memmyAgent.uploadAgentMedia.mockRejectedValueOnce(new Error("Upload failed"));
+    await act(async () => render());
+    const file = new File(["words"], "legacy.txt", { type: "text/plain" });
+    await act(async () => mocks.recordingDeliver?.(file, "summarize"));
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Upload failed");
+    expect(mocks.draft).not.toHaveBeenCalled();
+    const persisted = { kind: "file" as const, path: "/workspace/recordings/legacy.txt", name: "legacy.txt",
+      mime: "text/plain" as const, bytes: 34, url: "/text" };
+    clients.memmyAgent.uploadAgentMedia.mockResolvedValueOnce([persisted]);
+    await act(async () => mocks.recordingDeliver?.(file, "summarize"));
+    expect(mocks.send).toHaveBeenCalledWith(expect.any(String), [persisted]);
+  });
+
   it("opens a staged transcript in the shared task file preview", async () => {
     mocks.chatId = "legal-chat";
     await act(async () => render());
@@ -216,6 +291,16 @@ describe("conversation feature integration", () => {
     expect(features.waiting).toBe(false);
     await act(async () => button("访谈录音")!.click());
     expect(container.querySelector(".recording-entry-card")).toBeNull();
+  });
+
+  it("focuses the current recording page only when the compact card starts recording", async () => {
+    await enterLegalConversation();
+    await act(async () => button("访谈录音")!.click());
+    expect(mocks.openRecording).not.toHaveBeenCalled();
+    expect(mocks.recordingStart).not.toHaveBeenCalled();
+    await act(async () => container.querySelector<HTMLButtonElement>(".recording-entry-card .recording-bar__button--primary")!.click());
+    expect(mocks.openRecording).toHaveBeenCalledOnce();
+    expect(mocks.recordingStart).toHaveBeenCalledOnce();
   });
 
   it("does not route the button-only legal actions from slash input", async () => {
@@ -365,6 +450,28 @@ describe("conversation feature integration", () => {
     expect(features.waitingLabel).toBeNull();
     // The finished tool owns its completed action row; the live waiting slot is gone.
     expect(features.processInteraction).toBeNull();
+  });
+
+  it.each(["zh-CN", "en-US"])("shows localized Office runtime preparation in the Agent conversation (%s)", async (language) => {
+    mocks.chatId = "office-chat";
+    await act(async () => render(language));
+    const call = { pluginId: "office", capabilityId: "office_render", callId: "office-render",
+      conversationId: "office-chat", origin: "agent" as const, turnId: "office-turn" };
+    for (const [runtimeStage, message, chinese, current, total] of [
+      ["preparing", "Preparing Office runtime…", "正在准备 Office 运行时…", 0, undefined],
+      ["downloading", "Downloading Office runtime…", "正在下载 Office 运行时…", 25, 100],
+      ["extracting", "Extracting Office runtime…", "正在解压 Office 运行时…", 0, undefined],
+      ["verifying", "Verifying Office runtime…", "正在校验 Office 运行时…", 0, undefined]
+    ] as const) {
+      await act(async () => ui.receive({ ...call, event: {
+        type: "progress", phase: "runtime-preparation", runtimeStage, message, current, total
+      } }));
+      expect(container.querySelector('[role="status"]')?.textContent).toContain(language === "zh-CN" ? chinese : message);
+      expect(container.textContent?.includes("25%")).toBe(total !== undefined);
+    }
+    await act(async () => ui.receive({ ...call, event: { type: "progress", current: 0, message: "Office processing" } }));
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.textContent).not.toContain("Office processing");
   });
 
   it("keeps Agent Office progress and files off the composer", async () => {

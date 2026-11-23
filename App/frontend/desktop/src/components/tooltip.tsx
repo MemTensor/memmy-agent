@@ -34,7 +34,7 @@ let tooltipRoot: Root | null = null;
 let activeTrigger: HTMLElement | null = null;
 let listenersAttached = false;
 
-export function Tooltip(props: { content: ReactNode; children: ReactElement<TooltipTriggerProps>; openOnClick?: boolean; variant?: TooltipVariant }) {
+export function Tooltip(props: { content: ReactNode; children: ReactElement<TooltipTriggerProps>; openOnClick?: boolean; variant?: TooltipVariant; shouldShow?: (trigger: HTMLElement) => boolean }) {
   const triggerRef = useRef<HTMLElement | null>(null);
 
   function show() {
@@ -42,6 +42,7 @@ export function Tooltip(props: { content: ReactNode; children: ReactElement<Tool
     if (!trigger) {
       return;
     }
+    if (props.shouldShow && !props.shouldShow(trigger)) { hide(); return; }
 
     activeTrigger = trigger;
     renderTooltip(props.content, props.variant);

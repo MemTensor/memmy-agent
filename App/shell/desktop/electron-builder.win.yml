@@ -1,4 +1,9 @@
 appId: cn.memtensor.memmy
+protocols:
+  # 浏览器打开邀请链接后，落地页用 memmy://invite/<code> 拉起桌面端并弹出「加入项目」。
+  - name: Memmy Invite
+    schemes:
+      - memmy
 productName: Memmy
 artifactName: Memmy-${version}-${arch}.${ext}
 

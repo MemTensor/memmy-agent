@@ -77,6 +77,25 @@ describe("cursor source adapter", () => {
     await expect(collect(readCursorVscdb(globalState.stateDbPath))).resolves.toEqual([]);
   });
 
+  it("reads a chat whose header list Cursor keeps in composerConvHeaders rows", async () => {
+    const globalState = createCursorGlobalStateFixture({ chunkedHeaders: 2 });
+
+    const messages = await collect(readCursorVscdb(globalState.stateDbPath));
+    const turn = sourceTurnFromMessages(messages.filter((message) => message.rawMeta.sourceTurnId === "bubble-user-1"));
+
+    expect(turn).toMatchObject({
+      source: "cursor",
+      conversationId: "composer-1",
+      turnId: "bubble-user-1",
+      answer: "I can help with the Cursor global storage format.",
+      status: "succeeded"
+    });
+    // The tool bubble travels with the turn it was run in, whichever chunk carried its header.
+    expect(turn?.toolCalls).toEqual([
+      expect.objectContaining({ id: "call-read-1", name: "read_file_v2", output: "file body" })
+    ]);
+  });
+
   it("treats a workspace database without chat tables as an empty history", async () => {
     const workspace = createCursorWorkspaceFixture();
 
@@ -181,7 +200,9 @@ function createCursorWorkspaceFixture(): {
 }
 
 /** Mirrors Cursor globalStorage: a composerHeaders row plus composerData and bubble rows. */
-function createCursorGlobalStateFixture(options: { closingAssistantText?: string; isSubagent?: boolean; chunked?: boolean } = {}): {
+function createCursorGlobalStateFixture(
+  options: { closingAssistantText?: string; isSubagent?: boolean; chunkedHeaders?: number; chunked?: boolean } = {}
+): {
   storageRoot: string;
   stateDbPath: string;
 } {
@@ -230,15 +251,19 @@ function createCursorGlobalStateFixture(options: { closingAssistantText?: string
     db.prepare("INSERT INTO composerHeaders (composerId, isSubagent, subagentTypeName) VALUES (?, ?, ?)")
       .run("composer-1", options.isSubagent ? 1 : 0, options.isSubagent ? "explore" : "");
     const headers = bubbles.map(({ bubbleId, type, createdAt }) => ({ bubbleId, type, createdAt }));
+    const chunkCount = options.chunked ? 2 : options.chunkedHeaders ?? 0;
+    const size = options.chunked ? 2 : chunkCount ? Math.ceil(headers.length / chunkCount) : 0;
     const insert = db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)");
     insert.run("composerData:composer-1", JSON.stringify({
       composerId: "composer-1",
-      fullConversationHeadersOnly: options.chunked ? [] : headers,
-      ...(options.chunked ? { headerLog: { chunkSize: 2, chunkCount: 2, count: headers.length } } : {})
+      fullConversationHeadersOnly: chunkCount ? [] : headers,
+      ...(options.chunked ? { headerLog: { chunkSize: size, chunkCount, count: headers.length } } : {})
     }));
-    if (options.chunked) {
-      insert.run("composerConvHeaders:composer-1:000000", JSON.stringify(headers.slice(0, 2)));
-      insert.run("composerConvHeaders:composer-1:000001", JSON.stringify(headers.slice(2)));
+    if (chunkCount) {
+      for (let index = 0; index < chunkCount; index += 1) {
+        insert.run(`composerConvHeaders:composer-1:${String(index).padStart(6, "0")}`,
+          JSON.stringify(headers.slice(index * size, (index + 1) * size)));
+      }
     }
     for (const bubble of bubbles) {
       db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(

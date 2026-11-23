@@ -290,6 +290,17 @@ describe("OpenAI Responses convertTools", () => {
       { type: "function", function: { name: "b", parameters: {} } },
     ])).toHaveLength(2);
   });
+
+  it("keeps window selection optional and preserves explicit strict schemas", () => {
+    const parameters = { type: "object", properties: { app: { type: "string" }, window_id: { type: "integer" } }, required: ["app"] };
+    const [nativeTool, strictTool] = convertTools([
+      { function: { name: "get_app_state", parameters } },
+      { function: { name: "strict_tool", strict: true, parameters } },
+    ]);
+    expect(nativeTool).toMatchObject({ strict: false, parameters });
+    expect(nativeTool.parameters.required).toEqual(["app"]);
+    expect(strictTool.strict).toBe(true);
+  });
 });
 
 describe("OpenAI Responses mapFinishReason", () => {

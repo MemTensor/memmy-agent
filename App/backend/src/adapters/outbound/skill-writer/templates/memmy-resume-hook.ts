@@ -32,6 +32,8 @@ const CONFIG_URL = new URL("./memmy-memory-config.json", import.meta.url);
 const STATE_URL = new URL("./memmy-resume-state.json", import.meta.url);
 const DEFAULT_MEMMY_CONFIG_PATH = join(homedir(), ".memmy", "config.yaml");
 const FETCH_TIMEOUT_MS = 45000;
+// 会话启动时记忆注入最多等这么久，超时就先让会话跑起来。
+const LIFECYCLE_CONTEXT_BUDGET_MS = 3000;
 const SEARCH_LIMIT = 20;
 const DISPLAY_LIMIT = 5;
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -179,12 +181,23 @@ async function openHookRuntimeSession(payload, transition) {
     workspaceRoot: workspacePath(payload) || null,
     transition,
     pinnedOwner: true
-  });
+  }, { timeoutMs: LIFECYCLE_CONTEXT_BUDGET_MS });
+}
+
+/** 超过预算就当作没有这块内容，不让一次慢请求拖住整个会话启动。 */
+function withinBudget(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(null), ms))
+  ]);
 }
 
 async function handleL3LifecycleEvent(payload) {
   const event = hookEventName(payload);
-  const session = await openHookRuntimeSession(payload, event === "sessionstart" ? "allow_legacy_rollover" : "resume_only");
+  const session = await withinBudget(
+    openHookRuntimeSession(payload, event === "sessionstart" ? "allow_legacy_rollover" : "resume_only"),
+    LIFECYCLE_CONTEXT_BUDGET_MS
+  );
   if (!session) {
     writeLifecycleOutput(payload, "");
     return;
@@ -204,8 +217,8 @@ async function handleL3LifecycleEvent(payload) {
     writeLifecycleOutput(payload, "");
     return;
   }
-  const loaded = await loadRuntimeL3(session);
-  writeLifecycleOutput(payload, loaded.additionalContext);
+  const loaded = await withinBudget(loadRuntimeL3(session, { timeoutMs: LIFECYCLE_CONTEXT_BUDGET_MS }), LIFECYCLE_CONTEXT_BUDGET_MS);
+  writeLifecycleOutput(payload, loaded ? loaded.additionalContext : "");
 }
 
 function writeLifecycleOutput(payload, context) {

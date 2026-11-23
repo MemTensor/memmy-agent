@@ -18,9 +18,10 @@ const aliasName = `${itemName}-same-command`;
 const productionName = 'cn.memtensor.memmy';
 const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const wscript = path.join(process.env.SystemRoot, 'System32', 'wscript.exe');
-const localAppData = path.join(root, 'Local AppData 中文');
-const launcherPath = path.join(localAppData, 'Memmy', 'launcher', 'MemmyLauncher.vbs');
-const markerPath = path.join(root, 'WSH_PROBE_OK.txt');
+const localAppData = path.join(root, "Local AppData 中文 $name `tick O'Brien");
+const launcherPath = path.join(localAppData, 'Memmy', 'launcher', 'MemmyLauncher.ps1');
+const legacyLauncherPath = launcherPath.replace(/\.ps1$/, '.vbs');
+const markerPath = path.join(path.dirname(launcherPath), 'POWERSHELL_PROBE_OK.txt');
 const environment = {
   platform: 'win32', isPackaged: true, executablePath: process.execPath,
   localAppDataPath: localAppData, systemRootPath: process.env.SystemRoot,
@@ -78,7 +79,10 @@ if ($result.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($result.sValue)) 
 
 function executeRegisteredCommand() {
   const command = readSystemRunCommand();
-  assert.equal(command, `"${wscript}" "${launcherPath}"`);
+  const hostPrefix = `"${powershell}" `;
+  assert.ok(command.startsWith(hostPrefix), command);
+  assert.ok(command.includes(launcherPath), command);
+  assert.ok(!command.includes(".vbs"), command);
   fs.rmSync(markerPath, { force: true });
   // ProcessStartInfo consumes the exact registry argument tail without a shell adding another escape layer.
   runPowerShell(`
@@ -92,40 +96,47 @@ try {
   if (-not $process.WaitForExit(10000)) { $process.Kill(); throw 'Registered startup command did not exit' }
   if ($process.ExitCode -ne 0) { throw "Registered startup command failed: $($process.ExitCode)" }
 } finally { $process.Dispose() }
-`, { MEMMY_LOGIN_SCRIPT_HOST: wscript, MEMMY_LOGIN_ARGUMENTS: command.slice(`"${wscript}" `.length) });
-  assert.equal(fs.readFileSync(markerPath, 'utf8'), 'WSH_PROBE_OK');
+`, { MEMMY_LOGIN_SCRIPT_HOST: powershell, MEMMY_LOGIN_ARGUMENTS: command.slice(hostPrefix.length) });
+  assert.equal(fs.readFileSync(markerPath, 'utf8'), 'POWERSHELL_PROBE_OK');
 }
 
 async function main() {
   await app.whenReady();
   fs.mkdirSync(path.dirname(launcherPath), { recursive: true });
-  const script = `Set fso = CreateObject("Scripting.FileSystemObject")\r\nSet marker = fso.CreateTextFile("${markerPath.replaceAll('"', '""')}", True)\r\nmarker.Write "WSH_PROBE_OK"\r\nmarker.Close\r\nWScript.Quit 0\r\n`;
+  const script = "[System.IO.File]::WriteAllText((Join-Path $PSScriptRoot 'POWERSHELL_PROBE_OK.txt'), 'POWERSHELL_PROBE_OK')\r\n";
   fs.writeFileSync(launcherPath, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(script, 'utf16le')]));
-  fs.writeFileSync(path.join(root, 'other.vbs'), 'WScript.Quit 0\r\n');
+  // An old VBS Run value must migrate even after the installer removed its script.
+  assert.equal(fs.existsSync(legacyLauncherPath), false);
   const command = resolveWindowsLoginItemCommand(environment);
-  assert.deepEqual(command, { path: wscript, args: [launcherPath] });
-  assert.equal(setWindowsLaunchAtLogin(application, environment, true), true);
+  assert.deepEqual(command, { path: powershell,
+    args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', launcherPath] });
+  const enabled = setWindowsLaunchAtLogin(application, environment, true);
+  assert.equal(enabled, true, JSON.stringify({
+    command, settings: app.getLoginItemSettings(command), rawRunCommand: readSystemRunCommand(),
+  }, null, 2));
   executeRegisteredCommand();
   assert.equal(repairWindowsLaunchAtLogin(application, environment), false);
 
   const migrations = [];
-  for (const enabled of [true, false]) {
-    app.setLoginItemSettings({ ...command, args: [`"${launcherPath}"`], openAtLogin: true, enabled });
-    // An enabled entry for the same host must not override the disabled Memmy entry.
-    app.setLoginItemSettings({ path: wscript, args: [path.join(root, 'other.vbs')],
-      name: unrelatedName, openAtLogin: true, enabled: true });
-    assert.notEqual(readSystemRunCommand(), `"${wscript}" "${launcherPath}"`);
-    assert.equal(repairWindowsLaunchAtLogin(application, environment), true);
-    const settings = app.getLoginItemSettings(command);
-    const item = settings.launchItems.find(value => value.name === itemName && value.scope === 'user');
-    assert.ok(item);
-    assert.deepEqual(item.args, [launcherPath]);
-    assert.equal(item.enabled, enabled);
-    assert.equal(settings.openAtLogin, true);
-    assert.equal(getWindowsLaunchAtLogin(application, environment), enabled);
-    executeRegisteredCommand();
-    assert.equal(repairWindowsLaunchAtLogin(application, environment), false);
-    migrations.push({ enabled, executed: true });
+  for (const quoted of [false, true]) {
+    for (const enabled of [true, false]) {
+      const legacyCommand = { path: wscript, args: [quoted ? `"${legacyLauncherPath}"` : legacyLauncherPath] };
+      app.setLoginItemSettings({ ...legacyCommand, openAtLogin: true, enabled });
+      // An unrelated enabled Run item must not enable the disabled Memmy item.
+      app.setLoginItemSettings({ path: wscript, args: [path.join(root, 'other.vbs')],
+        name: unrelatedName, openAtLogin: true, enabled: true });
+      assert.equal(repairWindowsLaunchAtLogin(application, environment), true);
+      const settings = app.getLoginItemSettings(command);
+      const item = settings.launchItems.find(value => value.name === itemName && value.scope === 'user');
+      assert.ok(item);
+      assert.deepEqual(item.args, command.args.filter(value => !value.startsWith('-')));
+      assert.equal(item.enabled, enabled);
+      assert.equal(settings.openAtLogin, true);
+      assert.equal(getWindowsLaunchAtLogin(application, environment), enabled);
+      executeRegisteredCommand();
+      assert.equal(repairWindowsLaunchAtLogin(application, environment), false);
+      migrations.push({ quoted, enabled, executed: true });
+    }
   }
 
   const exactCommandAliasStates = [];
@@ -136,7 +147,7 @@ async function main() {
     for (const [name, enabled] of [[itemName, ownEnabled], [aliasName, aliasEnabled]]) {
       const item = settings.launchItems.find(value => value.name === name && value.scope === 'user');
       assert.ok(item);
-      assert.deepEqual(item.args, [launcherPath]);
+      assert.deepEqual(item.args, command.args.filter(value => !value.startsWith('-')));
       assert.equal(item.enabled, enabled);
     }
     const expected = ownEnabled || aliasEnabled;

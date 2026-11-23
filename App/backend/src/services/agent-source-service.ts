@@ -65,6 +65,8 @@ export interface AgentSourceService {
   isAutomaticConnectionAllowed(sourceId: string): Promise<boolean>;
   isInstalledHookCurrent(sourceId: string): Promise<boolean>;
   detectMemoryPluginConflicts(): Promise<AgentSourceMemoryPluginConflict[]>;
+  /** Gives already-connected agents this build's skill instructions; returns the refreshed source ids. */
+  refreshInstalledSkills(): Promise<string[]>;
 }
 
 export interface ProcessingFailure {
@@ -398,6 +400,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
               options.agentSourceRepository.setConnectionState(sourceId, "plugin_installed", false);
             }
           }
+          await syncProjectHooksAfterHookChange(options, sourceId);
           agentSourceAnalytics.trackPluginInstalled({
             sourceId,
             permission,
@@ -440,6 +443,7 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
         try {
           const event = await disconnectAgentSkillConnection(options, sourceId, "plugin", compensation, explicitAction);
           compensation.record(explicitAction, event);
+          await syncProjectHooksAfterHookChange(options, sourceId);
           agentSourceAnalytics.trackPluginUninstalled({
             sourceId,
             permission,
@@ -478,6 +482,40 @@ export function createAgentSourceService(options: CreateAgentSourceServiceOption
         });
       }
       return conflicts;
+    },
+
+    async refreshInstalledSkills() {
+      const refreshed: string[] = [];
+      for (const source of options.agentSourceRepository.listSources()) {
+        try {
+          // The installed skill decides whether there is anything to refresh, so an agent whose connection
+          // status was lost ("not connected" while its skill still sits on disk) is refreshed too.
+          if (await options.skillDistributionService.refreshInstalledSkill(source.sourceId)) {
+            refreshed.push(source.sourceId);
+          }
+        } catch {
+          // A stale skill must not block start-up; the next explicit install writes it.
+        }
+      }
+      try {
+        const projectSkills = await options.skillDistributionService.ensureProjectSkills?.() ?? [];
+        for (const sourceId of projectSkills) {
+          if (!refreshed.includes(sourceId)) refreshed.push(sourceId);
+        }
+      } catch {
+        // The project skill is retried on the next launch.
+      }
+      // 项目钩子必须排在记忆钩子刷新之后：升级后的第一次启动要靠上面这轮刷新把记忆钩子换成
+      // 不含项目指令的版本，项目钩子这时才装得上；顺序反了，这次启动期间本机项目指令会缺一段。
+      try {
+        const projectHooks = await options.skillDistributionService.syncProjectHooks?.() ?? [];
+        for (const sourceId of projectHooks) {
+          if (!refreshed.includes(sourceId)) refreshed.push(sourceId);
+        }
+      } catch {
+        // 项目钩子下一次启动再同步。
+      }
+      return refreshed;
     }
   };
 }
@@ -1111,4 +1149,20 @@ async function readScanPermission(
 ): Promise<ScanPermission | undefined> {
   if (!options.getScanPermission) return undefined;
   return await options.getScanPermission();
+}
+
+/**
+ * 记忆钩子装上或卸掉之后顺手同步一次项目钩子。
+ *
+ * <p>这一步不属于记忆侧的结果：失败只影响项目钩子，下一次启动或下一次切换授权时还会再同步。</p>
+ */
+async function syncProjectHooksAfterHookChange(
+  options: CreateAgentSourceServiceOptions,
+  sourceId: string
+): Promise<void> {
+  try {
+    await options.skillDistributionService.syncProjectHooks?.([sourceId]);
+  } catch {
+    // 项目钩子下一次启动再同步。
+  }
 }
