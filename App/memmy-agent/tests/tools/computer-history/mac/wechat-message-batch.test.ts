@@ -2,10 +2,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-// Consent behavior is covered separately; these fixtures exercise the message protocol.
-vi.mock("../../../../src/tools/computer-history/win/private-files.js", () => ({
-  prepareWindowsWeChatState: () => {}, validateWindowsWeChatConsent: () => true,
-}));
 import {
   normalizeWeChatBatch, WeChatMessageBatchReader, WeChatReaderError,
 } from "../../../../src/tools/computer-history/mac/wechat-message-batch.js";
@@ -128,7 +124,7 @@ describe("personal WeChat History messages", () => {
       expect(() => reader.acknowledge({ [table]: 1 }, "missing")).toThrow("revoked");
       const firstConsent = consent.grant().consentId!;
       reader.acknowledge({ [table]: 1 }, firstConsent);
-      if (process.platform !== "win32") expect(fs.statSync(cursorFile).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(cursorFile).mode & 0o777).toBe(0o600);
       expect(() => reader.acknowledge({ [table]: 0 }, firstConsent)).toThrow("regressed");
       consent.revoke();
       const secondConsent = consent.grant().consentId!;
@@ -265,7 +261,7 @@ process.exit(2);
   it("rejects a dangling cursor symlink without launching the reader or replacing the link", async () => {
     const fixture = createReadFixture();
     const missingTarget = `${fixture.cursorFile}.missing`;
-    fs.symlinkSync(missingTarget, fixture.cursorFile, process.platform === "win32" ? "junction" : "file");
+    fs.symlinkSync(missingTarget, fixture.cursorFile, "file");
     expect(fs.existsSync(fixture.cursorFile)).toBe(false);
 
     await expect(fixture.reader.read()).rejects.toThrow("WeChat cursor is unreadable");

@@ -46,7 +46,7 @@ function render(initialSubPage?: MemorySubPageId): void {
 }
 
 describe("Computer History platform availability", () => {
-  it.each(["linux", undefined])("hides History and refuses an explicit History page on %s", (hostPlatform) => {
+  it.each(["win32", "linux", undefined])("hides History and refuses an explicit History page on %s", (hostPlatform) => {
     platform(hostPlatform);
     render("computer-history");
     expect(host.textContent).not.toContain("Computer History");
@@ -55,8 +55,8 @@ describe("Computer History platform availability", () => {
     expect(window.sessionStorage.getItem("memmy.memorySubPage")).toBe("overview");
   });
 
-  it.each(["saved page", "direct URL", "pending permission setup"])("ignores Linux %s without mounting permission/polling effects", (entry) => {
-    platform("linux");
+  it.each(["saved page", "direct URL", "pending permission setup", "pending WeChat permission return"])("ignores Windows %s without mounting permission/polling effects", (entry) => {
+    platform("win32");
     if (entry === "saved page") window.sessionStorage.setItem("memmy.memorySubPage", "computer-history");
     if (entry === "direct URL") window.history.replaceState(null, "", "/memory?memoryPage=computer-history");
     if (entry === "pending permission setup") window.localStorage.setItem(HISTORY_PERMISSION_SETUP_KEY, "start");
@@ -67,8 +67,8 @@ describe("Computer History platform availability", () => {
     expect(mocks.historyPage).not.toHaveBeenCalled();
   });
 
-  it.each(["darwin", "win32"])("shows the %s entry and mounts History when selected", (hostPlatform) => {
-    platform(hostPlatform);
+  it("keeps the macOS entry and mounts History when selected", () => {
+    platform("darwin");
     render();
     const sidebarText = host.querySelector(".memory-page-sidebar")?.textContent ?? "";
     const userMemories = sidebarText.indexOf("User Memory");

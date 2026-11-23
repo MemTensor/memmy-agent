@@ -8,8 +8,7 @@ import { applySidebarRecordingAction, sidebarRecordingStatus } from "./recording
 import { pendingAgentQuestion, AgentQuestionCard, AgentQuestionActiveRequestContext } from "./agent-question-card.js";
 /** Home page module. */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type CSSProperties, type DragEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type SetStateAction, type UIEvent } from "react";
-import type { AgentGatewayStartupIssue, RecordingStart } from "@memmy/local-api-contracts";
-import { AgentTaskRecordingOption, TaskRecordingsPanel } from "./memory/task-recordings.js";
+import type { AgentGatewayStartupIssue } from "@memmy/local-api-contracts";
 import { getRuntimeConfig } from "../api/runtime-config.js";
 import { hydrateAgentThreadInBackground, refreshAgentTaskList, useAgentRuntimeBridge, type AgentTaskStateCoordinator } from "../app/agent-runtime-bridge.js";
 import { useApiClients } from "../app/providers.js";
@@ -316,7 +315,6 @@ export interface SubmitAgentComposerMessageInput {
   ensureChatSubscription?: (chatId: string) => void;
   content: string;
   displayContent?: string;
-  taskRecording?: RecordingStart;
   language?: MemmyAgentUiLanguage;
   pendingAttachments: PendingAttachment[];
   uploadAgentMedia: (attachments: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
@@ -793,7 +791,6 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     webui: true,
     queue_surface: "chat_composer",
     client_request_id: clientRequestId,
-    ...(input.taskRecording ? { task_recording: input.taskRecording } : {}),
     ...(capturedTarget ? { target: capturedTarget } : {}),
     ...(input.language ? { language: input.language } : {}),
     ...(confirmedModelPreset !== undefined ? { model_preset: confirmedModelPreset } : {}),
@@ -819,7 +816,6 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
       chatId,
       content: text,
       clientRequestId,
-      ...(input.taskRecording ? { taskRecording: input.taskRecording } : {}),
       ...(capturedTarget ? { target: capturedTarget } : {}),
       ...(input.language ? { language: input.language } : {}),
       ...(confirmedModelPreset !== undefined ? { modelPreset: confirmedModelPreset } : {}),
@@ -935,7 +931,6 @@ export function HomePage() {
   const slashCommandsRetryTimerRef = useRef<number | null>(null);
   const slashCommandsAttemptRef = useRef(0);
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
-  const [taskRecording, setTaskRecording] = useState<RecordingStart | null>(null);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [selectedComposerCommandsByScope, setSelectedComposerCommandsByScope] = useState<Record<string, typeof COMPOSER_GOAL_COMMAND>>({});
   const [recentSlashCommands, setRecentSlashCommands] = useState<string[]>(() => readRecentSlashCommands());
@@ -1008,7 +1003,6 @@ export function HomePage() {
       }
     }
   });
-  useEffect(() => { setTaskRecording(null); }, [chatScopeKey]);
   const cancelVoiceInput = asrRecorder.cancel;
   useLayoutEffect(() => {
     if (voiceInputRef.current && voiceInputRef.current.scopeKey !== chatScopeKey) {
@@ -2099,7 +2093,6 @@ export function HomePage() {
         connection,
         ensureChatSubscription,
         content: features.agentPrompt(input) ?? input,
-        taskRecording: taskRecording ?? undefined,
         displayContent: features.agentPrompt(input) ? input : selectedComposerCommand ? composerInput : undefined,
         language,
         pendingAttachments,
@@ -2147,7 +2140,7 @@ export function HomePage() {
       });
       if (!submitted) {
         dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
-      } else setTaskRecording(null);
+      }
     } catch (error) {
       dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
       throw error;
@@ -3244,7 +3237,6 @@ export function HomePage() {
           </div>
           <div className="home-empty-column home-empty-input">
             <AgentOperationErrorSlot message={agentError} />
-            {state.agent.currentChatId && <TaskRecordingsPanel client={clients?.memmyAgent ?? null} chatId={state.agent.currentChatId} connection={connection} />}
             <div className="home-empty-composer-stack">
               <div
                 className="relative home-empty-composer agent-composer-shell rounded-card-lg"
@@ -3319,7 +3311,6 @@ export function HomePage() {
                   >
                     {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
                   </button>
-                  <AgentTaskRecordingOption client={clients?.memmyAgent ?? null} value={taskRecording} disabled={isCreatingChat || messageSendInFlight} onChange={setTaskRecording} />
                   <ComposerSubmitButton
                     isSending={isCurrentAgentRunning}
                     disabled={composerSubmitDisabled}
@@ -3493,7 +3484,6 @@ export function HomePage() {
                   </p>
                 ) : null}
                 <AgentOperationErrorSlot message={agentError} />
-                {state.agent.currentChatId && <TaskRecordingsPanel client={clients?.memmyAgent ?? null} chatId={state.agent.currentChatId} connection={connection} />}
                 <div className="agent-composer-stack">
                   <div ref={setQuestionDockTarget} className="agent-question-dock">
                     {pendingNativeCard ? <AgentQuestionCard key={pendingNativeCard.requestId} card={pendingNativeCard}
@@ -3572,7 +3562,6 @@ export function HomePage() {
                         >
                           {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
                         </button>
-                        <AgentTaskRecordingOption client={clients?.memmyAgent ?? null} value={taskRecording} disabled={isCreatingChat || messageSendInFlight} onChange={setTaskRecording} />
                         <ComposerSubmitButton
                           isSending={composerPrimaryAction === "stop"}
                           disabled={composerSubmitDisabled}

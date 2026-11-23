@@ -1,5 +1,3 @@
-# Git Bash packaging scripts must remain executable after a Windows checkout.
-*.sh text eol=lf
 # Preserve the exact upstream evidence bytes verified by the notice collector.
 /plugins/office/licenses/fontkit-2.0.4/NOTICE-SUPPLEMENT.txt -text
 /plugins/office/licenses/fontkit-2.0.4/SPDX-MIT-template.txt -text

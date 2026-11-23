@@ -82,7 +82,6 @@ describe("WeChat History consent", () => {
     consent.grant();
     const keyFile = path.join(path.dirname(consent.filePath), "keys.json");
     fs.writeFileSync(keyFile, "private fixture");
-    vi.mocked(prepareWindowsWeChatState).mockClear();
     vi.spyOn(process, "platform", "get").mockReturnValue("win32");
     privacy.available = false;
     privacy.private = false;
