@@ -36,6 +36,7 @@ export class AutoCompact {
   }
 
   checkExpired(scheduleBackground: Scheduler, activeSessionKeys: Iterable<string> = []): void {
+    if (this.ttl <= 0) return;
     const active = new Set(activeSessionKeys);
     const now = new Date();
     for (const info of this.sessions.listSessions()) {

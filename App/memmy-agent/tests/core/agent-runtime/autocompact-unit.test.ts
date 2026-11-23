@@ -37,6 +37,18 @@ function makeAutoCompact({
 }
 
 describe("AutoCompact", () => {
+  it("does not read sessions when idle compaction is disabled", () => {
+    const sessions = { listSessions: vi.fn(() => []) };
+    const schedule = vi.fn();
+    const compact = makeAutoCompact({ ttl: 0, sessions });
+
+    compact.checkExpired(schedule);
+    compact.checkExpired(schedule);
+
+    expect(sessions.listSessions).not.toHaveBeenCalled();
+    expect(schedule).not.toHaveBeenCalled();
+  });
+
   it("resolves an operation-specific consolidator before archiving and leaves sessions untouched on preparation failure", async () => {
     const sessions = { getOrCreate: vi.fn() } as any;
     const base = { compactIdleSession: vi.fn() };

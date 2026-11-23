@@ -29,15 +29,16 @@ class WeChatIdentity(unittest.TestCase):
             group: {"remark": "", "nick": "家庭群"},
         }
         table = "Msg_" + hashlib.md5(friend.encode()).hexdigest()
-        sent = identity.describe_message(table, me, me, profiles, [friend, me, group])
-        received = identity.describe_message(table, friend, me, profiles, [friend, me, group])
+        usernames_by_table = identity.username_by_message_table([friend, me, group])
+        sent = identity.describe_message(table, me, me, profiles, usernames_by_table)
+        received = identity.describe_message(table, friend, me, profiles, usernames_by_table)
         self.assertEqual(sent, {
             "chatKind": "private", "chatName": "小王", "senderName": "自己", "fromSelf": True,
         })
         self.assertEqual(received["senderName"], "小王")
         self.assertFalse(received["fromSelf"])
         group_table = "Msg_" + hashlib.md5(group.encode()).hexdigest()
-        group_message = identity.describe_message(group_table, friend, me, profiles, [group, friend])
+        group_message = identity.describe_message(group_table, friend, me, profiles, usernames_by_table)
         self.assertEqual(group_message["chatKind"], "group")
         self.assertEqual(group_message["chatName"], "家庭群")
 

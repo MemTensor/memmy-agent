@@ -168,6 +168,19 @@ class WeChatReadMessagesTests(unittest.TestCase):
         self.assertEqual(names["chats"][friend_hash]["kind"], "private")
         self.assertEqual(names["chats"][friend_hash]["display"], names["people"]["wxid_fixture_friend"])
 
+    def test_contact_hashing_does_not_repeat_for_every_message(self):
+        self.write_messages(list(range(1, 201)))
+        identity = reader.identity_module()
+        with mock.patch.object(reader, "identity_module", return_value=identity), \
+                mock.patch.object(identity, "username_by_message_table",
+                                  wraps=identity.username_by_message_table) as index:
+            batch = reader.scan(self.root, self.keys, self.sqlcipher, {}, 200, False)
+        self.assertEqual(len(batch["messages"]), 200)
+        self.assertEqual(batch["nextCursor"], {f"message_0.db:{TABLE}": 200})
+        self.assertTrue(all(row["senderName"] == "wxid_fixture_friend" for row in batch["messages"]))
+        # One index for the shard and one for the refreshed name map.
+        self.assertEqual(index.call_count, 2)
+
     def test_existing_string_server_ids_and_null_survive_the_shared_scan(self):
         self.write_messages(["9007199254740993", "0", None])
         batch = reader.scan(self.root, self.keys, self.sqlcipher, {}, 200, False)
