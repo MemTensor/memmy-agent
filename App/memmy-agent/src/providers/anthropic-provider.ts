@@ -61,7 +61,7 @@ export class AnthropicProvider extends LLMProvider {
       this.model = defaultModel;
       this.inheritProviderDefaults = true;
     }
-    this.defaultModel = this.model ?? "claude-sonnet-4-20250514";
+    this.defaultModel = this.model ?? "claude-sonnet-5-5";
     this.client = this.buildClient();
   }
 
