@@ -58,7 +58,7 @@ function setup() {
       cancel: async () => undefined, respond: async () => undefined
     }
   });
-  const login = () => services!.account.verifyCode({ channel: "email", email: "test@example.com", verificationCode: "123456", loginSource: "Memmy" });
+  const login = () => services!.account.verifyCode({ channel: "email", email: "test@example.com", code: "123456" });
   return { reloadMcpConfig, login };
 }
 

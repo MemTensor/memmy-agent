@@ -234,14 +234,10 @@ describe.skipIf(hostPlatform === 'win32')('Computer Use cleanup for a complete d
     expect(kill).not.toHaveBeenCalled();
   });
 
-  it.each(['file', 'symlink'])('tolerates an already removed socket and safely rejects a stale non-socket %s', async kind => {
+  it('tolerates an already removed socket and safely rejects a stale non-socket file', async () => {
     const f = fixture();
     const stale = f.socket('b'.repeat(16));
-    if (kind === 'symlink') {
-      const target = path.join(f.root, 'unrelated-file');
-      writeFileSync(target, 'stale socket fixture');
-      symlinkSync(target, stale);
-    } else writeFileSync(stale, 'stale socket fixture');
+    writeFileSync(stale, 'stale socket fixture');
     processRows = [row(f, 900_001, f.socket('a'.repeat(16)))];
     await expect(stopComputerUseAgentForPermissionRestart(true, f.resources)).resolves.toBeUndefined();
     processRows = [row(f, 900_002, stale)];
@@ -290,9 +286,7 @@ describe.skipIf(hostPlatform === 'win32')('Computer Use cleanup for a complete d
 
   it.each(['timeout', 'close'] as const)('ignores late socket events after %s and clears the shutdown deadline', async completion => {
     const f = fixture();
-    const socketPath = f.socket('a'.repeat(16));
-    await agent(socketPath, () => {});
-    processRows = [row(f, 900_001, socketPath)];
+    processRows = [row(f, 900_001, f.socket('a'.repeat(16)))];
     const socket = Object.assign(new EventEmitter(), {
       setEncoding: vi.fn(), write: vi.fn(), destroy: vi.fn(),
     });

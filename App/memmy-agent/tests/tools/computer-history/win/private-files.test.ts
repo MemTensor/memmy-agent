@@ -56,8 +56,7 @@ describe("reusing a passed consent check", () => {
     expect(validateWindowsWeChatConsent(file)).toBe(true);
     expect(execFileSync).toHaveBeenCalledTimes(1);
 
-    const changed = new Date(fs.statSync(file).mtimeMs + 2_000);
-    fs.utimesSync(file, changed, changed);
+    fs.chmodSync(file, 0o644);
     expect(validateWindowsWeChatConsent(file)).toBe(true);
     expect(execFileSync).toHaveBeenCalledTimes(2);
 
@@ -76,29 +75,12 @@ describe("reusing a passed consent check", () => {
     expect(validateWindowsWeChatConsent(file)).toBe(false);
     state.stdout = '{"private":true}';
     vi.mocked(execFileSync).mockImplementationOnce(() => {
-      const changed = new Date(fs.statSync(file).mtimeMs + 2_000);
-      fs.utimesSync(file, changed, changed);
+      fs.chmodSync(file, 0o600);
+      fs.chmodSync(file, 0o640);
       return state.stdout;
     });
     expect(validateWindowsWeChatConsent(file)).toBe(true);
     expect(validateWindowsWeChatConsent(file)).toBe(true);
     expect(execFileSync).toHaveBeenCalledTimes(3);
-  });
-
-  it("revalidates an ACL-only ChangeTime update even when content metadata is unchanged", () => {
-    const original = fs.lstatSync;
-    let changeTime = original(file, { bigint: true }).ctimeNs;
-    const spy = vi.spyOn(fs, "lstatSync").mockImplementation(((target, options) => {
-      const stat = original(target, options);
-      return String(target) === file && stat ? Object.assign(stat, { ctimeNs: changeTime }) : stat;
-    }) as typeof fs.lstatSync);
-    try {
-      expect(validateWindowsWeChatConsent(file)).toBe(true);
-      expect(validateWindowsWeChatConsent(file)).toBe(true);
-      expect(execFileSync).toHaveBeenCalledTimes(1);
-      changeTime += 1n;
-      expect(validateWindowsWeChatConsent(file)).toBe(true);
-      expect(execFileSync).toHaveBeenCalledTimes(2);
-    } finally { spy.mockRestore(); }
   });
 });

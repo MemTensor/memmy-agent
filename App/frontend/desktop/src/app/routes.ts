@@ -15,7 +15,6 @@ export type AppRoutePath =
   | "/onboarding"
   | "/main"
   | "/pet"
-  | "/plugins"
   | "/tools"
   | "/memory"
   | "/knowledge"
@@ -54,7 +53,6 @@ export const routeTable: Record<AppRoutePath, AppRouteDefinition> = {
   "/onboarding": { path: "/onboarding", navKey: "nav.onboarding", requiresBootstrap: true },
   "/main": { path: "/main", navKey: "nav.chat", requiresBootstrap: true },
   "/pet": { path: "/pet", navKey: "nav.pet", requiresBootstrap: true },
-  "/plugins": { path: "/plugins", navKey: "nav.plugins", requiresBootstrap: true },
   "/tools": { path: "/tools", navKey: "nav.tools", requiresBootstrap: true },
   "/memory": { path: "/memory", navKey: "nav.memory", requiresBootstrap: true },
   "/knowledge": { path: "/knowledge", navKey: "nav.knowledge", requiresBootstrap: true },
@@ -696,7 +694,7 @@ function isAppRoutePath(value: string | null): value is AppRoutePath {
 }
 
 function isRestorableRoute(path: AppRoutePath): boolean {
-  return path === "/main" || path === "/pet" || path === "/tools" || path === "/plugins" || path === "/memory" || path === "/memory-sources" || path === "/settings";
+  return path === "/main" || path === "/pet" || path === "/tools" || path === "/memory" || path === "/memory-sources" || path === "/settings";
 }
 
 function isPostOnboardingRoute(path: AppRoutePath): boolean {

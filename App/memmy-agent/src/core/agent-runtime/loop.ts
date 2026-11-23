@@ -32,7 +32,7 @@ import {
   type ResolvedModelSelection,
 } from "../../providers/model-catalog.js";
 import { CloudModelCapabilitySchema, CloudModelThinkingConfigSchema } from "@memmy/local-api-contracts";
-import { createRuntimeModelCapabilityCatalog } from "../../providers/model-capability-catalog.js";
+import { createRuntimeModelCapabilityCatalog, type RuntimeModelCapabilityCatalogState } from "../../providers/model-capability-catalog.js";
 import { resolveTurnModelCapabilities } from "../../providers/turn-model-capabilities.js";
 import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
 
@@ -93,7 +93,6 @@ import {
 } from "../session/goal-state.js";
 import { goalObjectiveFromCommand } from "../session/webui-user-content.js";
 import { finishWebuiTurn, markWebuiSession, maybeGenerateWebuiTitle, publishTurnRunStatus, publishWebuiThreadSessionUpdated, shouldPublishWebuiRunStatus, WEBUI_LANGUAGE_METADATA_KEY } from "../session/webui-turns.js";
-import { startAgentRecording, finishAgentRecording } from "../../tools/computer-recordings/agent-lifecycle.js";
 import { renderTemplate } from "../../utils/prompt-templates.js";
 import { imageGenerationPrompt } from "../../utils/image-generation-intent.js";
 import { LLMRuntime } from "../../utils/llm-runtime.js";
@@ -971,7 +970,6 @@ export class AgentLoop {
     });
     this.runner = new AgentRunner();
     this.tools = this.createToolRegistry("init", this.workspace);
-    this.context.skills.availableTools = () => this.tools.toolNames;
     this.commands = new CommandRouter();
     registerBuiltinCommands(this.commands);
     this.consolidator = new Consolidator({
@@ -1187,8 +1185,7 @@ export class AgentLoop {
   }
 
   private projectReadonlySkillRoots(): readonly string[] {
-    const roots = [path.join(getWorkspaceStatePath(this.workspace), "skills"), BUILTIN_SKILLS_DIR,
-      ...this.context.skills.listSkills(false).filter(entry => entry.source === "plugin").map(entry => path.dirname(entry.path))]
+    const roots = [path.join(getWorkspaceStatePath(this.workspace), "skills"), BUILTIN_SKILLS_DIR]
       .flatMap((root) => {
         try {
           return fs.statSync(root).isDirectory() ? [fs.realpathSync(root)] : [];
@@ -5027,7 +5024,7 @@ export class AgentLoop {
     sessionKey?: string,
     options: Parameters<AgentLoop["processMessageTurn"]>[2] = {},
   ): Promise<OutboundMessage | null> {
-    return agentTaskActivity.run(() => this.processMessageTurn(message, sessionKey, options), options.abortSignal);
+    return agentTaskActivity.run(() => this.processMessageTurn(message, sessionKey, options));
   }
 
   private async processMessageTurn(
@@ -5199,17 +5196,13 @@ export class AgentLoop {
       const controller = new AbortController();
       const relayAbort = () => controller.abort(signal?.reason);
       signal?.addEventListener("abort", relayAbort, { once: true });
-      let stopOwner: (() => Promise<void>) | undefined;
+      await this.terminalRunControl.create(sessionKey, turnId);
+      const stopOwner = this.terminalRunControl.startOwner(sessionKey, turnId, controller);
       try {
-        await this.terminalRunControl.create(sessionKey, turnId, controller.signal);
-        stopOwner = this.terminalRunControl.startOwner(sessionKey, turnId, controller);
         return await runOperation(controller.signal);
-      } catch (error) {
-        if (controller.signal.aborted) throw createTaskCancelledError();
-        throw error;
       } finally {
         signal?.removeEventListener("abort", relayAbort);
-        await stopOwner?.();
+        await stopOwner();
       }
     }, signal);
   }
@@ -5458,7 +5451,6 @@ export class AgentLoop {
       : null;
     const publishRunStatus = shouldPublishWebuiRunStatus(effectiveMsg);
     let didPublishRunning = false;
-    let taskRecordingId: string | null = null;
     let goalTurnResult: { goalId: string; goalOutcome: GoalStatus } | null = null;
     if (slot) {
       let dequeuedDescriptor: QueueMessageDescriptor | null = null;
@@ -5502,11 +5494,6 @@ export class AgentLoop {
             }
           }
           if (publishRunStatus) {
-            taskRecordingId = await startAgentRecording({ runId: turnId, chatId: String(effectiveMsg.chatId),
-              messageId: String(effectiveMsg.metadata?.client_request_id ?? turnId), metadata: effectiveMsg.metadata ?? {},
-              notify: (payload) => this.bus.publishOutbound(new OutboundMessage({ channel: effectiveMsg.channel, chatId: effectiveMsg.chatId,
-                content: "", metadata: { ...(effectiveMsg.metadata ?? {}), taskRecordingStatus: payload } })) });
-            if (isCancelled()) return;
             await publishTurnRunStatus(this.bus, effectiveMsg, "running");
             didPublishRunning = true;
           }
@@ -5641,7 +5628,6 @@ export class AgentLoop {
       }
       throw error;
     } finally {
-      await finishAgentRecording(taskRecordingId, effectiveAbortSignal?.aborted === true || isCancelled());
       releaseComputerUseInterrupt?.();
       const surfaceScope = { sessionKey, channel: effectiveMsg.channel, chatId: effectiveMsg.chatId };
       await closeNativeSurfacesForTurn({ ...surfaceScope, turnId });

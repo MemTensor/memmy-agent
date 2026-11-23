@@ -26,8 +26,6 @@ export interface PluginHostServiceInvoker {
 export interface PluginRuntimeRecord extends InstalledPlugin {
   artifactHash: string | null;
   rootPath: string | null;
-  nativeExecutionAllowed?: boolean;
-  registryOrigin?: string | null;
 }
 
 export interface PluginRuntimeContext {
@@ -35,7 +33,6 @@ export interface PluginRuntimeContext {
   config: Readonly<Record<string, unknown>>;
   secrets: Readonly<Record<string, string>>;
   rootPath: string | null;
-  signal?: AbortSignal;
 }
 
 export interface PluginSession {
@@ -53,7 +50,6 @@ export interface PluginAdapter {
 }
 
 export interface PluginRuntimeHost {
-  isBusy?(pluginId: string): boolean;
   supports(adapterId: string): boolean;
   activate(plugin: PluginRuntimeRecord, secrets: Readonly<Record<string, string>>): Promise<void>;
   deactivate(pluginId: string): Promise<void>;

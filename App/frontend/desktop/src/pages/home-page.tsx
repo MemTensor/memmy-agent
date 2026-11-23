@@ -1,6 +1,3 @@
-import { PluginConversationRecording } from "./plugin-conversation-recording.js";
-import type { RecordingStart } from "@memmy/local-api-contracts";
-import { AgentTaskRecordingOption, TaskRecordingsPanel } from "./memory/task-recordings.js";
 import { ComposerHighlightedTextarea } from "./composer-highlighted-textarea.js";
 import { useQuestionDockLayout } from "./use-question-dock-layout.js";
 import { PluginCapabilityLabelsContext } from "./plugin-tool-activity.js";
@@ -316,7 +313,6 @@ export interface SubmitAgentComposerMessageInput {
   ensureChatSubscription?: (chatId: string) => void;
   content: string;
   displayContent?: string;
-  taskRecording?: RecordingStart;
   language?: MemmyAgentUiLanguage;
   pendingAttachments: PendingAttachment[];
   uploadAgentMedia: (attachments: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>;
@@ -793,7 +789,6 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
     webui: true,
     queue_surface: "chat_composer",
     client_request_id: clientRequestId,
-    ...(input.taskRecording ? { task_recording: input.taskRecording } : {}),
     ...(capturedTarget ? { target: capturedTarget } : {}),
     ...(input.language ? { language: input.language } : {}),
     ...(confirmedModelPreset !== undefined ? { model_preset: confirmedModelPreset } : {}),
@@ -819,7 +814,6 @@ export async function submitAgentComposerMessage(input: SubmitAgentComposerMessa
       chatId,
       content: text,
       clientRequestId,
-      ...(input.taskRecording ? { taskRecording: input.taskRecording } : {}),
       ...(capturedTarget ? { target: capturedTarget } : {}),
       ...(input.language ? { language: input.language } : {}),
       ...(confirmedModelPreset !== undefined ? { modelPreset: confirmedModelPreset } : {}),
@@ -935,7 +929,6 @@ export function HomePage() {
   const slashCommandsRetryTimerRef = useRef<number | null>(null);
   const slashCommandsAttemptRef = useRef(0);
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
-  const [taskRecording, setTaskRecording] = useState<RecordingStart | null>(null);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [selectedComposerCommandsByScope, setSelectedComposerCommandsByScope] = useState<Record<string, typeof COMPOSER_GOAL_COMMAND>>({});
   const [recentSlashCommands, setRecentSlashCommands] = useState<string[]>(() => readRecentSlashCommands());
@@ -985,7 +978,6 @@ export function HomePage() {
   draftTargetRevisionRef.current = state.agent.draftTargetRevisionByScope;
   const asrRecorder = useAsrRecorder(clients?.asr, { emptyAudioMessage: t("home.asrEmptyAudio") });
   const chatScopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
-  useEffect(() => { setTaskRecording(null); }, [chatScopeKey]);
   const modelSelectionScopeKey = state.agent.currentChatId ?? NEW_TASK_MODEL_SCOPE_KEY;
   const modelWorkspaceMode = state.bootstrap?.app.userMode === "byok" ? "byok" : "account";
   const pendingModelPreset = state.agent.pendingPresetByScope[modelSelectionScopeKey];
@@ -2069,7 +2061,6 @@ export function HomePage() {
         connection,
         ensureChatSubscription,
         content: features.agentPrompt(input) ?? input,
-        taskRecording: taskRecording ?? undefined,
         displayContent: features.agentPrompt(input) ? input : selectedComposerCommand ? composerInput : undefined,
         language,
         pendingAttachments,
@@ -2117,7 +2108,7 @@ export function HomePage() {
       });
       if (!submitted) {
         dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
-      } else setTaskRecording(null);
+      }
     } catch (error) {
       dispatch(agentActions.modelSelectionRequestCancelled(clientRequestId));
       throw error;
@@ -3127,7 +3118,6 @@ export function HomePage() {
           key={chatScopeKey}
           title={activeConversationTitleDisplay}
           titleTrailing={activeImTitleDisplay ? <ImChannelTitleIcon slug={activeImTitleDisplay.slug} name={activeImTitleDisplay.channelName} /> : null}
-          actions={features.conversationShortcut}
           messages={state.agent.messages}
           panelOpen={threadPanel.phase === "open"}
           onOpenPanel={threadPanel.open}
@@ -3201,7 +3191,6 @@ export function HomePage() {
           </div>
           <div className="home-empty-column home-empty-input">
             <AgentOperationErrorSlot message={agentError} />
-            {state.agent.currentChatId && <TaskRecordingsPanel client={clients?.memmyAgent ?? null} chatId={state.agent.currentChatId} connection={connection} />}
             <div className="home-empty-composer-stack">
               <div
                 className="relative home-empty-composer agent-composer-shell rounded-card-lg"
@@ -3235,9 +3224,6 @@ export function HomePage() {
                     />
                   </div>
                 ) : null}
-                <PluginConversationRecording client={clients?.plugins} config={clients?.runtimeConfig} plugins={features.plugins}
-                  conversationId={state.agent.currentChatId ?? state.agent.currentSessionKey ?? null}
-                  onPrompt={(text) => { setCurrentComposerDraft(text); inputRef.current?.focus(); }} />
                 <ComposerHighlightedTextarea
                   textareaRef={inputRef}
                   highlightedCommands={slashCommandsWithLocal.map((command) => command.command)}
@@ -3279,7 +3265,6 @@ export function HomePage() {
                   >
                     {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
                   </button>
-                  <AgentTaskRecordingOption client={clients?.memmyAgent ?? null} value={taskRecording} disabled={isCreatingChat || messageSendInFlight} onChange={setTaskRecording} />
                   <ComposerSubmitButton
                     isSending={isCurrentAgentRunning}
                     disabled={composerSubmitDisabled}
@@ -3380,9 +3365,6 @@ export function HomePage() {
           <div ref={composerOverlayRef} className="agent-conversation-composer">
             <div className="agent-conversation-content agent-conversation-content--composer agent-conversation-column">
               <div className="agent-composer-flow">
-                <PluginConversationRecording client={clients?.plugins} config={clients?.runtimeConfig} plugins={features.plugins}
-                  conversationId={state.agent.currentChatId ?? state.agent.currentSessionKey ?? null}
-                  onPrompt={(text) => { setCurrentComposerDraft(text); inputRef.current?.focus(); }} />
                 <AgentQueuedMessageList
                   items={currentQueuedMessages}
                   label={t("home.queue.label")}
@@ -3456,7 +3438,6 @@ export function HomePage() {
                   </p>
                 ) : null}
                 <AgentOperationErrorSlot message={agentError} />
-                {state.agent.currentChatId && <TaskRecordingsPanel client={clients?.memmyAgent ?? null} chatId={state.agent.currentChatId} connection={connection} />}
                 <div className="agent-composer-stack">
                   <div ref={setQuestionDockTarget} className="agent-question-dock">
                     {pendingNativeCard ? <AgentQuestionCard key={pendingNativeCard.requestId} card={pendingNativeCard}
@@ -3535,7 +3516,6 @@ export function HomePage() {
                         >
                           {asrRecorder.isRecording ? <Pause size={15} strokeWidth={2} /> : <Mic size={15} strokeWidth={2} />}
                         </button>
-                        <AgentTaskRecordingOption client={clients?.memmyAgent ?? null} value={taskRecording} disabled={isCreatingChat || messageSendInFlight} onChange={setTaskRecording} />
                         <ComposerSubmitButton
                           isSending={composerPrimaryAction === "stop"}
                           disabled={composerSubmitDisabled}

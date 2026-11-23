@@ -146,14 +146,13 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   // The MCP bridge validates with its own x-memmy-mcp-token (the agent has no runtime token), so authenticateRuntimeToken is not attached.
   registerComposioMcpRoutes(app, {
     integrations: options.services.integrations,
-    mcpToken: options.composioMcpToken,
+    mcpToken: options.composioMcpToken
   });
   registerPluginMcpRoutes(app, {
     skillContent: options.services.pluginSkillContent,
     plugins: options.services.plugins,
     progressBus: options.services.progressBus,
-    mcpToken: options.composioMcpToken,
-    refreshTools: options.pluginCapabilitiesChanged
+    mcpToken: options.composioMcpToken
   });
   registerChannelRoutes(app, {
     channels: options.services.channels,
@@ -191,8 +190,9 @@ export function createLocalApiServer(options: CreateLocalApiServerOptions): Fast
   app.get<{ Querystring: EventsQuerystring }>("/api/events", async (request, reply) => {
     // EventSource cannot reliably carry custom headers, so the SSE channel validates the same runtime token via a query parameter.
     const { token } = request.query;
-    const authorized = token && await options.permissionManager.verifyRuntimeToken(token);
-    if (!authorized) return reply.code(401).send({ error: "unauthorized" });
+    if (!token || !(await options.permissionManager.verifyRuntimeToken(token))) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
 
     startSse(reply, heartbeatIntervalMs, getSingleHeaderValue(request.headers.origin), options.services.progressBus, registerEventStream);
   });

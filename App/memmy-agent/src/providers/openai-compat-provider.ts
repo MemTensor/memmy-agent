@@ -149,6 +149,7 @@ export class OpenAICompatProvider extends LLMProvider {
     }
 
     this.defaultModel = this.model ?? "gpt-4o";
+    const name = specName(this.spec);
     if (this.apiKey && this.spec?.envKey && !this.independent) this.setupEnv(this.apiKey, this.apiBase);
 
     const effectiveBase = this.apiBase || resolveDefaultApiBase(this.spec);
@@ -486,7 +487,7 @@ export class OpenAICompatProvider extends LLMProvider {
 
   sanitizeMessages(
     messages: Record<string, any>[],
-    _model = this.getDefaultModel(),
+    model = this.getDefaultModel(),
     inputModalities?: readonly string[] | null,
   ): Record<string, any>[] {
     const sanitized = LLMProvider.sanitizeRequestMessages(messages, ALLOWED_MSG_KEYS);
@@ -598,7 +599,7 @@ export class OpenAICompatProvider extends LLMProvider {
     if (reasoningEffort && reasoningEffort.toLowerCase() !== "none") return false;
     const name = modelName.toLowerCase();
     if (isKimiImmutableTemperatureModel(name)) return false;
-    return !["gpt-5", "gpt-6", "o1", "o3", "o4"].some((token) => name.includes(token));
+    return !["gpt-5", "o1", "o3", "o4"].some((token) => name.includes(token));
   }
 
   buildKwargs(args: ChatArgs): Record<string, any> {

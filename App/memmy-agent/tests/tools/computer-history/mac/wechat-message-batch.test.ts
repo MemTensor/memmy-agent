@@ -7,17 +7,11 @@ import {
 } from "../../../../src/tools/computer-history/mac/wechat-message-batch.js";
 import { WeChatHistoryConsentStore } from "../../../../src/tools/computer-history/mac/wechat-consent.js";
 
-// The reader protocol fixture does not invoke the separate native ACL helper.
-vi.mock("../../../../src/tools/computer-history/win/private-files.js", () => ({
-  prepareWindowsWeChatState: () => {}, validateWindowsWeChatConsent: () => true,
-}));
-
 const MESSAGE_TABLE = "Msg_0123456789abcdef0123456789abcdef";
 const CURSOR_KEY = `message_0.db:${MESSAGE_TABLE}`;
 const fixtureDirectories: string[] = [];
 
 afterEach(() => {
-  vi.restoreAllMocks();
   for (const directory of fixtureDirectories.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
 });
 
@@ -129,12 +123,8 @@ describe("personal WeChat History messages", () => {
       const table = "message_0.db:Msg_0123456789abcdef0123456789abcdef";
       expect(() => reader.acknowledge({ [table]: 1 }, "missing")).toThrow("revoked");
       const firstConsent = consent.grant().consentId!;
-      const open = vi.spyOn(fs, "openSync");
       reader.acknowledge({ [table]: 1 }, firstConsent);
-      expect(open).toHaveBeenCalledWith(expect.stringContaining(`${path.sep}.cursor-`),
-        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-      // NTFS has ACLs instead of POSIX mode bits; the native ACL helper has its own tests.
-      if (process.platform !== "win32") expect(fs.statSync(cursorFile).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(cursorFile).mode & 0o777).toBe(0o600);
       expect(() => reader.acknowledge({ [table]: 0 }, firstConsent)).toThrow("regressed");
       consent.revoke();
       const secondConsent = consent.grant().consentId!;
@@ -271,7 +261,7 @@ process.exit(2);
   it("rejects a dangling cursor symlink without launching the reader or replacing the link", async () => {
     const fixture = createReadFixture();
     const missingTarget = `${fixture.cursorFile}.missing`;
-    fs.symlinkSync(missingTarget, fixture.cursorFile, process.platform === "win32" ? "junction" : "file");
+    fs.symlinkSync(missingTarget, fixture.cursorFile, "file");
     expect(fs.existsSync(fixture.cursorFile)).toBe(false);
 
     await expect(fixture.reader.read()).rejects.toThrow("WeChat cursor is unreadable");

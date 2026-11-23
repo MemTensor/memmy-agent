@@ -220,13 +220,10 @@ class HttpLlmClient implements LlmClient {
     let jsonAttempt = 0;
 
     while (true) {
-      const remaining = options.deadlineMs === undefined ? undefined : options.deadlineMs - Date.now();
-      if (remaining !== undefined && remaining <= 0) throw new Error("LLM interactive deadline exceeded");
       jsonAttempt += 1;
       const withJsonHint = jsonMessages(messages, lastError, previousWasTruncated, previousRetryWasCapped);
       const result = await this.completeResult(withJsonHint, {
         ...options,
-        ...(remaining !== undefined ? { timeoutMs: Math.min(options.timeoutMs ?? this.config.timeoutMs, remaining) } : {}),
         maxTokens,
         jsonMode: true
       });
@@ -375,9 +372,8 @@ class HttpLlmClient implements LlmClient {
       memmyAccount
     });
     const model = this.config.model ?? "";
-    const usesCompletionTokenLimit = !memmyAccount && isOpenAiReasoningModel(modelSlug(model));
     const usesEnableThinking = memmyAccount || thinkingUsesEnableThinking(this.config.vendor ?? "", base, model);
-    const omitTemperature = usesCompletionTokenLimit || isKimiImmutableTemperatureModel(model) ||
+    const omitTemperature = isKimiImmutableTemperatureModel(model) ||
       (thinking.enabled && !memmyAccount && shouldOmitOpenAiCompatibleTemperature(this.config.vendor ?? "", base, model));
     const omitJsonMode = thinking.enabled && (usesEnableThinking || isAlibabaCompatibleEndpoint(base));
     const thinkingBudget = thinking.enabled && usesEnableThinking
@@ -407,9 +403,7 @@ class HttpLlmClient implements LlmClient {
           model: this.config.model,
           messages,
           ...(!omitTemperature ? { temperature: options.temperature ?? this.config.temperature } : {}),
-          ...(usesCompletionTokenLimit
-            ? { max_completion_tokens: options.maxTokens ?? this.config.maxTokens }
-            : { max_tokens: options.maxTokens ?? this.config.maxTokens }),
+          max_tokens: options.maxTokens ?? this.config.maxTokens,
           stream: false,
           ...thinking.fields,
           ...(options.operation === "capture.summarize" && isMiniMaxM31FlashThinkingOnlyModel(model) && !memmyAccount
