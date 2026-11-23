@@ -276,7 +276,7 @@ export function useConversationFeatures(options: {
       }} /> : null;
   const cards = <><div ref={setRecordingBar} />{host(presented, "flow")}{host(presented, "pinned")}
     {recording.compactOpen && !legalQuestionOwnsComposer ? <RecordingEntryCard session={recording.session}
-      disabled={!clients?.asr} onClose={recording.closeCompact} onOpenList={() => openRecording()} /> : null}
+      disabled={!clients?.asr} onClose={recording.closeCompact} /> : null}
     {error?.conversationId === conversationId ? <div role="alert" className="text-sm text-red-600">{error.message}</div> : null}</>;
   // Microphone owners stay mounted while navigation only moves/hides their control bar.
   const recorderGroups = new Map<string, PluginUiCall[]>();

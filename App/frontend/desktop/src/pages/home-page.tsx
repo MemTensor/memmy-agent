@@ -1305,9 +1305,9 @@ export function HomePage() {
     const sessionKey = state.agent.currentSessionKey;
     if (!client || !sessionKey) return null;
     return {
-      resolveArtifact: (path: string) => client.resolveArtifact(path, sessionKey),
-      revealArtifact: (path: string) => client.revealArtifact(path, sessionKey),
-      openArtifact: (path: string) => client.openArtifact(path, sessionKey)
+      resolveArtifact: (path: string) => client.resolveArtifact(path, { sessionKey }),
+      revealArtifact: (path: string) => client.revealArtifact(path, { sessionKey }),
+      openArtifact: (path: string) => client.openArtifact(path, { sessionKey })
     };
   }, [clients?.memmyAgent, state.agent.currentSessionKey]);
   const isCurrentAgentRunning = Boolean(
