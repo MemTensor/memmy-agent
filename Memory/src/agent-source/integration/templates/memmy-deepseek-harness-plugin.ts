@@ -6,6 +6,7 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import {
   completeSourceTurn,
+  createRuntimeDeadline,
   loadRuntimeL3,
   notifyRuntimeBoundary,
   openRuntimeSession,
@@ -20,9 +21,14 @@ const SOURCE = "deepseek_harness";
 const DEFAULT_MEMMY_CONFIG_PATH = join(homedir(), ".memmy", "config.yaml");
 const CONFIG_URL = new URL("./memmy-memory-config.json", import.meta.url);
 const HTTP_TIMEOUT_MS = 45000;
+const DEFAULT_AUTO_RECALL_TIMEOUT_MS = 3000;
 
 export function apply(ctx, config = {}) {
   const memmyConfigPath = cleanText(config.memmyConfigPath) || process.env.MEMMY_CONFIG || DEFAULT_MEMMY_CONFIG_PATH;
+  const requestedTimeout = config.autoRecallTimeoutMs;
+  const autoRecallTimeoutMs = Number.isInteger(requestedTimeout) && requestedTimeout > 0 && requestedTimeout <= HTTP_TIMEOUT_MS
+    ? requestedTimeout
+    : DEFAULT_AUTO_RECALL_TIMEOUT_MS;
   const memorySessionIds = new Map();
   const pendingStarts = new Map();
   const activeTurns = new Map();
@@ -46,23 +52,29 @@ export function apply(ctx, config = {}) {
 
   ctx.on("agent/pre-step", async (payload, next) => {
     const decision = await next();
-    if (!decision || decision.kind === "reject") return decision;
+    if (!decision || decision.kind === "reject" || payload.signal?.aborted) return decision;
     const query = userQuery(payload.messages);
     if (!query) return decision;
     const agentKey = String(payload.agent.id);
     latestQueries.set(agentKey, query);
+    let deadline;
     try {
-      const runtimeSession = await ensureSession(null, memorySessionIds, payload.agent.session);
+      // Session discovery, L3, and turn recall share one foreground budget.
+      deadline = createRuntimeDeadline(autoRecallTimeoutMs, payload.signal);
+      const { signal } = deadline;
+      const runtimeSession = await ensureSession(null, memorySessionIds, payload.agent.session, signal);
       const sessionId = runtimeSession.sessionId;
       if (!runtimeSession.l3Initialized) {
-        const loaded = await loadRuntimeL3(runtimeSession);
+        const loaded = await loadRuntimeL3(runtimeSession, { signal });
         runtimeSession.l3Initialized = true;
         if (loaded.additionalContext) pendingL3.set(String(payload.agent.session.id), loaded.additionalContext);
       }
+      signal.throwIfAborted();
       const started = await startRuntimeTurn(
         runtimeSession,
         "deepseek-turn-" + hashText([sessionId, query, String(payload.turn)].join("\u0000")),
-        query
+        query,
+        { signal }
       );
       pendingStarts.set(turnKey(payload.agent.session.id, payload.turn), {
         sessionId,
@@ -71,6 +83,7 @@ export function apply(ctx, config = {}) {
         sourceMemoryIds: Array.isArray(started.sourceMemoryIds) ? started.sourceMemoryIds : undefined,
         query
       });
+      if (signal.aborted) return decision;
       const markdown = injectedMarkdown(started);
       const l3 = pendingL3.get(String(payload.agent.session.id)) || "";
       pendingL3.delete(String(payload.agent.session.id));
@@ -81,8 +94,12 @@ export function apply(ctx, config = {}) {
       });
       return { ...decision, messages: insertAfterUserMessage(decision.messages, memory) };
     } catch (error) {
-      ctx.logger.warn("memmy-memory: recall failed: " + errorText(error));
+      if (!payload.signal?.aborted) {
+        ctx.logger.warn(deadline?.signal.aborted ? "memmy-memory: automatic recall timed out" : "memmy-memory: recall failed: " + errorText(error));
+      }
       return decision;
+    } finally {
+      deadline?.dispose();
     }
   });
 
@@ -273,7 +290,7 @@ async function completeTurn(memorySessionIds, session, turn, pending) {
   });
 }
 
-async function ensureSession(client, cache, session) {
+async function ensureSession(client, cache, session, signal) {
   const externalId = String(session.id);
   const cached = cache.get(externalId);
   if (cached) return cached;
@@ -285,7 +302,7 @@ async function ensureSession(client, cache, session) {
     sessionKey: "deepseek_harness-memory-" + externalId,
     workspaceRoot: session.header.cwd || null,
     transition: "allow_legacy_rollover"
-  });
+  }, { signal });
   if (!opened) throw new Error("Memmy did not return a sessionId");
   cache.set(externalId, opened);
   return opened;

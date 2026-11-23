@@ -11,6 +11,7 @@ import {
   notifyRuntimeBoundary,
   openRuntimeSession,
   readRuntimeConfig,
+  startRuntimeTurn,
   type RuntimeSession,
 } from "./runtime.js";
 
@@ -227,6 +228,59 @@ describe("Memory lifecycle runtime", () => {
         body: { trigger: "token_compaction", throughL1MemoryId: "l1-1" },
       });
     } finally {
+      await close(server);
+    }
+  });
+
+  it("preserves a caller cancellation during session discovery", async () => {
+    const fixture = createFixture();
+    let markCheckingHealth!: () => void;
+    const checkingHealth = new Promise<void>((resolve) => { markCheckingHealth = resolve; });
+    const paths: string[] = [];
+    const server = createServer((request) => {
+      paths.push(request.url ?? "");
+      markCheckingHealth();
+    });
+    const endpoint = await listen(server);
+    const controller = new AbortController();
+    const reason = new Error("test caller cancellation");
+    const input = {
+      configUrl: runtimeConfig(fixture, endpoint),
+      source: "codex",
+      sessionKey: "cancelled-session",
+      transition: "allow_legacy_rollover" as const,
+    };
+    try {
+      const opened = openRuntimeSession(input, { signal: controller.signal });
+      const rejected = expect(opened).rejects.toBe(reason);
+      await checkingHealth;
+      controller.abort(reason);
+      await rejected;
+      await expect(openRuntimeSession(input, { signal: controller.signal })).rejects.toBe(reason);
+      expect(paths).toEqual(["/api/v1/health"]);
+    } finally {
+      server.closeAllConnections();
+      await close(server);
+    }
+  });
+
+  it("enforces the runtime request timeout while reading a response body", async () => {
+    const fixture = createFixture();
+    let started = false;
+    const server = createServer((_request, response) => {
+      started = true;
+      response.setHeader("content-type", "application/json");
+      response.write('{"turnId":');
+    });
+    const endpoint = await listen(server);
+    try {
+      await expect(startRuntimeTurn(runtimeSession(fixture, endpoint), "test-turn", "test query", {
+        timeoutMs: 200,
+        signal: new AbortController().signal,
+      })).rejects.toMatchObject({ cause: { name: "TimeoutError" } });
+      expect(started).toBe(true);
+    } finally {
+      server.closeAllConnections();
       await close(server);
     }
   });

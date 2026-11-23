@@ -102,11 +102,11 @@ export function createDeepseekHarnessSkillTarget(
         join(pluginDirectory, "package.json"),
         JSON.stringify(createDeepseekHarnessPluginPackageManifest(), null, 2) + "\n"
       );
-      await writeFileAtomically(join(pluginDirectory, "index.mjs"), DEEPSEEK_HARNESS_PLUGIN_INDEX);
       await writeFileAtomically(join(pluginDirectory, "client.js"), DEEPSEEK_HARNESS_PLUGIN_CLIENT);
       const bridge = await loadMemmyWorkspaceBridgeRuntimeAsset();
       const config = { memmy_config_path: memmyConfigPath, ...(await readMemmyMemoryServiceConfig(memmyConfigPath)) };
       await writeFileAtomically(bridgePath, bridge);
+      await writeFileAtomically(join(pluginDirectory, "index.mjs"), DEEPSEEK_HARNESS_PLUGIN_INDEX);
       await upsertPatch(patchPath, renderPluginPatch(memmyConfigPath));
       await replaceMemmySkillDirectory(rootDirectory, renderMemmyPluginSkillManifest(TARGET_ID));
       await replaceMemmyProjectSkillDirectory(rootDirectory);

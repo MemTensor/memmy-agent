@@ -74,16 +74,24 @@ export interface OpenRuntimeSessionInput {
   profileId?: string;
 }
 
+interface RuntimeRequestOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 export interface LoadedRuntimeSession extends RuntimeSession {
   additionalContext: string;
   renderedContext: string;
   memoryVersion: number | null;
 }
 
-export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Promise<RuntimeConfig> {
-  const snapshot = objectValue(await readJson(configUrl));
+export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false, signal?: AbortSignal): Promise<RuntimeConfig> {
+  const snapshot = objectValue(await readJson(configUrl, signal));
+  signal?.throwIfAborted();
   const configPath = text(snapshot.memmy_config_path) || resolve(homedir(), ".memmy", "config.yaml");
-  const yaml = objectValue(YAML.parse(await readFile(configPath, "utf8").catch(() => "{}")));
+  const config = await readFile(configPath, { encoding: "utf8", signal }).catch(() => "{}");
+  signal?.throwIfAborted();
+  const yaml = objectValue(YAML.parse(config));
   const memory = objectValue(yaml.memmyMemory);
   const storage = objectValue(memory.storage);
   const legacyStorage = objectValue(yaml.storage);
@@ -98,11 +106,14 @@ export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Pr
 
 export async function openRuntimeSession(
   input: OpenRuntimeSessionInput,
-  options: { timeoutMs?: number } = {},
+  options: RuntimeRequestOptions = {},
 ): Promise<RuntimeSession | null> {
-  const config = await readRuntimeConfig(input.configUrl, input.pinnedOwner === true);
-  const client = new RuntimeHttpClient(config, options.timeoutMs);
+  const { signal } = options;
+  signal?.throwIfAborted();
+  const config = await readRuntimeConfig(input.configUrl, input.pinnedOwner === true, signal);
+  const client = new RuntimeHttpClient(config, options);
   const health = await client.get("/api/v1/health").catch(() => null);
+  signal?.throwIfAborted();
   if (!health && input.pinnedOwner === true) return null;
   const features = objectValue(objectValue(health).features);
   const supportsV2 = numberArray(features.l3WorldModelProtocolVersions).includes(2);
@@ -111,6 +122,7 @@ export async function openRuntimeSession(
   if (!supportsV2) return openLegacyRuntimeSession(client, config, input, adapterId, profileId);
 
   const resolvedWorkspaceRoot = input.workspaceRoot ? await canonicalWorkspaceRoot(input.workspaceRoot) : null;
+  signal?.throwIfAborted();
   const workspaceRoot = resolvedWorkspaceRoot && config.workspaceHostId ? resolvedWorkspaceRoot : null;
   const envelope = runtimeEnvelope(input.source, input.sessionKey, config.userId, null, adapterId, profileId);
   const workspaceUri = workspaceRoot ? normalizeWorkspaceUri(pathToFileURL(workspaceRoot).href) : null;
@@ -171,10 +183,10 @@ async function openLegacyRuntimeSession(
 
 export async function loadRuntimeL3(
   session: RuntimeSession,
-  options: { timeoutMs?: number } = {},
+  options: RuntimeRequestOptions = {},
 ): Promise<LoadedRuntimeSession> {
   if (session.protocol !== "v2") return { ...session, additionalContext: "", renderedContext: "", memoryVersion: null };
-  const client = new RuntimeHttpClient(session.config, options.timeoutMs);
+  const client = new RuntimeHttpClient(session.config, options);
   const envelope = runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId);
   const result = objectValue(await client.get(
     `/api/v1/l3-world-model/sessions/${encodeURIComponent(session.sessionId)}/context`,
@@ -222,8 +234,9 @@ export async function startRuntimeTurn(
   session: RuntimeSession,
   turnId: string,
   query: string,
+  options: RuntimeRequestOptions = {},
 ): Promise<Record<string, unknown>> {
-  const client = new RuntimeHttpClient(session.config);
+  const client = new RuntimeHttpClient(session.config, options);
   const body = session.protocol === "v2"
     ? { ...runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId), sessionId: session.sessionId, turnId, query }
     : { source: session.source, adapterId: session.adapterId, requestId: `${session.source}-start:${turnId}`, sessionId: session.sessionId, turnId, query };
@@ -533,9 +546,25 @@ async function resolveDeepseekHarnessSessionFile(input: {
   return discovered.find((file) => file.sessionFilePath.includes(`${encoded}`))?.sessionFilePath;
 }
 
+export function createRuntimeDeadline(timeoutMs: number, parentSignal?: AbortSignal) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(parentSignal?.reason);
+  parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+  if (parentSignal?.aborted) abortFromParent();
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException("The operation timed out", "TimeoutError"));
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener("abort", abortFromParent);
+    },
+  };
+}
+
 class RuntimeHttpClient {
-  /** timeoutMs 决定这次请求最多等多久：会话启动路径给短预算，后台上报仍用默认值。 */
-  constructor(private readonly config: RuntimeConfig, private readonly timeoutMs = 45_000) {}
+  constructor(private readonly config: RuntimeConfig, private readonly options: RuntimeRequestOptions = {}) {}
 
   async get(path: string, transport: { query?: Record<string, string>; headers?: Record<string, string> } = {}): Promise<unknown> {
     const url = new URL(path, `${this.config.endpoint.replace(/\/+$/u, "")}/`);
@@ -556,13 +585,19 @@ class RuntimeHttpClient {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
     if (this.config.token) headers.set("authorization", `Bearer ${this.config.token}`);
+    const { signal: callerSignal, timeoutMs = 45_000 } = this.options;
+    const deadline = createRuntimeDeadline(timeoutMs, callerSignal);
     let response: Response;
+    let textValue: string;
     try {
-      response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(this.timeoutMs) });
+      response = await fetch(url, { ...init, headers, signal: deadline.signal });
+      textValue = await response.text();
     } catch (error) {
+      callerSignal?.throwIfAborted();
       throw new Error(`Memmy request to ${url} failed: ${formatErrorWithCause(error)}`, { cause: error });
+    } finally {
+      deadline.dispose();
     }
-    const textValue = await response.text();
     const parsed = textValue.trim() ? JSON.parse(textValue) : null;
     if (!response.ok) {
       const body = objectValue(parsed);
@@ -667,8 +702,8 @@ function hashText(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 24);
 }
 
-async function readJson(url: URL): Promise<unknown> {
-  const content = await readFile(url, "utf8").catch(() => "{}");
+async function readJson(url: URL, signal?: AbortSignal): Promise<unknown> {
+  const content = await readFile(url, { encoding: "utf8", signal }).catch(() => "{}");
   try {
     return JSON.parse(content);
   } catch {
