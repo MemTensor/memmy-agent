@@ -154,11 +154,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
       };
     },
 
-    async freezeScanSessions() {
-      failIfNeeded();
-      return { batches: 0 };
-    },
-
     async completeSourceTurn(input) {
       failIfNeeded();
       const l1MemoryId = randomUUID();
@@ -223,33 +218,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         createdAt: input.createdAt ?? serverTime,
         serverTime
       };
-    },
-
-    async recallEvidence(queryId) {
-      failIfNeeded();
-      const serverTime = now();
-      return { recallEventId: randomUUID(), queryId, query: "", hits: [], createdAt: serverTime, serverTime };
-    },
-
-    async reconcileAgentSkills(input) {
-      failIfNeeded();
-      return {
-        sourceAgentId: input.sourceAgentId,
-        skills: input.skills.map((skill) => ({ sourceSkillId: skill.sourceSkillId, outcome: "created" as const, memoryId: randomUUID() })),
-        archived: 0,
-        registrations: input.registrations?.length ?? 0,
-        serverTime: now()
-      };
-    },
-
-    async archiveSkill(skillId) {
-      failIfNeeded();
-      return { ok: true as const, id: skillId, status: "archived" as const, serverTime: now() };
-    },
-
-    async reactivateSkill(skillId) {
-      failIfNeeded();
-      return { ok: true as const, id: skillId, status: "activated" as const, serverTime: now() };
     },
 
     async getMemory(input) {
@@ -442,17 +410,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         offset,
         serverTime: now()
       };
-    },
-
-    async panelTasks() {
-      failIfNeeded();
-      return { tasks: [], page: 1, pageSize: 20, total: 0, totalPages: 1,
-        hasNext: false, hasPrev: false, serverTime: now() };
-    },
-
-    async deletePanelTask(taskId) {
-      failIfNeeded();
-      return { ok: true, id: taskId, deletedMemoryIds: [], serverTime: now() };
     }
   };
 }
