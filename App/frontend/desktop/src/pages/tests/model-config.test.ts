@@ -212,6 +212,13 @@ describe("model config helpers", () => {
     expect(configured.apiKeyMasked).toBe("");
   });
 
+  it("OpenAI 生图默认模型是 OpenAI 仍在提供的模型", () => {
+    // OpenAI retired gpt-image-1 on 2026-10-23; the replacement is gpt-image-2.
+    const openaiDefaults = createImageGenProviderConfig("openai", "", "", "", "");
+    expect(openaiDefaults.endpoint).toBe("https://api.openai.com/v1");
+    expect(openaiDefaults.model).toBe("gpt-image-2");
+  });
+
   it("生图测试表单值携带所选协议", () => {
     const values = createImageGenModelFormValues("gemini", "imagen-4.0-generate-001", "https://g.example/v1beta", "sk-img", "");
     expect(values.provider).toBe("gemini");
