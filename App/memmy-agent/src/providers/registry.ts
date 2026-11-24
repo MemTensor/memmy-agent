@@ -228,7 +228,7 @@ export const PROVIDERS: ProviderSpec[] = [
   }),
   new ProviderSpec({
     name: "atlascloud",
-    keywords: ["atlascloud"],
+    keywords: ["atlascloud", "atlas-cloud"],
     envKey: "ATLASCLOUD_API_KEY",
     displayName: "Atlas Cloud",
     isGateway: true,

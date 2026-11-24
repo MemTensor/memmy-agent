@@ -30,6 +30,12 @@ describe("Atlas Cloud provider", () => {
     expect(spec?.name).toBe("atlascloud");
   });
 
+  it("finds Atlas Cloud by hyphenated and camelCase spellings", () => {
+    for (const spelling of ["atlas-cloud", "atlasCloud", "Atlas Cloud"]) {
+      expect(findByName(spelling)?.name).toBe("atlascloud");
+    }
+  });
+
   it("uses the default API base when Atlas Cloud is forced", () => {
     const config = Config.fromObject({
       providers: {
