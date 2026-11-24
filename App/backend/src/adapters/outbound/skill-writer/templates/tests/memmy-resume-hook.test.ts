@@ -4,12 +4,19 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { renderL3WorldModelContext } from "@memmy/local-api-contracts";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { resolveCursorDataPaths } from "../../../agent-paths.js";
 import { loadMemmyWorkspaceBridgeRuntimeAsset } from "../../workspace-bridge/runtime-loader.js";
 import { renderMemmyResumeHookScript } from "../memmy-resume-hook.js";
 import { renderMemmyResumeHookScript as renderCliHook } from "../../../../../../../../Memory/src/agent-source/integration/templates/memmy-resume-hook.js";
 import { DEVICE_MEMORY_OWNER } from "../../../../../../../../Memory/src/service/namespace/memory-owner.js";
+
+/** The longest hook context string Claude Code hands to the model as is. */
+const CLAUDE_CODE_HOOK_CONTEXT_LIMIT = 10_000;
+
+/** Source of a pattern matching the line the hook leaves where it dropped text; group 1 is the count. */
+const OMISSION_NOTICE = String.raw`\[Memmy omitted the last (\d+) characters of this block to fit the host's 10000-character hook context limit\.\]`;
 
 describe("memmy resume hook stop capture", () => {
   let tempDir = "";
@@ -462,7 +469,178 @@ describe("memmy resume hook stop capture", () => {
       await close(server);
     }
   }, 30000);
+
+  it.each([
+    ["desktop", renderMemmyResumeHookScript],
+    ["memory CLI", renderCliHook],
+  ])("%s Claude hook fits an oversized L3 snapshot inside the host's hook context limit", async (_label, render) => {
+    // Claude Code replaces a hook context string over 10,000 characters with a file path and a
+    // 2,000-character preview, so an unfitted snapshot reaches the model as its first lines only.
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-claude-l3-context-limit-"));
+    const rendered = contextLines(400);
+    const full = renderL3WorldModelContext(rendered);
+    expect(full.length).toBeGreaterThan(CLAUDE_CODE_HOOK_CONTEXT_LIMIT);
+    const server = createL3ContextServer(rendered);
+    await listen(server);
+    try {
+      const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const script = installHookFixture(tempDir, "claude_code", "claude-code", endpoint, runtimeAsset, render);
+      const result = await runHook(script, {
+        hook_event_name: "SessionStart", session_id: "host-session", source: "startup", cwd: tempDir,
+      });
+
+      expect(result.status).toBe(0);
+      const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
+      const closing = "\n</memmy_l3_world_model>";
+      expect(context.length).toBeLessThanOrEqual(CLAUDE_CODE_HOOK_CONTEXT_LIMIT);
+      // Lines here are about 30 characters, so anything shorter than this dropped more than it had to.
+      expect(context.length).toBeGreaterThan(CLAUDE_CODE_HOOK_CONTEXT_LIMIT - 100);
+      const notice = context.match(new RegExp(`\\n${OMISSION_NOTICE}\\n</memmy_l3_world_model>$`, "u"));
+      expect(notice).not.toBeNull();
+      // Whole lines survive from the start of the snapshot, and the notice accounts for the rest.
+      const kept = context.slice(0, notice?.index);
+      const fullBody = full.slice(0, -closing.length);
+      expect(fullBody.startsWith(`${kept}\n`)).toBe(true);
+      expect(Number(notice?.[1])).toBe(fullBody.length - kept.length);
+    } finally {
+      await close(server);
+    }
+  }, 30000);
+
+  it.each([
+    ["a Claude Code snapshot exactly at the limit", "claude_code", "claude-code" as const,
+      "界".repeat(CLAUDE_CODE_HOOK_CONTEXT_LIMIT - renderL3WorldModelContext("").length)],
+    // Codex publishes no limit on hook context, so its snapshot is left alone.
+    ["an oversized Codex snapshot", "codex", "codex" as const, contextLines(400)],
+  ])("passes %s through unchanged", async (_label, source, mode, rendered) => {
+    tempDir = mkdtempSync(join(tmpdir(), `memmy-${source}-l3-context-unchanged-`));
+    const server = createL3ContextServer(rendered);
+    await listen(server);
+    try {
+      const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const script = installHookFixture(tempDir, source, mode, endpoint, runtimeAsset);
+      const result = await runHook(script, {
+        hook_event_name: "SessionStart", session_id: "host-session", source: "startup", cwd: tempDir,
+      });
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toBe(renderL3WorldModelContext(rendered));
+    } finally {
+      await close(server);
+    }
+  }, 30000);
+
+  it.each(["", "x"])("cuts inside one very long line without splitting a surrogate pair (prefix %j)", async (prefix) => {
+    // No line boundary is near the limit, so the cut lands inside the line. The two prefixes
+    // put it on either side of a pair, so one of them would leave half an emoji behind.
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-claude-l3-long-line-"));
+    const server = createL3ContextServer(prefix + "😀".repeat(6_000));
+    await listen(server);
+    try {
+      const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const script = installHookFixture(tempDir, "claude_code", "claude-code", endpoint, runtimeAsset);
+      const result = await runHook(script, {
+        hook_event_name: "SessionStart", session_id: "host-session", source: "startup", cwd: tempDir,
+      });
+
+      expect(result.status).toBe(0);
+      const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
+      expect(context.length).toBeLessThanOrEqual(CLAUDE_CODE_HOOK_CONTEXT_LIMIT);
+      // The line is not given up for the sake of a boundary thousands of characters back.
+      expect(context.length).toBeGreaterThan(CLAUDE_CODE_HOOK_CONTEXT_LIMIT - 10);
+      expect(context).toMatch(new RegExp(`\\n${OMISSION_NOTICE}\\n</memmy_l3_world_model>$`, "u"));
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(context)).toBe(false);
+    } finally {
+      await close(server);
+    }
+  }, 30000);
+
+  it.each([
+    ["desktop", renderMemmyResumeHookScript],
+    ["memory CLI", renderCliHook],
+  ])("%s Claude hook fits oversized turn-start memory and keeps its closing tag", async (_label, render) => {
+    // The closing tag is what later strips this block out of captured prompts, so it has to survive the cut.
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-claude-turn-start-context-limit-"));
+    const markdown = contextLines(400);
+    const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+      const body = await requestBody(request);
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/api/v1/health") {
+        response.end(JSON.stringify({ features: { l3WorldModelProtocolVersions: [2] } }));
+        return;
+      }
+      if (request.url === "/api/v1/sessions/open") {
+        response.end(JSON.stringify({ sessionId: "memory-session" }));
+        return;
+      }
+      if (request.url === "/api/v1/turns/start") {
+        response.end(JSON.stringify({ sessionId: body.sessionId, turnId: body.turnId, injectedContext: { markdown } }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: { message: "not found" } }));
+    });
+    await listen(server);
+    try {
+      const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const script = installHookFixture(tempDir, "claude_code", "claude-code", endpoint, runtimeAsset, render);
+      const result = await runHook(script, {
+        hook_event_name: "UserPromptSubmit", session_id: "host-session", prompt: "把这个接口补上测试", cwd: tempDir,
+      });
+
+      expect(result.status).toBe(0);
+      const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
+      expect(context.length).toBeLessThanOrEqual(CLAUDE_CODE_HOOK_CONTEXT_LIMIT);
+      expect(context.startsWith('<memmy_memory_context source="turn_start">\n')).toBe(true);
+      const notice = context.match(new RegExp(`\\n${OMISSION_NOTICE}\\n</memmy_memory_context>$`, "u"));
+      expect(notice).not.toBeNull();
+      // After the block's three header lines, what is left is the start of the recalled text, cut between lines.
+      const keptMarkdown = context.slice(0, notice?.index).split("\n").slice(3).join("\n");
+      expect(keptMarkdown.length).toBeGreaterThan(9_000);
+      expect(markdown.startsWith(`${keptMarkdown}\n`)).toBe(true);
+    } finally {
+      await close(server);
+    }
+  }, 30000);
 });
+
+/** Short numbered lines, so a cut that lands inside one or loses one is visible. */
+function contextLines(count: number): string {
+  return Array.from(
+    { length: count },
+    (_, index) => `- 约定 ${String(index + 1).padStart(4, "0")}：保持包边界稳定，不跨层引用内部模块。`,
+  ).join("\n");
+}
+
+/** A memory service that opens one v2 session and serves it the given L3 snapshot. */
+function createL3ContextServer(renderedContext: string): ReturnType<typeof createServer> {
+  return createServer((request: IncomingMessage, response: ServerResponse) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/api/v1/health") {
+      response.end(JSON.stringify({
+        features: { l3WorldModelProtocolVersions: [2], workspaceBridgeProtocolVersions: ["1"] },
+      }));
+      return;
+    }
+    if (request.url === "/api/v1/sessions/open") {
+      response.end(JSON.stringify({ sessionId: "memory-session", projectId: `ws_${"b".repeat(64)}` }));
+      return;
+    }
+    if (request.url?.startsWith("/api/v1/l3-world-model/sessions/memory-session/context?")) {
+      response.end(JSON.stringify({
+        sessionId: "memory-session",
+        projectId: `ws_${"b".repeat(64)}`,
+        memoryId: "l3-1",
+        memoryVersion: 7,
+        renderedContext,
+        sourceMemoryIds: ["l1-1"],
+      }));
+      return;
+    }
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: { message: "not found" } }));
+  });
+}
 
 function installHookFixture(
   directory: string,
