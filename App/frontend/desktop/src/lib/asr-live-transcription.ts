@@ -19,6 +19,8 @@ import type { AsrClient } from "../api/asr-client.js";
 
 /** One transcribed stretch of an in-progress recording. */
 export interface AsrLiveLine {
+  /** Stable identity for revisions emitted by realtime voice input. */
+  sentenceId?: number;
   /** Offset from the start of the recording. */
   startMs: number;
   endMs: number;
@@ -30,9 +32,13 @@ export interface AsrLiveTranscriber {
   /** Feeds newly captured mono samples. */
   push(samples: Int16Array): void;
   /** Transcribes whatever is still buffered, then settles. */
-  finish(): Promise<void>;
+  finish(): Promise<AsrLiveTranscriptionResult | null | void>;
   /** Drops buffered audio and stops reporting lines. */
   cancel(): void;
+}
+
+export interface AsrLiveTranscriptionResult {
+  text: string;
 }
 
 export interface AsrLiveTranscriberOptions {

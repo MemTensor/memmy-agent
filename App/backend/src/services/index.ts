@@ -196,6 +196,7 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
     cloudClient: options.cloudClient
   });
   const asrStreamService = createAsrStreamService({
+    getSession: asrService.getSession,
     bootstrapRepository: options.appStateStore.repositories.bootstrap,
     accountSessionRepository: options.appStateStore.repositories.accountSession,
     cloudBaseUrl: resolveCloudClientConfig(process.env).baseUrl

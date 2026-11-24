@@ -40,6 +40,8 @@ import {
   requestNewSessionReset,
   requestAgentRestart,
   requestAgentStop,
+  replaceVoiceTranscript,
+  trackVoiceTranscriptEdit,
   resolveComposerCommandDraft,
   shouldAcceptAgentStatusResult,
   submitAgentComposerMessage,
@@ -153,7 +155,7 @@ describe("HomePage", () => {
     expect(chipStyles).toMatch(/\.composer-command-chip__leading\s*{[^}]*display:\s*inline-flex;/s);
     expect(source.match(/<ComposerCommandChip/g)).toHaveLength(2);
     expect(source.match(/value=\{composerInput\}/g)).toHaveLength(2);
-    expect(source).toContain("setCurrentComposerDraft(buildComposerCommandDraft(selectedComposerCommand, value));");
+    expect(source).toContain('setComposerDraftForScope(chatScopeKey, buildComposerCommandDraft(selectedComposerCommand, value), "manual");');
     expect(source).toContain("selectedComposerCommandsByScope[chatScopeKey] ?? null");
     expect(source).toContain("setSelectedComposerCommandForScope(chatScopeKey, COMPOSER_GOAL_COMMAND);");
     expect(source).toContain('label={t("home.command.goalChip")}');
@@ -604,14 +606,27 @@ describe("HomePage", () => {
     const startVoiceInput = source.slice(startVoiceInputStart, finishVoiceInputStart);
     const finishVoiceInput = source.slice(finishVoiceInputStart, toggleVoiceInputStart);
 
-    expect(startVoiceInput).toContain("setCurrentComposerMediaError(toReadableAsrError(error, t))");
-    expect(finishVoiceInput).toContain("setCurrentComposerMediaError(toReadableAsrError(error, t))");
+    expect(startVoiceInput).toContain('setComposerMediaErrorForScope(capture.scopeKey, toReadableAsrError(error, t))');
+    expect(finishVoiceInput).toContain('setComposerMediaErrorForScope(scopeKey, toReadableAsrError(error, t))');
     expect(startVoiceInput).not.toContain("agentActions.failed");
     expect(finishVoiceInput).not.toContain("agentActions.failed");
-    expect(source).toContain("MicrophonePermissionError");
-    expect(source).toContain("microphonePermissionDeniedMessageKey");
+    expect(source).toContain("mergeVoiceInputLines(capture.lines, line)");
+    expect(source).toContain("setComposerDraftForScope(scopeKey");
+    expect(source).toContain("replaceVoiceTranscript(current, capture.range, text)");
+    expect(finishVoiceInput).toContain("const { scopeKey } = capture;");
     expect(source).toContain("asr.error.microphonePermissionDenied.mac");
     expect(source).toContain("asr.error.microphonePermissionDenied.windows");
+  });
+
+  it("replaces provisional voice text without duplicating the final transcript", () => {
+    const partial = replaceVoiceTranscript("已有内容", null, "你");
+    expect(partial).toEqual({ value: "已有内容\n你", range: { start: 5, text: "你" } });
+    expect(replaceVoiceTranscript(partial.value, partial.range, "你好").value).toBe("已有内容\n你好");
+    expect(replaceVoiceTranscript("已有内容\n你，继续输入", partial.range, "你好").value).toBe("已有内容\n你好，继续输入");
+  });
+
+  it("never replaces matching user text when the provisional range was removed", () => {
+    expect(replaceVoiceTranscript("你好", { start: 3, text: "你好" }, "最终结果").value).toBe("你好\n最终结果");
   });
 
   it("uses the send button disabled state when handling Enter submit", () => {
@@ -2277,3 +2292,70 @@ class MemoryStorage implements SlashCommandStorageLike {
     this.values.delete(key);
   }
 }
+
+
+describe("voice transcript editing", () => {
+  it("preserves existing indentation and trailing whitespace during partial and final replacement", () => {
+    const existing = "  user draft  \n\n";
+    const partial = replaceVoiceTranscript(existing, null, "hello");
+    expect(partial.value).toBe(existing + "hello");
+    expect(replaceVoiceTranscript(partial.value, partial.range, "hello world").value).toBe(existing + "hello world");
+  });
+  it("removes a retracted provisional sentence without clearing the existing draft", () => {
+    const partial = replaceVoiceTranscript("draft", null, "noise");
+    expect(replaceVoiceTranscript(partial.value, partial.range, "").value).toBe("draft\n");
+  });
+  it("tracks insertion before the live range and preserves text after it", () => {
+    const initial = replaceVoiceTranscript("note", null, "hello");
+    const edited = "new " + initial.value + " tail";
+    // Apply the two independent user edits in order, as textarea events do.
+    const moved = trackVoiceTranscriptEdit(initial.value, "new " + initial.value, initial.range);
+    const range = trackVoiceTranscriptEdit("new " + initial.value, edited, moved);
+    expect(replaceVoiceTranscript(edited, range, "hello world").value).toBe("new note\nhello world tail");
+  });
+  it("keeps a user correction and appends subsequent speech without duplicating the final result", () => {
+    const initial = replaceVoiceTranscript("笔记", null, "今天去北京");
+    const edited = "笔记\n今天去南京";
+    const range = trackVoiceTranscriptEdit(initial.value, edited, initial.range);
+    const live = replaceVoiceTranscript(edited, range, "今天去北京，明天去上海");
+    expect(live.value).toBe("笔记\n今天去南京，明天去上海");
+    expect(replaceVoiceTranscript(live.value, live.range, "今天去北京，明天去上海。").value)
+      .toBe("笔记\n今天去南京，明天去上海。");
+  });
+  it("preserves corrections when the recognizer also revises words before them", () => {
+    const initial = replaceVoiceTranscript("", null, "今天去北京");
+    const range = trackVoiceTranscriptEdit(initial.value, "今天去南京", initial.range);
+    expect(replaceVoiceTranscript("今天去南京", range, "今天要去北京，明天去上海").value)
+      .toBe("今天要去南京，明天去上海");
+  });
+  it("does not reinsert deleted voice text, but still accepts later speech", () => {
+    const initial = replaceVoiceTranscript("note", null, "hello");
+    const range = trackVoiceTranscriptEdit(initial.value, "note\n", initial.range);
+    expect(replaceVoiceTranscript("note\n", range, "hello").value).toBe("note\n");
+    expect(replaceVoiceTranscript("note\n", range, "hello world").value).toBe("note\n world");
+  });
+  it("keeps independent corrections and recognizer extensions", () => {
+    const initial = replaceVoiceTranscript("", null, "red cat, blue dog");
+    const corrected = "green cat, blue bird";
+    const range = trackVoiceTranscriptEdit(initial.value, corrected, initial.range);
+    expect(replaceVoiceTranscript(corrected, range, "red cat, blue dog, white horse").value)
+      .toBe("green cat, blue bird, white horse");
+  });
+});
+
+it("retains a manual correction even if one intermediate recognition happens to agree with it", () => {
+  const initial = replaceVoiceTranscript("", null, "今天去北京");
+  const range = trackVoiceTranscriptEdit(initial.value, "今天去南京", initial.range);
+  const agreed = replaceVoiceTranscript("今天去南京", range, "今天去南京");
+  expect(replaceVoiceTranscript(agreed.value, agreed.range, "今天去北京，明天去上海").value)
+    .toBe("今天去南京，明天去上海");
+});
+it("supports a second manual correction after recognition has extended the first one", () => {
+  const initial = replaceVoiceTranscript("", null, "今天去北京");
+  const range = trackVoiceTranscriptEdit(initial.value, "今天去南京", initial.range);
+  const extended = replaceVoiceTranscript("今天去南京", range, "今天去北京，明天去上海");
+  const edited = "今天去南京，明天去杭州";
+  const again = trackVoiceTranscriptEdit(extended.value, edited, extended.range);
+  expect(replaceVoiceTranscript(edited, again, "今天去北京，明天去上海，后天回家").value)
+    .toBe("今天去南京，明天去杭州，后天回家");
+});

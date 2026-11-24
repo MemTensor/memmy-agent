@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { createStreamLiveTranscriber, type StreamSocket } from "../asr-stream-transcription.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createStreamLiveTranscriber, mergeVoiceInputLines, type StreamSocket } from "../asr-stream-transcription.js";
 import type { AsrLiveLine } from "../asr-live-transcription.js";
 
 const SAMPLE_RATE = 16_000;
@@ -7,6 +7,7 @@ const SAMPLE_RATE = 16_000;
 /** A scriptable stand-in for the browser WebSocket. */
 class FakeSocket implements StreamSocket {
   readyState = 0;
+  bufferedAmount = 0;
   binaryType = "blob";
   readonly sent: Array<string | ArrayBuffer> = [];
   readonly closes: Array<{ code?: number; reason?: string }> = [];
@@ -63,9 +64,18 @@ function block(samples: number, amplitude = 8_000): Int16Array {
 }
 
 describe("createStreamLiveTranscriber", () => {
+  it("initializes an asynchronously opened socket that is already OPEN", async () => {
+    const socket = new FakeSocket(); socket.open();
+    const transcriber = createStreamLiveTranscriber(async () => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine() {} });
+    transcriber.push(block(160)); await Promise.resolve();
+    expect(socket.textFrames()).toEqual([{ type: "start", sampleRate: SAMPLE_RATE }]);
+    expect(socket.binaryFrames()).toHaveLength(1);
+    socket.open(); expect(socket.textFrames()).toHaveLength(1);
+    transcriber.cancel();
+  });
   it("connects on the first block, announces the sample rate, then streams audio", () => {
     const socket = new FakeSocket();
-    const transcriber = createStreamLiveTranscriber(() => socket, { sampleRate: SAMPLE_RATE, onLine: () => undefined });
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: () => undefined });
 
     transcriber.push(block(1_600));
     expect(socket.sent).toHaveLength(0);
@@ -81,28 +91,27 @@ describe("createStreamLiveTranscriber", () => {
     expect(socket.binaryFrames()).toHaveLength(2);
   });
 
-  it("reports partial and final sentences under the same offset so the line is replaced in place", () => {
+  it("reports revisions with one stable sentence id even when their offsets change", () => {
     const socket = new FakeSocket();
     const lines: AsrLiveLine[] = [];
-    const transcriber = createStreamLiveTranscriber(() => socket, { sampleRate: SAMPLE_RATE, onLine: (line) => lines.push(line) });
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: (line) => lines.push(line) });
     transcriber.push(block(160));
     socket.open();
 
     socket.receive({ type: "partial", sentenceId: 1, text: "公司目前", beginMs: 0 });
-    socket.receive({ type: "partial", sentenceId: 1, text: "公司目前有多少", beginMs: 0 });
-    socket.receive({ type: "sentence", sentenceId: 1, text: "公司目前有多少名员工", beginMs: 0, endMs: 2_400 });
+    socket.receive({ type: "partial", sentenceId: 1, text: "公司目前有多少", beginMs: 80 });
+    socket.receive({ type: "sentence", sentenceId: 1, text: "公司目前有多少名员工", beginMs: 120, endMs: 2_400 });
 
     expect(lines.map((line) => line.text)).toEqual(["公司目前", "公司目前有多少", "公司目前有多少名员工"]);
-    // Every reading of one sentence carries the same start, which is what the
-    // panel keys on to overwrite rather than append.
-    expect(new Set(lines.map((line) => line.startMs))).toEqual(new Set([0]));
+    expect(new Set(lines.map((line) => line.sentenceId))).toEqual(new Set([1]));
+    expect(lines.at(-1)?.startMs).toBe(120);
     expect(lines.at(-1)?.endMs).toBe(2_400);
   });
 
   it("drops blank readings rather than showing empty lines", () => {
     const socket = new FakeSocket();
     const lines: AsrLiveLine[] = [];
-    const transcriber = createStreamLiveTranscriber(() => socket, { sampleRate: SAMPLE_RATE, onLine: (line) => lines.push(line) });
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: (line) => lines.push(line) });
     transcriber.push(block(160));
     socket.open();
 
@@ -114,21 +123,48 @@ describe("createStreamLiveTranscriber", () => {
 
   it("sends finish and settles once the relay reports finished", async () => {
     const socket = new FakeSocket();
-    const transcriber = createStreamLiveTranscriber(() => socket, { sampleRate: SAMPLE_RATE, onLine: () => undefined });
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: () => undefined });
     transcriber.push(block(160));
     socket.open();
+    socket.receive({ type: "sentence", sentenceId: 1, text: "实时完成", beginMs: 0, endMs: 500 });
 
     const finishing = transcriber.finish();
     expect(socket.textFrames().at(-1)).toEqual({ type: "finish" });
 
     socket.receive({ type: "finished" });
-    await expect(finishing).resolves.toBeUndefined();
+    await expect(finishing).resolves.toEqual({ text: "实时完成" });
     expect(socket.closes.at(-1)).toEqual({ code: 1000, reason: "done" });
+  });
+
+  it("accepts an empty final sentence as a retraction instead of retaining a stale partial", async () => {
+    const socket = new FakeSocket(); const onLine = vi.fn(); const onError = vi.fn();
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine, onError });
+    transcriber.push(block(160)); socket.open();
+    socket.receive({ type: "partial", sentenceId: 1, text: "noise", beginMs: 0 });
+    socket.receive({ type: "sentence", sentenceId: 1, text: "", beginMs: 0 });
+    socket.receive({ type: "sentence", sentenceId: 2, text: "real speech", beginMs: 100 });
+    const finishing = transcriber.finish(); socket.receive({ type: "finished" });
+    await expect(finishing).resolves.toEqual({ text: "real speech" });
+    expect(onError).not.toHaveBeenCalled();
+    expect(onLine).toHaveBeenCalledWith(expect.objectContaining({ sentenceId: 1, text: "" }));
+  });
+
+  it("fails when the stream finishes with only a provisional sentence", async () => {
+    const socket = new FakeSocket();
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: () => undefined });
+    transcriber.push(block(160));
+    socket.open();
+    socket.receive({ type: "partial", sentenceId: 1, text: "还没说完", beginMs: 0 });
+
+    const finishing = transcriber.finish();
+    socket.receive({ type: "finished" });
+
+    await expect(finishing).resolves.toBeNull();
   });
 
   it("holds finish until the socket opens, so the tail of a short recording is not lost", async () => {
     const socket = new FakeSocket();
-    const transcriber = createStreamLiveTranscriber(() => socket, { sampleRate: SAMPLE_RATE, onLine: () => undefined });
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: () => undefined });
     transcriber.push(block(160));
 
     const finishing = transcriber.finish();
@@ -137,28 +173,28 @@ describe("createStreamLiveTranscriber", () => {
     socket.open();
     expect(socket.textFrames()).toEqual([{ type: "start", sampleRate: SAMPLE_RATE }, { type: "finish" }]);
     socket.receive({ type: "finished" });
-    await expect(finishing).resolves.toBeUndefined();
+    await expect(finishing).resolves.toEqual({ text: "" });
   });
 
   it("settles immediately when nothing was ever pushed", async () => {
     const openSocket = vi.fn(() => new FakeSocket());
-    const transcriber = createStreamLiveTranscriber(openSocket, { sampleRate: SAMPLE_RATE, onLine: () => undefined });
+    const transcriber = createStreamLiveTranscriber(openSocket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: () => undefined });
 
-    await expect(transcriber.finish()).resolves.toBeUndefined();
+    await expect(transcriber.finish()).resolves.toBeNull();
     expect(openSocket).not.toHaveBeenCalled();
   });
 
   it("reports an error and settles when the relay drops the socket mid-recording", async () => {
     const socket = new FakeSocket();
     const onError = vi.fn();
-    const transcriber = createStreamLiveTranscriber(() => socket, { sampleRate: SAMPLE_RATE, onLine: () => undefined, onError });
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: () => undefined, onError });
     transcriber.push(block(160));
     socket.open();
 
     const finishing = transcriber.finish();
     socket.drop();
 
-    await expect(finishing).resolves.toBeUndefined();
+    await expect(finishing).resolves.toBeNull();
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0]?.[0]).toBeInstanceOf(Error);
   });
@@ -166,14 +202,14 @@ describe("createStreamLiveTranscriber", () => {
   it("surfaces a relay error event and settles", async () => {
     const socket = new FakeSocket();
     const onError = vi.fn();
-    const transcriber = createStreamLiveTranscriber(() => socket, { sampleRate: SAMPLE_RATE, onLine: () => undefined, onError });
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: () => undefined, onError });
     transcriber.push(block(160));
     socket.open();
 
     const finishing = transcriber.finish();
     socket.receive({ type: "error", message: "Live transcription requires account mode" });
 
-    await expect(finishing).resolves.toBeUndefined();
+    await expect(finishing).resolves.toBeNull();
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: "Live transcription requires account mode" }));
   });
 
@@ -181,7 +217,7 @@ describe("createStreamLiveTranscriber", () => {
     const socket = new FakeSocket();
     const lines: AsrLiveLine[] = [];
     const onError = vi.fn();
-    const transcriber = createStreamLiveTranscriber(() => socket, { sampleRate: SAMPLE_RATE, onLine: (line) => lines.push(line), onError });
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: (line) => lines.push(line), onError });
     transcriber.push(block(160));
     socket.open();
 
@@ -200,7 +236,7 @@ describe("createStreamLiveTranscriber", () => {
     const socket = new FakeSocket();
     const lines: AsrLiveLine[] = [];
     const onError = vi.fn();
-    const transcriber = createStreamLiveTranscriber(() => socket, { sampleRate: SAMPLE_RATE, onLine: (line) => lines.push(line), onError });
+    const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: (line) => lines.push(line), onError });
     transcriber.push(block(160));
     socket.open();
 
@@ -211,4 +247,105 @@ describe("createStreamLiveTranscriber", () => {
     expect(lines.map((line) => line.text)).toEqual(["还在"]);
     expect(onError).not.toHaveBeenCalled();
   });
+});
+
+
+describe("ASR failure boundaries", () => {
+  afterEach(() => vi.useRealTimers());
+  it("times out a connection that opens but never accepts the model", async () => {
+    vi.useFakeTimers();
+    const socket = new FakeSocket();
+    const onError = vi.fn();
+    const t = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine() {}, onError });
+    t.push(block(160)); socket.open();
+    await vi.advanceTimersByTimeAsync(8_000);
+    await expect(t.finish()).resolves.toBeNull();
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("handshake") }));
+  });
+  it("times out finish even when the socket stays open", async () => {
+    vi.useFakeTimers();
+    const socket = new FakeSocket();
+    const t = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine() {} });
+    t.push(block(160)); socket.open(); socket.receive({ type: "ready" });
+    const result = t.finish();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(result).resolves.toBeNull();
+  });
+  it("bounds pending audio and stops reporting after failure", async () => {
+    const socket = new FakeSocket(); const onLine = vi.fn();
+    const t = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine });
+    t.push(block(256 * 1024));
+    socket.receive({ type: "sentence", sentenceId: 1, text: "late", beginMs: 0 });
+    await expect(t.finish()).resolves.toBeNull();
+    expect(onLine).not.toHaveBeenCalled();
+  });
+  it("fails on send backpressure and synchronous socket failures", async () => {
+    const socket = new FakeSocket();
+    const t = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine() {} });
+    t.push(block(160)); socket.open(); socket.bufferedAmount = 300_000; t.push(block(160));
+    await expect(t.finish()).resolves.toBeNull();
+    const broken = createStreamLiveTranscriber(() => { throw new Error("invalid URL"); }, { finalResult: true, sampleRate: SAMPLE_RATE, onLine() {} });
+    expect(() => broken.push(block(160))).not.toThrow();
+    await expect(broken.finish()).resolves.toBeNull();
+  });
+  it("does not accept an early finish or overwrite final text with a late partial", async () => {
+    const socket = new FakeSocket(); const lines: AsrLiveLine[] = [];
+    const t = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine: (line) => lines.push(line) });
+    t.push(block(160)); socket.open();
+    socket.receive({ type: "sentence", sentenceId: 1, text: "final", beginMs: 0 });
+    socket.receive({ type: "partial", sentenceId: 1, text: "stale", beginMs: 0 });
+    expect(lines.map(x => x.text)).toEqual(["final"]);
+    socket.receive({ type: "finished" });
+    await expect(t.finish()).resolves.toBeNull();
+  });
+});
+
+
+it.each([
+  ["invalid_argument"],
+  ["unauthorized"],
+  ["rate_limited"]
+])("preserves %s on the reported WebSocket error", async (code) => {
+  const socket = new FakeSocket(); const onError = vi.fn();
+  const live = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine() {}, onError });
+  live.push(block(160)); socket.open();
+  socket.receive({ type: "error", code, message: "provider diagnostic" });
+  await expect(live.finish()).resolves.toBeNull();
+  expect(onError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ code, message: "provider diagnostic" }));
+});
+
+it("still reports errors from a relay with an unknown provider code", async () => {
+  const socket = new FakeSocket(); const onError = vi.fn();
+  const live = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine() {}, onError });
+  live.push(block(160)); socket.open();
+  socket.receive({ type: "error", code: "ProviderSpecificError", message: "legacy relay failure" });
+  await expect(live.finish()).resolves.toBeNull();
+  expect(onError).toHaveBeenCalledOnce();
+  expect(onError.mock.calls[0]![0].message).toBe("legacy relay failure");
+});
+
+it("replaces voice-input sentence revisions even when their timestamps change", () => {
+  expect(mergeVoiceInputLines([{ sentenceId: 1, text: "partial", startMs: 0, endMs: 0 }],
+    { sentenceId: 1, text: "final", startMs: 80, endMs: 900 })).toEqual([
+      { sentenceId: 1, text: "final", startMs: 80, endMs: 900 }
+    ]);
+});
+
+it("keeps a recording preview best-effort without requiring a final voice-input transcript", async () => {
+  const socket = new FakeSocket(); const onError = vi.fn(); const onLine = vi.fn();
+  const preview = createStreamLiveTranscriber(() => socket, { sampleRate: SAMPLE_RATE, onLine, onError });
+  preview.push(block(160)); socket.open();
+  socket.receive({ type: "partial", sentenceId: 1, text: "preview", beginMs: 0 });
+  expect(onLine).toHaveBeenCalledWith({ text: "preview", startMs: 0, endMs: 0 });
+  const finishing = preview.finish(); socket.receive({ type: "finished" });
+  await expect(finishing).resolves.toBeNull(); expect(onError).not.toHaveBeenCalled();
+});
+
+it("finishes a silent voice input as empty speech rather than an incomplete stream", async () => {
+  const socket = new FakeSocket(); const onError = vi.fn();
+  const transcriber = createStreamLiveTranscriber(() => socket, { finalResult: true, sampleRate: SAMPLE_RATE, onLine() {}, onError });
+  transcriber.push(block(160)); socket.open(); socket.receive({ type: "ready" });
+  const finishing = transcriber.finish(); socket.receive({ type: "finished" });
+  await expect(finishing).resolves.toEqual({ text: "" });
+  expect(onError).not.toHaveBeenCalled();
 });
