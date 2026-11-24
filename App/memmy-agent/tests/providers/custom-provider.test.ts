@@ -3,10 +3,7 @@ import { Config } from "../../src/config/schema.js";
 import { AnthropicProvider } from "../../src/providers/anthropic-provider.js";
 import { BedrockProvider } from "../../src/providers/bedrock-provider.js";
 import { makeProvider } from "../../src/providers/factory.js";
-import {
-  chatCompletionsModelForcesNoneReasoning,
-  customModelUsesMaxCompletionTokens,
-} from "../../src/providers/custom-provider.js";
+import { customModelUsesMaxCompletionTokens } from "../../src/providers/custom-provider.js";
 import { OpenAICompatProvider } from "../../src/providers/openai-compat-provider.js";
 import { findByName } from "../../src/providers/registry.js";
 
@@ -61,13 +58,6 @@ describe("custom provider", () => {
     expect(customModelUsesMaxCompletionTokens("gpt-4o")).toBe(false);
   });
 
-  it("treats gpt- names and o-series names as chat completions reasoning models", () => {
-    expect(chatCompletionsModelForcesNoneReasoning("gpt-4o")).toBe(true);
-    expect(chatCompletionsModelForcesNoneReasoning("gpt-6-sol")).toBe(true);
-    expect(chatCompletionsModelForcesNoneReasoning("o3-mini")).toBe(true);
-    expect(chatCompletionsModelForcesNoneReasoning("qwen-max")).toBe(false);
-  });
-
   it("sends max_completion_tokens only for matching custom chat models", () => {
     const gpt = chatKwargs("gpt-6-sol");
     const qwen = chatKwargs("qwen-max");
@@ -87,12 +77,12 @@ describe("custom provider", () => {
     expect(kwargs.reasoning_effort).toBe("medium");
   });
 
-  it("sends reasoning_effort none for custom chat completions gpt models when thinking is off", () => {
+  it("preserves explicit thinking choices for custom Chat endpoints", () => {
     const tools = [{ type: "function", function: { name: "read_file" } }];
 
-    expect(chatKwargs("gpt-6-sol", { tools }).reasoning_effort).toBe("none");
+    expect(chatKwargs("gpt-6-sol", { tools }).reasoning_effort).toBeUndefined();
     expect(chatKwargs("gpt-6-sol", { reasoningEffort: "none", tools }).reasoning_effort).toBe("none");
-    expect(chatKwargs("gpt-4o", { tools }).reasoning_effort).toBe("none");
+    expect(chatKwargs("gpt-4o", { tools }).reasoning_effort).toBeUndefined();
     expect(chatKwargs("gpt-4o", { tools }).max_tokens).toBe(1024);
     expect(chatKwargs("gpt-4o", { tools })).not.toHaveProperty("max_completion_tokens");
     expect(chatKwargs("qwen-max", { tools })).not.toHaveProperty("reasoning_effort");

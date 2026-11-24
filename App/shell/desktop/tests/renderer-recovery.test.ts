@@ -252,8 +252,9 @@ function setupWiring(mode: "full" | "pet" = "full") {
   const ipcMain = new EventEmitter();
   const writeProcessDiagnostic = vi.fn();
   const writePackagedStartupLog = vi.fn(async (_message: string) => {});
+  const flushPendingInviteCodes = vi.fn();
   const dialog = { showMessageBox: vi.fn(() => choice.promise) };
-  const context = createContext({ app, ipcMain, dialog, writeProcessDiagnostic, writePackagedStartupLog,
+  const context = createContext({ app, ipcMain, dialog, writeProcessDiagnostic, writePackagedStartupLog, flushPendingInviteCodes,
     attachRendererRecovery, rendererRecoveryUrl, resolveRendererUrl: () => "http://127.0.0.1:19100/?memmyMode=" + mode,
     window, mode });
   runInContext(wiringCode, context);
@@ -261,13 +262,15 @@ function setupWiring(mode: "full" | "pet" = "full") {
   const run = (code: string) => runInContext(code, context);
   const ready = () => ipcMain.emit("memmy:renderer-ready", { sender: window.webContents });
   const gone = () => window.webContents.emit("render-process-gone", {}, { reason: "killed", exitCode: -9 });
-  return { window, context, run, ready, gone, app, choice, dialog, writeProcessDiagnostic, writePackagedStartupLog };
+  return { window, context, run, ready, gone, app, choice, dialog, writeProcessDiagnostic, writePackagedStartupLog, flushPendingInviteCodes };
 }
 
 describe("main process recovery wiring", () => {
   it("invalidates only this window's pending/readiness state and restores it on the new renderer handshake", async () => {
     const test = setupWiring();
     test.ready();
+    expect(test.flushPendingInviteCodes).toHaveBeenCalledTimes(1);
+    expect(test.flushPendingInviteCodes).toHaveBeenNthCalledWith(1, test.window.webContents);
     expect(test.run("rendererReadyWebContentsIds.has(1)")).toBe(true);
     test.window.close();
     expect(test.run("pendingMainWindowAction !== null")).toBe(true);
@@ -278,7 +281,10 @@ describe("main process recovery wiring", () => {
     expect(test.window.loadURL).toHaveBeenCalledWith(appUrl);
     test.window.close();
     expect(test.run("pendingMainWindowAction")).toBeNull();
+    expect(test.flushPendingInviteCodes).toHaveBeenCalledTimes(1);
     test.ready();
+    expect(test.flushPendingInviteCodes).toHaveBeenCalledTimes(2);
+    expect(test.flushPendingInviteCodes).toHaveBeenNthCalledWith(2, test.window.webContents);
     expect(test.run("rendererRecoveries.get(1).isUnavailable()")).toBe(false);
     test.run('pendingMainWindowAction = { targetWindow: {} }; rendererReadyWebContentsIds.add(2);');
     test.gone();

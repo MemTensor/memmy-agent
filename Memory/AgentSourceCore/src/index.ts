@@ -25,6 +25,11 @@ export interface ConversationMessage {
   gitRoot: string | null;
   rawMeta: Readonly<Record<string, unknown>>;
   ordinal?: number;
+  /**
+   * The title the agent itself generated for this conversation, when its store keeps one.
+   * Sources that only keep messages leave it out, and the caller falls back to a title it derives.
+   */
+  sessionTitle?: string;
 }
 
 export interface SourceDescriptor {
@@ -46,6 +51,8 @@ export interface ScanOptions {
   since?: string;
   maxMessages?: number;
   maxScanTargets?: number;
+  /** With recent_first, stores holding many conversations (one Cursor database) read only this many, newest first. */
+  maxConversations?: number;
   order?: "source_default" | "recent_first";
   signal?: AbortSignal;
   /** Production scanners set this to bypass legacy whole-window buffering. */

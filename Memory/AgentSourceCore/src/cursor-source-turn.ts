@@ -30,6 +30,11 @@ export interface CursorVscdbSource {
   mainComposerIds(): Iterable<string>;
   /** Parsed `cursorDiskKV` row `composerData:{composerId}`. */
   composerData(composerId: string): unknown;
+  /**
+   * The chat's header list when the store keeps it outside `composerData`: newer Cursor versions write it to
+   * `composerConvHeaders:{composerId}:{chunk}` rows and leave `fullConversationHeadersOnly` empty.
+   */
+  conversationHeaders?(composerId: string): readonly unknown[] | undefined;
   /** Parsed header-index chunk from cursorDiskKV. */
   conversationHeaderChunk?(composerId: string, index: number): unknown;
   /** Parsed `cursorDiskKV` row `bubbleId:{composerId}:{bubbleId}`. */
@@ -174,7 +179,11 @@ function readConversationHeaders(
   data: Record<string, unknown>
 ): unknown[] | undefined {
   if (data.headerLog == null) {
-    return Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+    const inline = Array.isArray(data.fullConversationHeadersOnly) ? data.fullConversationHeadersOnly : [];
+    if (inline.length > 0) return inline;
+    // Older chunked stores omit headerLog; preserve their external header-row reader.
+    const stored = source.conversationHeaders?.(composerId);
+    return Array.isArray(stored) ? [...stored] : inline;
   }
   const log = data.headerLog;
   if (!isRecord(log)) return undefined;

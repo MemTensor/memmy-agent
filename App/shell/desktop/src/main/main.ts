@@ -1,3 +1,4 @@
+import { bundledCliInstallDecision, HOMEBREW_CLI_BIN_DIRECTORY, MEMMY_CLI_LAUNCHER_MARKER, PACKAGED_MAC_CLI_COMMANDS, SYSTEM_CLI_BIN_DIRECTORY, USER_CLI_SHELL_PROFILES, memmyCliAppCandidates, renderMemmyCliLauncher } from './cli-auto-install.js';
 import { createMacDmgUpdateInstallScript, createMacDmgUpdateStageScript, type MacUpdateValidationOptions } from './mac-update-scripts.js';
 import { createDesktopScreenCapture } from './desktop-screen-capture.js';
 import { compareVersionSegments, parseUpdatePackageVersion } from './version-compare.js';
@@ -156,7 +157,7 @@ import {
   type WindowsDataLayout
 } from "./windows-data-layout.js";
 import { assertWindowsRuntimeOwnership } from "./windows-runtime-ownership.js";
-import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js";
+import { createWindowsUpdateLauncherFile, waitForWindowsUpdateLauncher } from "./windows-update-launcher.js";
 import { createWindowsUpdateVerificationScript, validateWindowsUpdateInstaller, windowsUpdatePowerShellExecutable, windowsUpdatePowerShellFile, type WindowsUpdateVerification } from "./windows-update-validation.js";
 import { applyLocalTestProfileEnvironment, prepareLocalTestProfile,
   readExecutableSigningTeamIdentifier, type LocalTestProfile } from './local-test-profile.js';
@@ -176,6 +177,7 @@ import { composeRecordingMenuBarBitmap } from "./menu-bar-recording-indicator.js
 import { runApprovedEmbeddedUpload } from './browser-embedded-upload-access.js';
 import { createPIPTrayRecovery } from './computer-use-pip-tray.js';
 import { attachRendererRecovery, rendererRecoveryUrl, type RendererRecoveryDiagnostic } from './renderer-recovery.js';
+import { findInviteLink, INVITE_LINK_CHANNEL, INVITE_LINK_SCHEME, parseInviteLink, TAKE_INVITE_LINKS_CHANNEL } from './invite-link.js';
 
 let mainWindow: BrowserWindow | null = null;
 let memmyPermissionOnboarding: ReturnType<typeof createComputerUseOnboarding> | null = null;
@@ -975,12 +977,25 @@ function configureAppIdentity(): void {
       throw error;
     }
   }
-  const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
+  // 开发态并排跑两个实例（例如一个账号当发起方、另一个当执行方）时，各自的 userData 必须分开：
+  // Electron 的单实例锁挂在 userData 上，共用一个目录的话第二个进程只会把第一个窗口拉到前台。
+  // 只认开发态的这个开关，打包后的应用仍然用固定的数据目录。
+  const devProfile = app.isPackaged ? null : process.env.MEMMY_DEV_PROFILE_DIR?.trim() || null;
+  const userDataPath = devProfile
+    ? join(devProfile, "userData")
+    : windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
   const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
   app.setPath("userData", userDataPath);
+  if (devProfile) {
+    // 会话、日志、临时目录一并放进这个 profile：两个实例互不干扰。
+    app.setPath("sessionData", join(devProfile, "sessionData"));
+    app.setPath("logs", join(devProfile, "logs"));
+    app.setPath("temp", join(devProfile, "temp"));
+    app.setPath("crashDumps", join(devProfile, "crashDumps"));
+  }
   if (localTestProfile) {
     if (resolve(userDataPath) !== localTestProfile.userData || resolve(memmyHome) !== localTestProfile.runtimeHome) {
       throw new Error('Isolated test profile path validation failed');
@@ -1046,31 +1061,169 @@ function readCurrentDesktopEditionManifest(): string | null {
 /**
  * Installs the bundled CLI into the user's PATH.
  *
- * A drag-and-drop DMG cannot run scripts automatically when dragged into
- * Applications, so we create user-level symlinks the first time the app launches
- * from /Applications. Failures are only logged and do not affect GUI startup.
+ * On macOS the command is a small script, not a symlink to the running bundle. Opening Memmy from
+ * the disk image still installs it: the script uses that copy while the image is mounted, then
+ * `/Applications` after the person drags Memmy there. A symlink would become "command not found"
+ * as soon as the image is ejected.
  *
  * @returns Resolves once installation completes.
  */
 async function installBundledCliIfNeeded(): Promise<void> {
-  if (!app.isPackaged || localTestProfile || !isInstalledApplicationsApp()) {
+  if (!app.isPackaged || localTestProfile) {
+    return;
+  }
+  if (process.platform === "darwin") {
+    await installPackagedMacCliLaunchers();
+    return;
+  }
+  if (resolveCliInstallStrategy(
+    process.platform,
+    app.isPackaged,
+    Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)
+  ) === "packaged-windows") {
+    await installPackagedWindowsCliOnBoot();
     return;
   }
 
-  try {
-    const cliDirectory = join(process.resourcesPath, "cli");
-    const memoryCli = join(cliDirectory, "memmy-memory");
-    const memmyCli = join(cliDirectory, "memmy");
-    await Promise.all([access(memoryCli), access(memmyCli)]);
+  const bundlePath = resolveCurrentAppBundlePath();
+  const decision = bundledCliInstallDecision(bundlePath);
+  if (decision !== "install") {
+    await writePackagedStartupLog(`boot:cli-skipped:${decision}:${bundlePath}`);
+    return;
+  }
 
+  const cliDirectory = join(process.resourcesPath, "cli");
+  const commands = [
+    ["memmy-memory", join(cliDirectory, "memmy-memory")],
+    ["memmy", join(cliDirectory, "memmy")],
+    ["memmy-project", join(cliDirectory, "memmy-project")]
+  ] as const;
+  const installed: string[] = [];
+  const skipped: string[] = [];
+
+  try {
     const binDirectory = await resolveCliInstallDirectory();
     await mkdir(binDirectory, { recursive: true });
-    await installSymlink(memoryCli, join(binDirectory, "memmy-memory"));
-    await installSymlink(memmyCli, join(binDirectory, "memmy"));
+    for (const [name, source] of commands) {
+      try {
+        await access(source);
+        const userLink = await installSymlink(source, join(binDirectory, name));
+        const systemLink = await installSystemBinSymlink(source, name);
+        installed.push(`${name}:${userLink}${systemLink === "skipped" ? "" : `+${systemLink}`}`);
+      } catch (error) {
+        skipped.push(`${name}:${formatStartupError(error)}`);
+      }
+    }
     await ensureUserPathIncludes(binDirectory);
+    await writePackagedStartupLog(`boot:cli-installed:${installed.join(",") || "none"};skipped:${skipped.join("|") || "none"}`);
   } catch (error) {
     console.warn("Memmy CLI auto-install skipped:", error);
+    await writePackagedStartupLog(`boot:cli-failed\n${formatStartupError(error)}`);
   }
+}
+
+async function installPackagedWindowsCliOnBoot(): Promise<void> {
+  try {
+    const result = await installPackagedWindowsCliTools(process.resourcesPath);
+    await writePackagedStartupLog(`boot:cli-installed:windows:${result.binDirectory};pathUpdated:${result.pathUpdated}`);
+  } catch (error) {
+    console.warn("Memmy CLI auto-install skipped:", error);
+    await writePackagedStartupLog(`boot:cli-failed:windows\n${formatStartupError(error)}`);
+  }
+}
+
+async function installPackagedMacCliLaunchers(): Promise<void> {
+  const bundlePath = resolveCurrentAppBundlePath();
+  const decision = bundledCliInstallDecision(bundlePath);
+  try {
+    const outcome = await installPackagedMacCliCommands([...PACKAGED_MAC_CLI_COMMANDS], bundlePath);
+    let profiles = "unchanged";
+    try {
+      const profilePaths = await ensureDirectoryOnUserPath(
+        outcome.binDirectory,
+        "# Memmy CLI PATH",
+        'export PATH="$HOME/.local/bin:$PATH"'
+      );
+      profiles = profilePaths.join(",") || "unchanged";
+    } catch (error) {
+      profiles = `failed:${formatStartupError(error)}`;
+    }
+    const installed = outcome.installed.map((entry) => entry.name).join(",") || "none";
+    await writePackagedStartupLog(`boot:cli-installed:${decision}:${bundlePath}:${installed};skipped:${outcome.skipped.join("|") || "none"};profiles:${profiles}`);
+  } catch (error) {
+    console.warn("Memmy CLI auto-install skipped:", error);
+    await writePackagedStartupLog(`boot:cli-failed:${decision}:${bundlePath}\n${formatStartupError(error)}`);
+  }
+}
+
+/**
+ * Installs Mac CLI commands as scripts under ~/.local/bin.
+ *
+ * The script looks up Memmy.app when it runs. A symlink to the copy that is open now would break
+ * after the person ejects the disk image, or after macOS deletes a translocated copy, and zsh then
+ * reports "command not found".
+ */
+async function installPackagedMacCliCommands(
+  names: readonly string[],
+  bundlePath = resolveCurrentAppBundlePath()
+): Promise<CliInstallResult & { skipped: string[] }> {
+  const appPaths = memmyCliAppCandidates(bundlePath, homedir());
+  const binDirectory = join(homedir(), ".local", "bin");
+  await mkdir(binDirectory, { recursive: true });
+  const installed: CliInstallResult["installed"] = [];
+  const skipped: string[] = [];
+
+  for (const name of names) {
+    try {
+      const target = join(binDirectory, name);
+      const wrote = await writeUserCliLauncher(target, renderMemmyCliLauncher(name, appPaths));
+      if (wrote === "installed") {
+        const source = target;
+        await installSystemBinSymlink(source, name);
+        await installBinDirectorySymlink(HOMEBREW_CLI_BIN_DIRECTORY, source, name);
+      }
+      installed.push({ name, source: target, target });
+    } catch (error) {
+      skipped.push(`${name}:${formatStartupError(error)}`);
+    }
+  }
+
+  if (installed.length === 0 && skipped.length > 0) {
+    throw new Error(skipped.join("\n"));
+  }
+
+  return {
+    ok: true,
+    binDirectory,
+    installed,
+    pathUpdated: false,
+    profilePaths: [],
+    skipped
+  };
+}
+
+async function writeUserCliLauncher(target: string, contents: string): Promise<"installed" | "kept-file"> {
+  try {
+    const current = await lstat(target);
+    if (!current.isSymbolicLink()) {
+      if (!current.isFile()) return "kept-file";
+      const text = await readFile(target, "utf8");
+      if (!text.includes(MEMMY_CLI_LAUNCHER_MARKER)) return "kept-file";
+    }
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+  }
+
+  const temporary = join(dirname(target), `.${basename(target)}.${process.pid}.tmp`);
+  try {
+    await writeFile(temporary, contents, { mode: 0o755 });
+    await chmod(temporary, 0o755);
+    await rename(temporary, target);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+  return "installed";
 }
 
 async function installCliTools(): Promise<CliInstallResult> {
@@ -1080,6 +1233,24 @@ async function installCliTools(): Promise<CliInstallResult> {
     Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)
   ) === "packaged-windows") {
     return installPackagedWindowsCliTools(process.resourcesPath);
+  }
+
+  if (app.isPackaged && process.platform === "darwin") {
+    const outcome = await installPackagedMacCliCommands([...PACKAGED_MAC_CLI_COMMANDS]);
+    const { skipped, ...result } = outcome;
+    if (skipped.length > 0) {
+      throw new Error(skipped.join("\n"));
+    }
+    const profilePaths = await ensureDirectoryOnUserPath(
+      result.binDirectory,
+      "# Memmy CLI PATH",
+      'export PATH="$HOME/.local/bin:$PATH"'
+    );
+    return {
+      ...result,
+      pathUpdated: profilePaths.length > 0,
+      profilePaths
+    };
   }
 
   const binDirectory = join(homedir(), ".local", "bin");
@@ -1110,14 +1281,17 @@ function resolveCliToolEntries(): Array<{ name: string; source: string }> {
   if (app.isPackaged) {
     const cliDirectory = join(process.resourcesPath, "cli");
     return [
-      { name: "memmy-memory", source: join(cliDirectory, "memmy-memory") }
+      { name: "memmy-memory", source: join(cliDirectory, "memmy-memory") },
+      { name: "memmy-project", source: join(cliDirectory, "memmy-project") }
     ];
   }
 
   const rootDirectory = resolveDevelopmentRoot();
   const memoryCli = join(rootDirectory, "Memory", "dist", "src", "cli", "index.js");
+  const projectCli = join(rootDirectory, "App", "backend", "dist", "src", "cli", "memmy-project.js");
   return [
-    { name: "memmy-memory", source: memoryCli }
+    { name: "memmy-memory", source: memoryCli },
+    { name: "memmy-project", source: projectCli }
   ];
 }
 
@@ -1192,11 +1366,11 @@ async function resolveCliInstallDirectory(): Promise<string> {
  * @param target The command path under the user's PATH.
  * @returns Resolves once done.
  */
-async function installSymlink(source: string, target: string): Promise<void> {
+async function installSymlink(source: string, target: string): Promise<"installed" | "kept-file"> {
   try {
     const stat = await lstat(target);
     if (!stat.isSymbolicLink()) {
-      return;
+      return "kept-file";
     }
     await unlink(target);
   } catch (error) {
@@ -1206,6 +1380,7 @@ async function installSymlink(source: string, target: string): Promise<void> {
   }
 
   await symlink(source, target);
+  return "installed";
 }
 
 async function ensureUserPathIncludes(binDirectory: string): Promise<void> {
@@ -1215,10 +1390,31 @@ async function ensureUserPathIncludes(binDirectory: string): Promise<void> {
 
   const marker = "# Memmy CLI PATH";
   const line = 'export PATH="$HOME/.local/bin:$PATH"';
-  await Promise.all([
-    ensureShellProfileIncludesPath(join(homedir(), ".zshrc"), marker, line),
-    ensureShellProfileIncludesPath(join(homedir(), ".bash_profile"), marker, line)
-  ]);
+  await Promise.all(USER_CLI_SHELL_PROFILES.map((name) => (
+    ensureShellProfileIncludesPath(join(homedir(), name), marker, line)
+  )));
+}
+
+/**
+ * Links one command into /usr/local/bin when that directory is writable. It is already on the
+ * PATH of a Dock-launched app, which never reads ~/.zshrc.
+ */
+async function installSystemBinSymlink(source: string, name: string): Promise<"installed" | "kept-file" | "skipped"> {
+  return installBinDirectorySymlink(SYSTEM_CLI_BIN_DIRECTORY, source, name);
+}
+
+/** Links one command into a directory that is already on PATH, when that directory is writable. */
+async function installBinDirectorySymlink(
+  directory: string,
+  source: string,
+  name: string
+): Promise<"installed" | "kept-file" | "skipped"> {
+  try {
+    await access(directory, fsConstants.W_OK);
+  } catch {
+    return "skipped";
+  }
+  return installSymlink(source, join(directory, name));
 }
 
 async function ensureDirectoryOnUserPath(binDirectory: string, marker: string, line: string): Promise<string[]> {
@@ -1226,10 +1422,7 @@ async function ensureDirectoryOnUserPath(binDirectory: string, marker: string, l
     return [];
   }
 
-  const profilePaths = [
-    join(homedir(), ".zshrc"),
-    join(homedir(), ".bash_profile")
-  ];
+  const profilePaths = USER_CLI_SHELL_PROFILES.map((name) => join(homedir(), name));
   const results = await Promise.all(profilePaths.map(async (profilePath) => ({
     profilePath,
     changed: await ensureShellProfileIncludesPath(profilePath, marker, line)
@@ -1487,6 +1680,12 @@ function registerIpcHandlers(): void {
     rendererReadyWebContentsIds.add(senderId);
     rendererReadyWaiters.get(senderId)?.(true);
     rendererRecoveries.get(senderId)?.markReady();
+    // 界面已能收邀请：把启动前排队的那几条发出去。
+    flushPendingInviteCodes(event.sender);
+  });
+  ipcMain.handle(TAKE_INVITE_LINKS_CHANNEL, (event) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return [];
+    return pendingInviteCodes.splice(0);
   });
   ipcMain.on('memmy:browser:select-tab', (event, tabId: unknown) => {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
@@ -3372,7 +3571,7 @@ async function installWindowsUpdateInBackground(
   const updatesDirectory = resolveUpdatesDirectory();
   await mkdir(updatesDirectory, { recursive: true });
   const helperPath = join(updatesDirectory, `install-win-update-${Date.now()}.ps1`);
-  const launcherPath = join(updatesDirectory, `launch-win-update-${Date.now()}.vbs`);
+  const launcherPath = join(updatesDirectory, `launch-win-update-${Date.now()}.ps1`);
   const logPath = join(updatesDirectory, "win-update-install.log");
   if (options.showUpdatePrompt) {
     await writeWindowsUpdatePromptLanguage(resolveWindowsUpdatePromptLanguageFromAppSettings());
@@ -3400,15 +3599,25 @@ async function installWindowsUpdateInBackground(
   ]));
   await appendFile(logPath, `[${new Date().toISOString()}] queued Memmy Windows update helper "${helperPath}"\n`).catch(() => undefined);
 
-  const helper = spawn("wscript.exe", [launcherPath], {
+  const helper = spawn(windowsUpdatePowerShellExecutable(), [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-WindowStyle",
+    "Hidden",
+    "-File",
+    launcherPath
+  ], {
     detached: true,
     stdio: "ignore",
     windowsHide: true
   });
-  helper.once("error", (error) => {
-    void appendFile(logPath, `[${new Date().toISOString()}] failed to start Memmy Windows update helper: ${String(error)}\n`).catch(() => undefined);
-  });
-  helper.unref();
+  try {
+    await waitForWindowsUpdateLauncher(helper);
+  } catch (error) {
+    await appendFile(logPath, `[${new Date().toISOString()}] failed to start Memmy Windows update helper: ${String(error)}; launcher log: ${launcherPath}.log\n`).catch(() => undefined);
+    throw error;
+  }
   isManagedUpdateInstallerRunning = true;
   if (options.quitCurrentApp) {
     scheduleQuitForManualUpdateInstall();
@@ -4162,8 +4371,11 @@ function waitForInitialRendererVerification(targetWindow: BrowserWindow | null):
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      targetWindow.webContents.removeListener("did-fail-load", handleFailed);
-      targetWindow.removeListener("closed", handleClosed);
+      // `closed` is emitted after the native window is destroyed. webContents throws then.
+      if (!targetWindow.isDestroyed()) {
+        targetWindow.webContents.removeListener("did-fail-load", handleFailed);
+        targetWindow.removeListener("closed", handleClosed);
+      }
       if (rendererReadyWaiters.get(webContentsId) === finish) {
         rendererReadyWaiters.delete(webContentsId);
       }
@@ -5330,6 +5542,84 @@ function activateMainWindow(): void {
   triggerAgentSourceAutoInject("activate_main_window");
 }
 
+/**
+ * 邀请链接（memmy://invite/<code>）：浏览器落地页靠它直接拉起 Memmy 并弹出「加入项目」。
+ *
+ * <p>链接有三条来路：macOS 的 open-url、Windows/Linux 的 second-instance 命令行、以及
+ * 冷启动时就写在 argv 里的情况。三条路都只把邀请码交给界面，界面自己再向云端预览项目。</p>
+ */
+
+/** 冷启动时链接比界面先到：先排队，界面报到后一起发。 */
+const pendingInviteCodes: string[] = [];
+
+/**
+ * 记下一个待发的邀请码，重复的不记两次。
+ *
+ * @param code 已校验过的邀请码。
+ */
+function queueInviteCode(code: string): void {
+  if (!pendingInviteCodes.includes(code)) pendingInviteCodes.push(code);
+}
+
+/**
+ * 把邀请码交给界面；应用或界面还没就绪就先记下。
+ *
+ * @param code 已校验过的邀请码。
+ */
+function deliverInviteCode(code: string): void {
+  if (isQuitting) return;
+  if (!isBootReady) {
+    queueInviteCode(code);
+    return;
+  }
+  activateMainWindow();
+  const target = mainWindow;
+  if (!target || target.isDestroyed() || !rendererReadyWebContentsIds.has(target.webContents.id)) {
+    queueInviteCode(code);
+    return;
+  }
+  target.webContents.send(INVITE_LINK_CHANNEL, code);
+}
+
+/**
+ * 读一条深链接：不是邀请链接就安静忽略。
+ *
+ * @param raw 命令行参数或 open-url 给出的原始链接。
+ */
+function acceptInviteLink(raw: unknown): void {
+  const code = parseInviteLink(raw);
+  if (code) deliverInviteCode(code);
+}
+
+/**
+ * 把排队中的邀请发给刚就绪的界面。
+ *
+ * @param target 刚报到的渲染进程。
+ */
+function flushPendingInviteCodes(target: WebContents): void {
+  if (!pendingInviteCodes.length) return;
+  for (const code of pendingInviteCodes.splice(0)) target.send(INVITE_LINK_CHANNEL, code);
+}
+
+/**
+ * 注册 memmy:// 协议。
+ *
+ * <p>打包后由 electron-builder 写进 Info.plist / 注册表；开发态要手动指到 Electron 本体与本次入口，
+ * 否则浏览器唤起的是另一个 Electron 应用。</p>
+ */
+function registerInviteProtocolClient(): void {
+  try {
+    if (app.isPackaged) {
+      app.setAsDefaultProtocolClient(INVITE_LINK_SCHEME);
+      return;
+    }
+    const entry = process.argv[1] ? resolve(process.argv[1]) : undefined;
+    app.setAsDefaultProtocolClient(INVITE_LINK_SCHEME, process.execPath, entry ? [entry] : []);
+  } catch (error) {
+    console.warn("[invite] could not register the memmy protocol:", error);
+  }
+}
+
 function triggerAgentSourceAutoInject(reason: string): void {
   const config = runtimeConfig;
   if (!config || agentSourceAutoInjectInFlight) {
@@ -5724,6 +6014,14 @@ const MACOS_PERMISSION_RELAUNCH_ARG = '--memmy-permission-relaunch';
 const wasMacPermissionRelaunch = process.platform === 'darwin' && process.argv.includes(MACOS_PERMISSION_RELAUNCH_ARG);
 const appProcessStartedAt = Date.now();
 
+// 邀请链接（memmy://invite/<code>）的三条来路：macOS 的 open-url、冷启动的 argv（在获得单实例锁后读）、
+// Windows/Linux 的 second-instance（在它的监听里读）。open-url 必须在 ready 之前就注册。
+registerInviteProtocolClient();
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  acceptInviteLink(url);
+});
+
 /**
  * Waits for the single-instance lock while a previous instance finishes exiting.
  *
@@ -5770,11 +6068,15 @@ function shouldIgnoreStaleReopenQuit(context: MacPermissionQuitContext | null): 
     && context.quitReason === "rlgo" && wasMacPermissionRelaunch);
 }
 
-app.on("second-instance", () => {
+app.on("second-instance", (_event, argv) => {
   if (isQuitting || isQuitCleanupInProgress) {
     // The other instance is a replacement waiting for this instance's lock; let it take over.
     return;
   }
+
+  // Windows 与 Linux 把 memmy://invite/... 当作参数交给已经在跑的实例；链接不该被下面的防抖吃掉。
+  const inviteCode = findInviteLink(argv);
+  if (inviteCode) deliverInviteCode(inviteCode);
 
   // A waiting replacement instance retries the lock every few hundred milliseconds and each retry
   // fires second-instance; debounce so a healthy primary does not keep re-stealing focus.
@@ -5862,6 +6164,10 @@ app.whenReady().then(async () => {
     app.quit();
     return;
   }
+
+  // 冷启动时链接就在 argv 里（Windows / Linux）：这时界面还没起来，先排进待发队列，界面报到后一起发。
+  const launchInviteCode = findInviteLink(process.argv);
+  if (launchInviteCode) queueInviteCode(launchInviteCode);
 
   const windowsUpgradeLockPath = resolveWindowsUpgradeRelayLockPath();
   if (windowsUpgradeLockPath && existsSync(windowsUpgradeLockPath)) {

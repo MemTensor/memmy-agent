@@ -9,6 +9,7 @@ import {
 } from "../lib/asr-live-transcription.js";
 import { createStreamLiveTranscriber } from "../lib/asr-stream-transcription.js";
 import { createPcmTap, PCM_TAP_SAMPLE_RATE, type PcmTap } from "../lib/audio-pcm-tap.js";
+import { repairWebmDuration } from "../lib/webm-duration.js";
 
 /**
  * Opus bitrate for recordings, mono.
@@ -172,9 +173,10 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-  const clockRef = useRef<{ activeSince: number | null; capturedMs: number } | null>(null);
+  const startedAtRef = useRef<number | null>(null);
   const tapRef = useRef<PcmTap | null>(null);
   const liveRef = useRef<AsrLiveTranscriber | null>(null);
+  const pausedRef = useRef(false);
   // Held in a ref so a caller passing fresh handler closures each render does
   // not restart the recording.
   const liveOptionsRef = useRef(options.live);
@@ -191,8 +193,9 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
     stopRecorderSilently(recorderRef.current);
     recorderRef.current = null;
     chunksRef.current = [];
-    clockRef.current = null;
+    startedAtRef.current = null;
     releaseLiveCapture();
+    pausedRef.current = false;
     stopStream(streamRef.current);
     streamRef.current = null;
     setStatus("idle");
@@ -245,7 +248,8 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
         }
       };
       recorder.start();
-      clockRef.current = { activeSince: performance.now(), capturedMs: 0 };
+      startedAtRef.current = Date.now();
+      pausedRef.current = false;
       const live = liveOptionsRef.current;
       if (live) {
         // The streaming relay is the path that shows words while they are
@@ -273,13 +277,11 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
           // Read through the ref, not the captured binding: when the stream
           // falls back to segmented HTTP mid-recording the ref is swapped, and
           // the audio has to follow it or the fallback never hears anything.
-          // The tap still delivers blocks while paused, so accept them only
-          // while the recording clock is running.
           onSamples: (samples) => {
-            if (clockRef.current?.activeSince != null) liveRef.current?.push(samples);
+            if (!pausedRef.current) liveRef.current?.push(samples);
           },
           onLevel: (level) => {
-            if (clockRef.current?.activeSince != null) liveOptionsRef.current?.onLevel?.(level);
+            if (!pausedRef.current) liveOptionsRef.current?.onLevel?.(level);
           }
         });
       }
@@ -289,7 +291,7 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
       stopRecorderSilently(recorderRef.current);
       recorderRef.current = null;
       chunksRef.current = [];
-      clockRef.current = null;
+      startedAtRef.current = null;
       releaseLiveCapture();
       stopStream(streamRef.current);
       streamRef.current = null;
@@ -301,20 +303,19 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
 
   const pause = useCallback(() => {
     const recorder = recorderRef.current;
-    const clock = clockRef.current;
-    if (!recorder || recorder.state !== "recording" || clock?.activeSince == null) return;
+    if (!recorder || recorder.state !== "recording") return;
     recorder.pause();
-    clock.capturedMs += performance.now() - clock.activeSince;
-    clock.activeSince = null;
+    // The tap keeps delivering blocks while paused; dropping them here keeps
+    // the paused stretch out of both the waveform and the live segments.
+    pausedRef.current = true;
     setStatus("paused");
   }, []);
 
   const resume = useCallback(() => {
     const recorder = recorderRef.current;
-    const clock = clockRef.current;
-    if (!recorder || recorder.state !== "paused" || !clock) return;
+    if (!recorder || recorder.state !== "paused") return;
     recorder.resume();
-    clock.activeSince = performance.now();
+    pausedRef.current = false;
     setStatus("recording");
   }, []);
 
@@ -382,11 +383,7 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
 
   /** Ends capture and the live pass, leaving the recording in hand. */
   async function stopCapture(recorder: MediaRecorder): Promise<AsrStoppedRecording> {
-    const clock = clockRef.current;
-    const durationMs = clock
-      ? Math.round(clock.capturedMs + (clock.activeSince === null ? 0 : performance.now() - clock.activeSince))
-      : undefined;
-    clockRef.current = null;
+    const durationMs = startedAtRef.current ? Math.max(0, Date.now() - startedAtRef.current) : undefined;
     const blob = await stopRecorder(recorder, chunksRef.current);
     recorderRef.current = null;
     // Close the tap before the final pass so no further live segments are
@@ -397,9 +394,12 @@ export function useAsrRecorder(asrClient?: AsrClient, options: AsrRecorderOption
     const live = liveRef.current;
     liveRef.current = null;
     await live?.finish();
+    pausedRef.current = false;
     stopStream(streamRef.current);
     streamRef.current = null;
-    return { recording: blob, recordingMimeType: blob.type || "audio/webm", durationMs };
+    startedAtRef.current = null;
+    const recording = await repairWebmDuration(blob, durationMs ?? 0);
+    return { recording, recordingMimeType: blob.type || "audio/webm", durationMs };
   }
 
   return {
@@ -573,10 +573,23 @@ function stopRecorder(recorder: MediaRecorder, chunks: Blob[]): Promise<Blob> {
       resolve(new Blob(chunks, { type: mimeType }));
       return;
     }
-    // stop() emits the final data before the stop event and lets Chromium
-    // finalize the WebM duration and seek information.
+    requestRecorderData(recorder);
     recorder.stop();
   });
+}
+
+/**
+ * Actively flushes the browser recording buffer.
+ *
+ * @param recorder The current MediaRecorder.
+ */
+function requestRecorderData(recorder: MediaRecorder): void {
+  if (recorder.state === "inactive") return;
+  try {
+    recorder.requestData();
+  } catch {
+    // Some browsers reject requestData around stop; the subsequent empty-Blob check surfaces a readable error.
+  }
 }
 
 /**

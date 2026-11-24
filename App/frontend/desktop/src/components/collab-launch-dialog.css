@@ -1,0 +1,764 @@
+/*
+ * The one-time project-collaboration announcement.
+ *
+ * Same shell as the History announcement (width, padding, radius, eyebrow, focus ring, Enter animation), kept under its
+ * own `collab-launch-*` names so the two cards can change independently. Inside the shell sits one moving stage and one
+ * caption line: everything below `.collab-launch-stage-frame` belongs to the animation in `collab-launch-motion.tsx`,
+ * which writes positions and opacities directly on these nodes.
+ */
+
+.collab-launch-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 4050;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: color-mix(in srgb, var(--color-text-ink) 30%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.collab-launch-dialog {
+  position: relative;
+  width: min(1000px, calc(100vw - 36px));
+  max-height: calc(100dvh - 36px);
+  /* 授权说明浮层从按钮上方弹出，需要越过卡片边界：这里不能裁切。 */
+  overflow: visible;
+  box-sizing: border-box;
+  padding: 34px 36px 34px;
+  border-radius: 26px;
+  background: var(--color-background-paper);
+  color: var(--color-text-ink);
+  box-shadow: 0 25px 100px color-mix(in srgb, var(--color-text-ink) 22%, transparent);
+  outline: none;
+  font-family: var(--font-sans);
+  animation: collab-launch-dialog-enter 180ms ease-out both;
+}
+
+.collab-launch-close {
+  position: absolute;
+  top: 24px;
+  right: 28px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-border-stone) 36%, var(--color-background-paper));
+  color: var(--color-text-ink);
+  cursor: pointer;
+}
+
+.collab-launch-close:hover {
+  background: color-mix(in srgb, var(--color-border-stone) 65%, var(--color-background-paper));
+}
+
+.collab-launch-eyebrow {
+  margin: 0 0 18px;
+  color: var(--color-icon-ember);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+/* 卡面不再有可见标题，但对话框仍要有一个可读的名字。 */
+.collab-launch-title-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---------- 舞台 ---------- */
+
+.collab-launch-stage-slot {
+  position: relative;
+}
+
+.collab-launch-stage-frame {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+}
+
+.collab-launch-stage-frame,
+.collab-launch-stage,
+.collab-launch-stage * {
+  box-sizing: border-box;
+}
+
+.collab-launch-stage {
+  /* 画面按 928×420 设计，窗口更窄时整块等比缩小，内部坐标一个都不动。 */
+  position: absolute;
+  top: 0;
+  /* 网格不会居中超宽的元件，所以自己把设计宽度摆正；缩放围绕顶边中点，画面就不会跑偏。 */
+  left: calc(50% - 464px);
+  width: 928px;
+  height: 420px;
+  overflow: hidden;
+  isolation: isolate;
+  border-radius: 20px;
+  background: radial-gradient(90% 120% at 50% 0%, #f9fcfb 0%, #f0f7f5 55%, #e8f2ef 100%);
+  transform: scale(var(--collab-launch-stage-scale, 1));
+  transform-origin: top center;
+}
+
+.collab-launch-grid {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle, rgba(17, 29, 28, 0.075) 1px, transparent 1.2px);
+  background-size: 24px 24px;
+  background-position: 8px 6px;
+  mask-image: radial-gradient(75% 85% at 50% 50%, #000 0%, transparent 100%);
+  -webkit-mask-image: radial-gradient(75% 85% at 50% 50%, #000 0%, transparent 100%);
+}
+
+/* 转述越来越频繁时压在画面底下的暖色 */
+.collab-launch-heat {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(58% 78% at 50% 46%, rgba(240, 130, 78, 0.24), rgba(240, 130, 78, 0) 74%);
+}
+
+/* 镜头：所有元件都放在 world 里，由脚本整体平移和缩放。不提升为独立图层，放大时文字保持清晰。 */
+.collab-launch-world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  width: 928px;
+  height: 420px;
+  opacity: 0;
+  transform-origin: 0 0;
+}
+
+.collab-launch-wires {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 928px;
+  height: 420px;
+  overflow: visible;
+}
+
+.collab-launch-wires path,
+.collab-launch-wires rect,
+.collab-launch-wires circle {
+  fill: none;
+}
+
+.collab-launch-link {
+  stroke: color-mix(in srgb, var(--color-text-ink) 16%, transparent);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.collab-launch-trunk {
+  stroke: var(--color-action-sky);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.collab-launch-lane {
+  stroke: var(--color-icon-ember);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-dasharray: 2 7;
+}
+
+.collab-launch-lane--1,
+.collab-launch-lane--2 {
+  stroke-width: 1.4;
+}
+
+.collab-launch-ring {
+  stroke: var(--color-action-sky);
+  stroke-width: 1.5;
+  stroke-dasharray: 1;
+}
+
+.collab-launch-wires .collab-launch-ring-fill {
+  fill: color-mix(in srgb, var(--color-action-sky) 7.5%, transparent);
+  stroke: none;
+}
+
+/* 连线上流动的短线段 */
+.collab-launch-flow {
+  stroke: color-mix(in srgb, var(--color-text-ink) 50%, transparent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  opacity: 0;
+}
+
+.collab-launch-flow--mint {
+  stroke: var(--color-action-sky-hover);
+  stroke-width: 2.4;
+}
+
+.collab-launch-ripple,
+.collab-launch-project-ripple {
+  stroke: var(--color-action-sky);
+  stroke-width: 1.6;
+  opacity: 0;
+}
+
+.collab-launch-mini-curve {
+  stroke: var(--color-action-sky);
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  opacity: 0;
+}
+
+.collab-launch-mini-tile {
+  stroke: color-mix(in srgb, var(--color-text-ink) 18%, transparent);
+  stroke-width: 1;
+}
+
+.collab-launch-mini-who,
+.collab-launch-mini-ring,
+.collab-launch-mini-flow {
+  opacity: 0;
+}
+
+/* ---------- 画面里的元件 ---------- */
+
+.collab-launch-node {
+  position: absolute;
+  left: 0;
+  top: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.collab-launch-person {
+  z-index: 5;
+  line-height: 0;
+  border-radius: 50%;
+  box-shadow: 0 6px 16px rgba(19, 74, 78, 0.12);
+}
+
+.collab-launch-agent {
+  z-index: 5;
+}
+
+.collab-launch-tile {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: #fff;
+  border: 1px solid rgba(17, 29, 28, 0.08);
+  box-shadow: 0 8px 20px rgba(19, 74, 78, 0.11);
+}
+
+.collab-launch-tile img {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+}
+
+.collab-launch-agent--small .collab-launch-tile {
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+}
+
+.collab-launch-agent--small .collab-launch-tile img {
+  width: 24px;
+  height: 24px;
+}
+
+.collab-launch-agent--hub {
+  z-index: 8;
+}
+
+.collab-launch-agent--hub .collab-launch-tile {
+  width: 50px;
+  height: 50px;
+  border-radius: 15px;
+}
+
+.collab-launch-name {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 6px);
+  translate: -50% 0;
+  transform-origin: 50% 0;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--color-text-ink) 56%, transparent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 14px;
+}
+
+.collab-launch-halo {
+  z-index: 3;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 2px solid var(--color-icon-ember);
+}
+
+.collab-launch-halo--sq {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  border-color: var(--color-action-sky);
+}
+
+/* 一页原始会话 */
+.collab-launch-session-page {
+  z-index: 6;
+  width: 34px;
+  height: 26px;
+  padding: 6px 6px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid var(--color-border-stone);
+  box-shadow: 0 2px 6px rgba(19, 74, 78, 0.09);
+}
+
+.collab-launch-session-page i {
+  display: block;
+  height: 2.5px;
+  border-radius: 2px;
+  background: #dbe7e4;
+}
+
+.collab-launch-session-page i:first-child {
+  width: 58%;
+}
+
+.collab-launch-session-page i:last-child {
+  width: 72%;
+}
+
+.collab-launch-session-page--original {
+  z-index: 3;
+}
+
+.collab-launch-stack-label {
+  z-index: 3;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--color-text-ink) 50%, transparent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.collab-launch-chip {
+  z-index: 7;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 11px;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.collab-launch-chip--ember {
+  background: #fff6ee;
+  color: #b5612b;
+  border: 1px solid #f7b98f;
+  box-shadow: 0 4px 10px rgba(245, 158, 107, 0.18);
+}
+
+.collab-launch-chip--mint {
+  background: #ecf9f5;
+  color: #23786a;
+  border: 1px solid #8fd5c6;
+  box-shadow: 0 4px 10px rgba(58, 168, 147, 0.16);
+}
+
+.collab-launch-chip--count {
+  height: 28px;
+  padding: 0 13px;
+  background: #fff;
+  font-size: 12.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 人工转述计数：这一段的视觉重心。颜色由脚本按次数从橙到红，Memmy 出现时回落到 0 并转绿。 */
+.collab-launch-tally {
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.collab-launch-tally small {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.collab-launch-tally div {
+  position: relative;
+  margin-top: 2px;
+}
+
+.collab-launch-tally__number {
+  display: block;
+  text-align: center;
+  transform-origin: 50% 62%;
+  font-size: 78px;
+  font-weight: 780;
+  line-height: 82px;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+.collab-launch-tally span {
+  position: absolute;
+  left: calc(100% + 7px);
+  bottom: 15px;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.collab-launch-idle {
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 19px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(17, 29, 28, 0.12);
+  color: rgba(17, 29, 28, 0.52);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.collab-launch-tag {
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid #8fd5c6;
+  color: #23786a;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.collab-launch-project {
+  z-index: 4;
+  width: 156px;
+  height: 116px;
+  padding: 14px 19px;
+  border-radius: 18px;
+  background: #fff;
+  border: 1.5px solid var(--color-action-sky);
+  box-shadow: 0 14px 34px rgba(19, 74, 78, 0.14);
+}
+
+.collab-launch-project__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 18px;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.collab-launch-project__head img {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+
+.collab-launch-project__slots {
+  display: grid;
+  grid-template-columns: repeat(3, 34px);
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.collab-launch-project__slots s {
+  display: block;
+  height: 26px;
+  border-radius: 6px;
+  background: #f1f7f5;
+}
+
+.collab-launch-bubble {
+  z-index: 8;
+  padding: 7px 12px;
+  border-radius: 13px;
+  background: #fff;
+  border: 1px solid rgba(17, 29, 28, 0.07);
+  box-shadow: 0 8px 22px rgba(19, 74, 78, 0.14);
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 16px;
+}
+
+.collab-launch-bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  width: 9px;
+  height: 9px;
+  translate: -50% 0;
+  rotate: 45deg;
+  background: #fff;
+  border-right: 1px solid rgba(17, 29, 28, 0.07);
+  border-bottom: 1px solid rgba(17, 29, 28, 0.07);
+}
+
+.collab-launch-loader {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.collab-launch-loader i {
+  width: 3.5px;
+  height: 3.5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: collab-launch-blink 900ms ease-in-out infinite;
+}
+
+.collab-launch-loader i:nth-child(2) {
+  animation-delay: 150ms;
+}
+
+.collab-launch-loader i:nth-child(3) {
+  animation-delay: 300ms;
+}
+
+/* ---------- 进度 ---------- */
+
+/* 四段对应四幕，按一下就从那一幕的第一帧重新播。 */
+.collab-launch-progress {
+  position: absolute;
+  left: 22px;
+  bottom: 18px;
+  z-index: 9;
+  display: flex;
+  gap: 5px;
+}
+
+.collab-launch-progress__segment {
+  position: relative;
+  display: block;
+  width: 26px;
+  height: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.collab-launch-progress__segment::before,
+.collab-launch-progress__segment::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.collab-launch-progress__segment::before {
+  width: 100%;
+  background: color-mix(in srgb, var(--color-text-ink) 12%, transparent);
+}
+
+.collab-launch-progress__segment::after {
+  width: calc(var(--p, 0) * 100%);
+  background: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
+}
+
+.collab-launch-progress__segment:hover::before,
+.collab-launch-progress__segment:focus-visible::before {
+  background: color-mix(in srgb, var(--color-text-ink) 22%, transparent);
+}
+
+.collab-launch-progress__segment:hover::after,
+.collab-launch-progress__segment:focus-visible::after {
+  background: var(--color-text-ink);
+}
+
+.collab-launch-progress__segment:focus-visible {
+  outline: 2px solid var(--color-action-sky);
+  outline-offset: 2px;
+}
+
+/* ---------- 字幕条 ---------- */
+
+.collab-launch-caption-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  height: 64px;
+  margin-top: 18px;
+}
+
+.collab-launch-caption {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.collab-launch-caption__main {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 28px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.collab-launch-caption__sub {
+  margin: 6px 0 0;
+  color: color-mix(in srgb, var(--color-text-ink) 62%, transparent);
+  font-size: 14.5px;
+  line-height: 22px;
+  white-space: nowrap;
+  animation: collab-launch-caption-sub-in 560ms ease-out 260ms both;
+}
+
+/* 换成另一段时整块重挂，逐字浮出。 */
+.collab-launch-caption__main span {
+  display: inline-block;
+  animation: collab-launch-caption-in 520ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation-delay: calc(var(--i) * 20ms);
+}
+
+.collab-launch-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.collab-launch-primary {
+  min-width: 100px;
+  min-height: 39px;
+  padding: 8px 18px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--color-text-ink);
+  color: var(--color-background-paper);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.collab-launch-primary:hover {
+  background: var(--color-action-sky);
+  color: #fff;
+}
+
+.collab-launch-dialog button:focus-visible {
+  outline: 2px solid var(--color-action-sky);
+  outline-offset: 3px;
+}
+
+@keyframes collab-launch-dialog-enter {
+  from {
+    opacity: 0.6;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes collab-launch-caption-in {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+  }
+}
+
+@keyframes collab-launch-caption-sub-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes collab-launch-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .collab-launch-dialog,
+  .collab-launch-caption__main span,
+  .collab-launch-caption__sub {
+    animation: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .collab-launch-dialog {
+    padding: 26px 22px 18px;
+    border-radius: 20px;
+  }
+
+  .collab-launch-eyebrow {
+    margin-bottom: 14px;
+  }
+
+  .collab-launch-close {
+    top: 18px;
+    right: 18px;
+  }
+
+  /* 窄窗口里字幕条改成上下两行，按钮另起一行。 */
+  .collab-launch-caption-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+    height: auto;
+    margin-top: 16px;
+  }
+
+  .collab-launch-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}

@@ -61,7 +61,10 @@ export function createHttpPluginsClient(config: RuntimeConfig): PluginsClient {
   return {
     catalog() { return requestJson({ config, path: "/api/v1/plugins/catalog", schema: PluginCatalogSchema }); },
     list() {
-      return requestJson({ config, path: pluginEndpointPaths.list, schema: InstalledPluginsSchema });
+      // This endpoint is authoritative lifecycle state. Never let the browser
+      // reuse an older `enabling` response while the Host has already committed
+      // the plugin as active.
+      return requestJson({ config, path: pluginEndpointPaths.list, init: { cache: "no-store" }, schema: InstalledPluginsSchema });
     },
     install(pluginId, version) {
       return requestJson({

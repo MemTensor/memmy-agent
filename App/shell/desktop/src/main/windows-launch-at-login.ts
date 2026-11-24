@@ -39,9 +39,9 @@ export type WindowsPathExists = (path: string) => boolean;
 /**
  * Resolves the command Windows should run after the user signs in.
  *
- * Installed builds use the stable launcher created by the NSIS package so custom-drive
- * upgrades follow the same recovery-aware launch chain as Start menu shortcuts. A direct
- * executable fallback keeps older or partially repaired installations usable.
+ * Installed builds use the PowerShell launcher created by NSIS, including on
+ * Windows installations without the optional VBScript host. A direct executable
+ * fallback keeps older or partially repaired installations usable.
  */
 export const resolveWindowsLoginItemCommand = (
   environment: WindowsLaunchAtLoginEnvironment,
@@ -53,19 +53,20 @@ export const resolveWindowsLoginItemCommand = (
     return { path: environment.executablePath, args: [] };
   }
 
-  const launcherPath = windowsPath.join(localAppDataPath, "Memmy", "launcher", "MemmyLauncher.vbs");
-  if (!pathExists(launcherPath)) {
+  const launcherPath = windowsPath.join(localAppDataPath, "Memmy", "launcher", "MemmyLauncher.ps1");
+  const powerShellPath = windowsPath.join(systemRootPath, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  if (!pathExists(launcherPath) || !pathExists(powerShellPath)) {
     return { path: environment.executablePath, args: [] };
   }
 
   return {
-    path: windowsPath.join(systemRootPath, "System32", "wscript.exe"),
+    path: powerShellPath,
     // Electron formats each argv element for the Run value; literal quotes would be escaped again.
-    args: [launcherPath]
+    args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", launcherPath]
   };
 };
 
-/** Repairs the old double-quoted launcher entry without enabling disabled startup. */
+/** Migrates only this app's old launchers, preserving Windows' enabled/disabled state. */
 export const repairWindowsLaunchAtLogin = (
   application: WindowsLoginItemApplication,
   environment: WindowsLaunchAtLoginEnvironment,
@@ -75,29 +76,33 @@ export const repairWindowsLaunchAtLogin = (
     return false;
   }
   const command = resolveWindowsLoginItemCommand(environment, pathExists);
-  if (command.args.length !== 1) {
+  if (command.args.length === 0) {
     return false;
   }
 
-  const legacyCommand = { ...command, args: [`"${command.args[0]}"`] };
-  const settings = application.getLoginItemSettings(legacyCommand);
-  // openAtLogin compares the exact current app ID's HKCU Run value. The aggregate
-  // executableWillLaunchAtLogin also includes unrelated entries using wscript.exe.
-  if (!settings.openAtLogin) {
-    return false;
+  const legacyPath = windowsPath.join(environment.localAppDataPath!.trim(), "Memmy", "launcher", "MemmyLauncher.vbs");
+  const legacyHost = windowsPath.join(environment.systemRootPath!.trim(), "System32", "wscript.exe");
+  // Do not require the old .vbs to exist: the new installer already removes it.
+  const legacyCommands = [
+    { path: legacyHost, args: [legacyPath] },
+    { path: legacyHost, args: [`"${legacyPath}"`] },
+    { ...command, args: [...command.args.slice(0, -1), `"${command.args.at(-1)}"`] }
+  ];
+  for (const legacyCommand of legacyCommands) {
+    const settings = application.getLoginItemSettings(legacyCommand);
+    // This is the exact app ID's Run value, not the host's aggregate startup state.
+    if (!settings.openAtLogin) continue;
+    const legacyItem = settings.launchItems.find((item) => (
+      item.name === "cn.memtensor.memmy"
+      && item.scope === "user"
+      && normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(legacyCommand.path)
+      && matchesElectronLoginArguments(item.args, legacyCommand.args)
+    ));
+    if (!legacyItem) continue;
+    application.setLoginItemSettings({ ...command, openAtLogin: true, enabled: legacyItem.enabled });
+    return true;
   }
-  const legacyItem = settings.launchItems.find((item) => (
-    item.name === "cn.memtensor.memmy"
-    && item.scope === "user"
-    && normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(legacyCommand.path)
-    && item.args.length === 1
-    && item.args[0] === legacyCommand.args[0]
-  ));
-  if (!legacyItem) {
-    return false;
-  }
-  application.setLoginItemSettings({ ...command, openAtLogin: true, enabled: legacyItem.enabled });
-  return true;
+  return false;
 };
 
 /** Reads effective matching entries while retaining the app's own registration as the setting gate. */
@@ -118,11 +123,10 @@ export const getWindowsLaunchAtLogin = (
 
   const matchingItems = settings.launchItems.filter((item) => (
     normalizeWindowsCommandPath(item.path) === normalizeWindowsCommandPath(command.path)
-    && item.args.length === command.args.length
-    && item.args.every((argument, index) => argument === command.args[index])
+    && matchesElectronLoginArguments(item.args, command.args)
   ));
   // Aliases can have their own StartupApproved state. Entry ordering must not
-  // hide an enabled command, and wscript's aggregate includes unrelated scripts.
+  // hide an enabled command, and PowerShell's aggregate includes unrelated scripts.
   return matchingItems.some((item) => item.enabled);
 };
 
@@ -147,3 +151,12 @@ export const setWindowsLaunchAtLogin = (
 };
 
 const normalizeWindowsCommandPath = (path: string): string => path.replaceAll("/", "\\").toLowerCase();
+
+/** Electron's Chromium parser omits switch tokens from launchItems[].args. */
+const matchesElectronLoginArguments = (actual: string[], expected: string[]): boolean => {
+  const sameArguments = (argumentsToMatch: string[]) => actual.length === argumentsToMatch.length
+    && actual.every((argument, index) => argument === argumentsToMatch[index]);
+  // openAtLogin above still gates on this app ID's complete raw Run command.
+  // Aliases can only be compared using the argument representation Electron exposes.
+  return sameArguments(expected) || sameArguments(expected.filter(argument => !argument.startsWith("-")));
+};
