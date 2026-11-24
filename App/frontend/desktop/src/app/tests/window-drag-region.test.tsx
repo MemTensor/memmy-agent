@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  COLLAB_DRAG_EXCLUSION_SELECTOR,
   KNOWLEDGE_DRAG_EXCLUSION_SELECTOR,
   resolveObservedWindowDragExclusionSelector,
   resolveWindowDragExclusionSelector,
@@ -31,6 +32,8 @@ describe("WindowDragRegion", () => {
     );
     expect(resolveWindowDragExclusionSelector("/settings")).toBeUndefined();
     expect(resolveWindowDragExclusionSelector("/tools")).toBe(TOOLS_DRAG_EXCLUSION_SELECTOR);
+    // 看板头部的按钮上半截在 46px 拖拽条里，没有这层排除就点不到。
+    expect(resolveWindowDragExclusionSelector("/collab")).toBe(COLLAB_DRAG_EXCLUSION_SELECTOR);
     expect(resolveObservedWindowDragExclusionSelector(undefined)).toBe(
       WINDOWS_TITLEBAR_DRAG_EXCLUSION_SELECTOR
     );

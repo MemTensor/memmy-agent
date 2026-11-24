@@ -17,7 +17,8 @@ describe("RuntimeApp bootstrap loading", () => {
   it("includes machine-level guidance completion in initial window routing", () => {
     const source = readFileSync(resolve(__dirname, "../..", "app.tsx"), "utf8");
 
-    expect(source).toContain("const guidanceCompleted = readGuidanceCompleted(");
+    // `let` because boot adopts the cloud hasFinishedGuide into the local mark before routing.
+    expect(source).toMatch(/(?:const|let) guidanceCompleted = readGuidanceCompleted\(/u);
     expect(source).toContain("accountSession,\n          guidanceCompleted,\n          modelConfig");
   });
 

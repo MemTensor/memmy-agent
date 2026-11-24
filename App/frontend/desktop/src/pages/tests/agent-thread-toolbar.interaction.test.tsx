@@ -16,7 +16,12 @@ const messages: AgentChatMessage[] = [
   { id: "u2", role: "user", content: "Run deploy\nagain" },
 ];
 
-function Harness(props: { panelOpen: boolean; onOpenPanel: () => void; onJump: (id: string) => void; onNavigate: () => void }) {
+function Harness(props: {
+  panelOpen: boolean;
+  onOpenPanel: () => void;
+  onJump: (id: string) => void;
+  onNavigate: () => void;
+}) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   return (
     <>
@@ -101,6 +106,15 @@ describe("AgentThreadToolbar", () => {
     act(() => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     expect(document.querySelector(".thread-search")).toBeNull();
     expect(document.querySelector('[aria-label="对话内搜索（⌘F / Ctrl+F）"]')).not.toBeNull();
+  });
+
+  it("shows only the session title, with no project breadcrumb", () => {
+    render();
+    expect(document.querySelector(".agent-conversation-crumbs")).toBeNull();
+    expect(document.querySelector("[data-window-drag-exclusion=\"thread-conversation-crumbs\"]")).toBeNull();
+    expect(document.querySelector(".agent-conversation-title")?.textContent).toBe("Deploy task");
+    // 标题和操作仍在同一行。
+    expect(document.querySelector(".agent-conversation-title")?.nextElementSibling?.classList.contains("thread-toolbar__actions")).toBe(true);
   });
 
   it("jumps to a prompt from the history popover", () => {

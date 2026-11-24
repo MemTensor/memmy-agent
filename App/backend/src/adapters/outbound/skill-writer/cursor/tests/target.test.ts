@@ -766,3 +766,11 @@ async function runNodeHook(scriptPath: string, input: string, homeDirectory?: st
     stderr: Buffer.concat(stderr).toString("utf8")
   };
 }
+
+function readHooksFile(rootDirectory: string): {
+  hooks: Record<string, Array<{ command: string }>>;
+} {
+  return JSON.parse(readFileSync(join(rootDirectory, "hooks.json"), "utf8")) as {
+    hooks: Record<string, Array<{ command: string }>>;
+  };
+}

@@ -28,12 +28,12 @@ const mocks = vi.hoisted(() => {
       return transcription;
     })
   };
-  return { recorder, resolveTranscription: (value: Parameters<NonNullable<typeof resolveTranscription>>[0]) => resolveTranscription?.(value) };
+  return { recorder, live: undefined as undefined | { onError(error: Error): void; onLine(line: { startMs: number; endMs: number; text: string }): void }, resolveTranscription: (value: Parameters<NonNullable<typeof resolveTranscription>>[0]) => resolveTranscription?.(value) };
 });
 
 vi.mock("../asr-recorder.js", async () => {
   const actual = await vi.importActual<typeof import("../asr-recorder.js")>("../asr-recorder.js");
-  return { ...actual, useAsrRecorder: () => mocks.recorder };
+  return { ...actual, useAsrRecorder: (_client: unknown, options: { live: typeof mocks.live }) => { mocks.live = options.live; return mocks.recorder; } };
 });
 
 function Harness(props: { onSession(session: RecordingEntrySession): void; allowed?: boolean; asrClient?: { transcribe: ReturnType<typeof vi.fn> } }) {
@@ -95,6 +95,33 @@ describe("useRecordingEntry recording retention", () => {
     await act(async () => { await current.remove?.(current.recordings[0]!); });
     expect(current.recordings).toHaveLength(0);
     expect(current.live).toBeNull();
+  });
+
+  it("separates a recoverable transcription warning from errors and clears it after recovery", async () => {
+    await act(async () => root.render(<I18nProvider language="zh-CN">
+      <Harness onSession={(session) => { current = session; }} />
+    </I18nProvider>));
+    act(() => mocks.live!.onError(new Error("Temporary transcription failure")));
+    expect(current.error).toBeNull();
+    expect(current.liveWarning).toBe("Temporary transcription failure");
+    act(() => current.back());
+    expect(current.liveWarning).toBe("Temporary transcription failure");
+    act(() => mocks.live!.onLine({ startMs: 0, endMs: 1000, text: "Recovered" }));
+    expect(current.liveWarning).toBeNull();
+  });
+
+  it("leaves the previously opened transcript when a new recording starts", async () => {
+    mocks.recorder.status = "idle";
+    mocks.recorder.isRecording = false;
+    await act(async () => root.render(<I18nProvider language="zh-CN">
+      <Harness onSession={(session) => { current = session; }} />
+    </I18nProvider>));
+    await act(async () => current.open({ id: "old", title: "Old recording", recordedAt: "2026-11-18T00:00:00Z",
+      durationMs: 1000, speakerCount: 1, transcript: { text: "Old text", segments: [] }, audioUrl: null }));
+    expect(current.opened?.id).toBe("old");
+    await act(async () => current.start());
+    expect(current.view).toBe("live");
+    expect(current.opened).toBeNull();
   });
 
   it("does not start or upload a recording after account access is removed", async () => {

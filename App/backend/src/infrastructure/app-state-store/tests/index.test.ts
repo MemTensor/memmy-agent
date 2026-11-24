@@ -131,8 +131,8 @@ describe("app state store migrations", () => {
     expect(settings.menuBarIconEnabled).toBe(true);
     expect(settings.stopMemoryServiceOnExit).toBe(false);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(38);
-    expect(secondMigrationCount).toBe(38);
+    expect(firstMigrationCount).toBe(39);
+    expect(secondMigrationCount).toBe(39);
   });
 
   it("preserves the authenticated account when upgrading the legacy 0007 database", () => {

@@ -1,4 +1,4 @@
-import { notifyPluginChange } from "../lib/plugin-change-event.js";
+import { notifyPluginChange, PLUGIN_CHANGE_EVENT } from "../lib/plugin-change-event.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { InstalledPlugin, PluginCatalogEntry } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
@@ -18,7 +18,17 @@ import { resolveLanguage } from "../i18n/messages.js";
 import { officialPluginCatalog } from "./official-plugin-catalog.js";
 
 /** Live marketplace: installed state is always read back from the plugin host. */
-export function PluginMarketplace() {
+export function PluginMarketplace({ showHeader = true, showToolbar = true, filter, search, onFilterChange, onSearchChange,
+  onInstalledCountChange, refreshRequestId = 0 }: {
+  showHeader?: boolean;
+  showToolbar?: boolean;
+  filter?: "all" | "installed";
+  search?: string;
+  onFilterChange?: (filter: "all" | "installed") => void;
+  onSearchChange?: (value: string) => void;
+  onInstalledCountChange?: (count: number) => void;
+  refreshRequestId?: number;
+}) {
   const { clients } = useApiClients();
   const { state, dispatch } = useAppState();
   const { t, language } = useTranslation();
@@ -34,17 +44,18 @@ export function PluginMarketplace() {
   const [officialModelReady, setOfficialModelReady] = useState<boolean | undefined>(undefined);
   const busy = useRef(false);
   const generation = useRef(0);
+  const previousRefreshRequestId = useRef(refreshRequestId);
   const hostCompletion = useRef<{
     matches: (plugins: InstalledPlugin[]) => boolean;
     resolve: (failed: boolean) => void;
     failed: (plugins: InstalledPlugin[]) => boolean;
   } | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (options: { preserveActionError?: boolean } = {}) => {
     if (!clients) return;
     const current = ++generation.current;
     setLoading(true);
-    setActionError(null);
+    if (!options.preserveActionError) setActionError(null);
     let installedRead = 0;
     async function loadInstalled() {
       const read = ++installedRead;
@@ -98,6 +109,22 @@ export function PluginMarketplace() {
     void refresh();
     const interval = window.setInterval(() => { if (!busy.current) void refresh(); }, 30_000);
     return () => { generation.current += 1; window.clearInterval(interval); };
+  }, [refresh]);
+
+  useEffect(() => {
+    if (refreshRequestId === previousRefreshRequestId.current) return;
+    previousRefreshRequestId.current = refreshRequestId;
+    void refresh();
+  }, [refreshRequestId, refresh]);
+
+  // Plugin lifecycle can finish in the Host after the original enable request
+  // has returned (or after another surface changed it).  The marketplace must
+  // refresh on the local change signal instead of waiting for navigation or
+  // the 30-second background refresh interval.
+  useEffect(() => {
+    const onPluginChange = () => { void refresh({ preserveActionError: true }); };
+    window.addEventListener(PLUGIN_CHANGE_EVENT, onPluginChange);
+    return () => window.removeEventListener(PLUGIN_CHANGE_EVENT, onPluginChange);
   }, [refresh]);
 
   const hasHostTransition = installed.some(plugin => plugin.state === "enabling" || plugin.state === "disabling" || plugin.update);
@@ -173,6 +200,14 @@ export function PluginMarketplace() {
   return <>
     {modelError && <p role="alert" className="mb-4 text-sm text-text-ink/60">{modelError}</p>}
     <PluginMarketplaceSection
+    showHeader={showHeader}
+    showToolbar={showToolbar}
+    showFilter={showHeader}
+    filter={filter}
+    search={search}
+    onFilterChange={onFilterChange}
+    onSearchChange={onSearchChange}
+    onInstalledCountChange={onInstalledCountChange}
     plugins={plugins}
     loading={loading}
     error={error ?? catalogError}
@@ -210,13 +245,19 @@ export function PluginMarketplace() {
     onUninstall={(plugin) => void mutate(plugin, () => clients!.plugins.uninstall(plugin.id),
       records => !records.some(record => record.id === plugin.id))}
     onAddToChat={(plugin) => {
-      const command = pluginComposerCommand(plugin);
-      if (command) {
-        const scopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+      const scopeKey = agentChatScopeKey(state.agent.currentChatId, state.agent.newChatRequestId);
+      if (plugin.id === "office") {
         dispatch(agentActions.composerDraftUpdated(
-          scopeKey,
-          addPluginCommandToDraft(command, state.agent.composerDraftsByScope[scopeKey] ?? "")
+          scopeKey, t("plugins.ui.officeTryItPrompt")
         ));
+      } else {
+        const command = pluginComposerCommand(plugin);
+        if (command) {
+          dispatch(agentActions.composerDraftUpdated(
+            scopeKey,
+            addPluginCommandToDraft(command, state.agent.composerDraftsByScope[scopeKey] ?? "")
+          ));
+        }
       }
       dispatch(appActions.navigate("/main"));
     }}

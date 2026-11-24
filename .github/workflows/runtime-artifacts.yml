@@ -57,6 +57,10 @@ jobs:
           architecture: ${{ matrix.arch }}
           cache: npm
       - name: Install build dependencies
+        env:
+          # The CUDA execution-provider artifact onnxruntime-node downloads is no longer published;
+          # Memory's embedder pins device: "cpu", so the bundled CPU binaries suffice.
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
         run: npm ci --no-audit --no-fund
       - name: Install Agent build dependencies
         if: github.event_name == 'workflow_dispatch' && inputs.runtime != 'memory'

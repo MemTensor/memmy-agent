@@ -1,5 +1,5 @@
-import { RecordingEntryPage, type RecordingEntrySession } from "./recording-entry.js";
-import { InterviewRecordingPanel, type RecordingPanelSession } from "./interview-recording-panel.js";
+import { PluginRecordingPage, RecordingEntryPage, type RecordingEntrySession } from "./recording-entry.js";
+import type { RecordingPanelSession } from "./recording-transcript.js";
 import {
   useCallback,
   useEffect,
@@ -13,7 +13,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
-import { AudioLines, LockKeyhole, Copy, Globe2, Maximize2, Minimize2, PanelRight, Pin, PinOff, Plus, X } from "lucide-react";
+import { AudioLines, LockKeyhole, Globe2, Maximize2, Minimize2, PanelRight, Pin, PinOff, Plus, X } from "lucide-react";
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { ThreadFileIcon } from "./agent-thread-file-icon.js";
@@ -70,7 +70,10 @@ function readStoredWidths(): StoredWidths {
     const parsed = JSON.parse(window.localStorage.getItem(THREAD_PANEL_WIDTH_STORAGE_KEY) ?? "null") as Partial<StoredWidths> | null;
     return {
       sidebar: typeof parsed?.sidebar === "number" && Number.isFinite(parsed.sidebar) ? parsed.sidebar : THREAD_PANEL_MIN_WIDTH,
-      content: typeof parsed?.content === "number" && Number.isFinite(parsed.content) ? parsed.content : null,
+      // An earlier open before the workspace measured could save the 360px
+      // fallback as the preview preference. Let the measured layout choose its width.
+      content: typeof parsed?.content === "number" && Number.isFinite(parsed.content)
+        && parsed.content > THREAD_PANEL_MIN_WIDTH ? parsed.content : null,
     };
   } catch {
     return { sidebar: THREAD_PANEL_MIN_WIDTH, content: null };
@@ -207,12 +210,17 @@ export function useAgentThreadPanel(options: { scopeKey: string; containerRef: R
   }, [ownerKey, updateSession, cancelCloseTimer]);
 
   const ensureContentWidth = useCallback(() => {
+    if (containerWidthRef.current <= 0) return;
     const minimum = threadPanelContentWidth(containerWidthRef.current);
     setWidths((current) => {
       const content = Math.max(current.content ?? 0, minimum);
       return content === current.content ? current : { ...current, content };
     });
   }, []);
+
+  useEffect(() => {
+    if (hasContent && widths.content === null && containerWidth > 0) ensureContentWidth();
+  }, [hasContent, widths.content, containerWidth, ensureContentWidth]);
 
   const openTab = useCallback((tab: ThreadPanelTab) => {
     cancelCloseTimer();
@@ -291,7 +299,7 @@ export function useAgentThreadPanel(options: { scopeKey: string; containerRef: R
 }
 
 type BrowserTab = { id: number; guestId?: number; url?: string; title?: string };
-type BrowserSession = { open: boolean; mounted: boolean; tabs: BrowserTab[]; activeId: number; copiedId: number | null };
+type BrowserSession = { open: boolean; mounted: boolean; tabs: BrowserTab[]; activeId: number };
 type BrowserTabRequest = { url: string; scopeKey?: string; sourceGuestId?: number };
 
 /** Memmy's unused new tab is about:blank, the same role as Chrome's new-tab page. */
@@ -299,7 +307,7 @@ function isUnusedNewTab(tab: BrowserTab): boolean {
   return !tab.url || isBlankBrowserUrl(tab.url);
 }
 const EMPTY_BROWSER_SESSION: BrowserSession = {
-  open: false, mounted: false, tabs: [{ id: 1, url: '' }], activeId: 1, copiedId: null,
+  open: false, mounted: false, tabs: [{ id: 1, url: '' }], activeId: 1,
 };
 
 export function AgentThreadPanel(props: {
@@ -345,7 +353,7 @@ export function AgentThreadPanel(props: {
   browserSessionsRef.current = browserSessions;
   const browserSession = browserSessions.get(ownerKey) ?? EMPTY_BROWSER_SESSION;
   const { open: browserOpen, mounted: browserMounted, tabs: browserTabs,
-    activeId: activeBrowserTabId, copiedId: copiedBrowserTabId } = browserSession;
+    activeId: activeBrowserTabId } = browserSession;
   const recordingVisible = panel.visible && panel.phase === "open" && !browserOpen && activeTab?.id === "recording:main";
   useEffect(() => props.onRecordingVisibleChange?.(recordingVisible), [props.onRecordingVisibleChange, recordingVisible]);
   // The overview list is hidden behind either a file preview or a browser tab.
@@ -410,13 +418,6 @@ export function AgentThreadPanel(props: {
       if (tab) { closeBrowserTab(tab.id, owner); break; }
     }
   }), [closeBrowserTab]);
-  const copyBrowserTabMention = useCallback(async (guestId: number, id: number) => {
-    try {
-      if (!window.memmy?.copyEmbeddedBrowserTabMention) return;
-      await window.memmy.copyEmbeddedBrowserTabMention(guestId);
-      updateBrowser(ownerKey, state => ({ ...state, copiedId: id }));
-    } catch { updateBrowser(ownerKey, state => ({ ...state, copiedId: null })); }
-  }, [ownerKey, updateBrowser]);
   const requestOwner = useCallback((request?: { scopeKey?: string; sourceGuestId?: number }): string | null => {
     const explicit = request?.scopeKey ? panel.resolveScopeOwner(request.scopeKey) : null;
     if (request?.sourceGuestId !== undefined) {
@@ -686,8 +687,6 @@ export function AgentThreadPanel(props: {
                 setActiveBrowserTabId(id);
               }}
               onCloseBrowser={closeBrowserTab}
-              onCopyBrowser={(guestId, id) => { void copyBrowserTabMention(guestId, id); }}
-              copiedBrowserTabId={copiedBrowserTabId}
             />
           ) : null}
         </div>
@@ -791,7 +790,7 @@ export function AgentThreadPanel(props: {
             {activeTab.type === "recording"
               ? activeTab.id === PLUGIN_RECORDING_TAB_ID
                 ? props.pluginRecordingSession
-                  ? <InterviewRecordingPanel embedded session={props.pluginRecordingSession} onClose={props.onClosePluginRecording} /> : null
+                  ? <PluginRecordingPage session={props.pluginRecordingSession} onClose={props.onClosePluginRecording} /> : null
                 : props.recordingAuthenticated || (props.recordingSession && props.recordingSession.status !== "idle")
                   ? props.recordingSession ? <RecordingEntryPage session={props.recordingSession} /> : null
                   : <div className="recording-sign-in"><LockKeyhole size={24} /><p>{t("recording.page.signInTitle")}</p>
@@ -903,8 +902,6 @@ function ThreadTabs(props: {
   activeBrowserTabId: number;
   onActivateBrowser: (id: number) => void;
   onCloseBrowser: (id: number) => void;
-  onCopyBrowser: (guestId: number, id: number) => void;
-  copiedBrowserTabId: number | null;
 }) {
   const { t } = useTranslation();
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -1019,21 +1016,6 @@ function ThreadTabs(props: {
               <Globe2 size={16} aria-hidden="true" />
             </span>
             <span className="thread-tab__title">{label}</span>
-            {tab.guestId ? (
-              <button
-                type="button"
-                className="thread-tab__close"
-                aria-label={t("browser.copyTabMention")}
-                title={t(props.copiedBrowserTabId === tab.id ? "browser.copiedTabMention" : "browser.copyTabMention")}
-                tabIndex={-1}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  props.onCopyBrowser(tab.guestId!, tab.id);
-                }}
-              >
-                <Copy size={12} aria-hidden="true" />
-              </button>
-            ) : null}
             <button
               type="button"
               className="thread-tab__close"

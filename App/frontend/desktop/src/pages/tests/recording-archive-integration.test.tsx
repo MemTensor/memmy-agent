@@ -8,13 +8,74 @@ import { PluginCapabilityHost } from "../plugin-capability-host.js";
 import { RecordingEntryPage, useRecordingEntry, type RecordingEntryController } from "../recording-entry.js";
 import { readRecordingArchive, saveRecordingArchiveEntry } from "../../lib/recording-archive.js";
 import { PluginUiProvider, usePluginUi, type PluginUiCall } from "../../app/plugin-ui-context.js";
-import type { RecordingPanelSession } from "../interview-recording-panel.js";
+import type { RecordingPanelSession } from "../recording-transcript.js";
+import type { UploadAgentMediaInput } from "../../api/memmy-agent-client.js";
+import type { AsrRecordingTranscription } from "../asr-recorder.js";
 
 const mock = vi.hoisted(() => ({ status: "idle", isRecording: false, isStarting: false, isTranscribing: false,
   error: null, start: vi.fn(), pause: vi.fn(), resume: vi.fn(), cancel: vi.fn(), stop: vi.fn(), finishAndTranscribe: vi.fn() }));
 vi.mock("../asr-recorder.js", async (original) => ({ ...await original<typeof import("../asr-recorder.js")>(), useAsrRecorder: () => mock }));
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); });
+
+it.each(["ready", "failed"] as const)("saves audio before transcription and refreshes its open detail to %s", async (outcome) => {
+  const scope = `recording-durable-${crypto.randomUUID()}`;
+  const audio = new Blob(["recorded audio"], { type: "audio/webm" });
+  let resolve!: (value: AsrRecordingTranscription) => void;
+  let reject!: (reason: Error) => void;
+  const transcription = new Promise<AsrRecordingTranscription>((yes, no) => { resolve = yes; reject = no; });
+  mock.status = "recording"; mock.isRecording = true;
+  mock.finishAndTranscribe.mockImplementationOnce((options) => {
+    mock.status = "idle"; mock.isRecording = false;
+    options.onRecordingReady(audio, "audio/webm", 5000);
+    return transcription;
+  });
+  const upload = vi.fn(async (files: UploadAgentMediaInput[]) => files.map((file) => ({
+    name: file.name, path: `/recordings/${file.name}`, kind: file.kind, mime: file.mime,
+    bytes: file.blob.size, url: `https://local.test/${file.kind}`,
+  })));
+  let controller!: RecordingEntryController;
+  function Page() {
+    controller = useRecordingEntry({} as never, upload, undefined, { scope, resolveAudio: async () => "https://local.test/restored" });
+    return <RecordingEntryPage session={controller.session} />;
+  }
+  const container = document.createElement("div"); document.body.append(container);
+  const root = createRoot(container);
+  const render = () => root.render(<I18nProvider language="zh-CN"><Page /></I18nProvider>);
+  try {
+    await act(async () => render());
+    await act(async () => controller.session.finish());
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(upload.mock.calls[0]![0].map((file) => file.kind)).toEqual(["audio"]);
+    expect(controller.session.recordings[0]?.status).toBe("transcribing");
+    expect(readRecordingArchive(scope)[0]?.audioPath).toContain("/recordings/");
+    await act(async () => controller.session.open(controller.session.recordings[0]!));
+    expect(container.textContent).toContain("正在转写录音");
+    await act(async () => {
+      if (outcome === "failed") reject(new Error("没有录到有效音频"));
+      else resolve({ text: "转写已完成", segments: [], transcribedAt: new Date().toISOString(), recording: audio, recordingMimeType: "audio/webm", durationMs: 5000,
+        source: "account", provider: "dashscope", modelId: "qwen-audio-3.0-asr-flash-filetrans" });
+    });
+    expect(controller.session.view).toBe("transcript");
+    expect(controller.session.opened?.status).toBe(outcome);
+    expect(container.textContent).not.toContain("正在转写录音");
+    expect(container.textContent).toContain(outcome === "failed" ? "没有录到有效音频" : "转写已完成");
+    expect(container.querySelector("audio")).not.toBeNull();
+    expect(upload.mock.calls.flatMap(([files]) => files).filter((file) => file.kind === "audio")).toHaveLength(1);
+    const stored = localStorage.getItem(`memmy.recordingArchive.v1:${scope}`)!;
+    expect(stored).toContain("/recordings/");
+    expect(stored).not.toContain("blob:");
+    await act(async () => root.render(<span />));
+    await act(async () => render());
+    expect(controller.session.recordings).toHaveLength(1);
+    expect(controller.session.recordings[0]?.status).toBe(outcome);
+    await act(async () => controller.session.open(controller.session.recordings[0]!));
+    expect(container.querySelector("audio")?.src).toBe("https://local.test/restored");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove(); localStorage.removeItem(`memmy.recordingArchive.v1:${scope}`);
+  }
+});
 
 it("removes a local recording and transcript only after the row's confirmation succeeds", async () => {
   const scope = `recording-delete-${crypto.randomUUID()}`;
@@ -45,11 +106,11 @@ it("removes a local recording and transcript only after the row's confirmation s
     await act(async () => [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
       .find((button) => button.textContent?.includes("删除"))!.click());
     expect(deleteFiles).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("删除本地录音和转写文件？");
-    await act(async () => container.querySelector<HTMLButtonElement>(".recording-page__delete-confirm-action")!.click());
+    expect(document.body.textContent).toContain("删除本地录音和转写文件？");
+    await act(async () => document.querySelector<HTMLButtonElement>(".confirm-dialog .button-danger")!.click());
     expect(readRecordingArchive(scope)).toHaveLength(1);
     expect(container.textContent).toContain("offline");
-    await act(async () => container.querySelector<HTMLButtonElement>(".recording-page__delete-confirm-action")!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>(".confirm-dialog .button-danger")!.click());
     expect(deleteFiles).toHaveBeenLastCalledWith([audioPath, transcriptPath]);
     expect(readRecordingArchive(scope)).toHaveLength(0);
     expect(container.querySelectorAll(".recording-page__list-row")).toHaveLength(0);
