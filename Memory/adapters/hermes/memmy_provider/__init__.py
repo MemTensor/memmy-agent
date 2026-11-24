@@ -52,7 +52,9 @@ class MemmyProvider(MemoryProvider):
             self._query = (query or self._query).strip()
             result = self._request("/turns/start", {"sessionId": self._session_id, "query": self._query, "turnId": self._turn_id or None}, timeout=3)
             self._turn_id = str(result.get("turnId") or self._turn_id)
-            return str(result.get("injectedContext") or "")
+            injected = result.get("injectedContext")
+            markdown = injected.get("markdown") if isinstance(injected, dict) else injected
+            return markdown.strip() if isinstance(markdown, str) else ""
         except Exception:
             return ""
 
