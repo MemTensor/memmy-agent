@@ -1,5 +1,6 @@
 /** Error envelope tests. */
 import Fastify from "fastify";
+import { ApiErrorBodySchema } from "@memmy/local-api-contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryLayerError, MemoryLayerNetworkError } from "../../adapters/outbound/memory-client/index.js";
 import { API_ERROR_CODES, HTTP_STATUS_BY_CODE, withErrorEnvelope } from "../error-envelope.js";
@@ -41,7 +42,7 @@ describe("withErrorEnvelope", () => {
       });
 
       expect(response.statusCode).toBe(HTTP_STATUS_BY_CODE[code]);
-      expect(response.json()).toEqual({
+      expect(ApiErrorBodySchema.parse(response.json())).toEqual({
         error: {
           code,
           message: `${code} message`,
@@ -51,6 +52,22 @@ describe("withErrorEnvelope", () => {
       await app.close();
       app = undefined;
     }
+  });
+
+  it("reports collaboration quota exhaustion with a 429 and the fallback request ID", async () => {
+    app = Fastify({ logger: false, genReqId: () => "quota-request" });
+    app.get("/quota", withErrorEnvelope(async () => {
+      throw Object.assign(new Error("Project limit reached"), { code: "collab_quota_exceeded" });
+    }));
+
+    const response = await app.inject({ method: "GET", url: "/quota" });
+
+    expect(response.statusCode).toBe(429);
+    expect(ApiErrorBodySchema.parse(response.json()).error).toEqual({
+      code: "collab_quota_exceeded",
+      message: "Project limit reached",
+      requestId: "quota-request"
+    });
   });
 
   it("passes through MemoryLayerError status and whitelisted code", async () => {
