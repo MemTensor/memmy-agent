@@ -38,7 +38,7 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/app-frame.tsx")).not.toContain('icon: "M"');
     expect(source("pages/home-page.tsx")).toContain("app-frame-page-content home-empty-screen h-full");
     expect(source("styles.css")).toContain(".home-empty-screen");
-    expect(source("styles.css")).toContain("grid-template-rows: minmax(min-content, 1fr) auto minmax(min-content, 1fr)");
+    expect(source("styles.css")).toContain("grid-template-rows: minmax(0, 1fr) auto auto auto");
     expect(source("pages/home-page.tsx")).toContain("home-empty-brand text-center");
     expect(source("pages/home-page.tsx")).toContain("home-empty-brand-mascot flex justify-center");
     expect(source("pages/home-page.tsx")).toContain("text-2xl font-bold text-text-ink");
@@ -54,7 +54,7 @@ describe("prototype page structure alignment", () => {
     expect(source("pages/home-page.tsx")).toContain("agent-conversation-column space-y-3");
     expect(source("pages/home-page.tsx")).toContain("relative agent-composer-shell");
     expect(source("pages/home-page.tsx")).not.toContain("relative overflow-hidden agent-composer-shell rounded-card-lg");
-    expect(source("pages/home-page.tsx")).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source("pages/home-page.tsx")).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm rounded-card-lg bg-background-paper');
     expect(source("pages/home-page.tsx")).not.toContain("agent-composer-input--command-selected");
     expect(source("pages/home-page.tsx")).toContain('<div className="agent-conversation-content agent-conversation-content--composer agent-conversation-column">');
     expect(source("pages/home-page.tsx")).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');

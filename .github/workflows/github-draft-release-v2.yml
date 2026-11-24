@@ -32,7 +32,7 @@ on:
 
 permissions:
   contents: write
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   release:
@@ -990,6 +990,12 @@ jobs:
           path: ${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json
           if-no-files-found: error
           retention-days: 30
+      - name: Create or reuse main synchronization PRs
+        if: ${{ steps.sync-source.outputs.sync_ready == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SYNC_REQUEST_PATH: ${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json
+        run: node "$RUNNER_TEMP/main-sync-controller/scripts/main-sync/create-prs.mjs"
 
       - name: Record the manual publish boundary
         if: ${{ steps.release.outputs.create_draft == 'true' }}

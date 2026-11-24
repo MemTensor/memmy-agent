@@ -89,7 +89,7 @@ function blockedBacklog(h: ReturnType<typeof harness>, count = 1000) {
     h.job("late-database");
     h.db.db.prepare("UPDATE evolution_jobs SET queue_lane='import'").run();
   });
-  return { held, prepared: () => prepared, distinctPrepared: () => preparedById.size,
+  return { held, prepared: () => prepared, preparedIdCount: () => preparedById.size,
     preparedCounts: () => new Map(preparedById), count };
 }
 
@@ -352,12 +352,14 @@ describe("continuous worker event-loop fairness", () => {
         const id = `live-${i}`; enqueued.set(id, performance.now());
         h.job(id, "user_memory_embedding"); h.runner.notifyWorkAvailable();
       }
-      // Sample a complete pass even on slower runners, then observe the idle
-      // window so that repeated scans still count against the read budgets.
+      // A complete discovery pass can outlast a fixed sleep on a busy runner.
+      // Wait for every distinct row and live handler before checking scan work;
+      // the live-arrival latency limit below remains independent of this wait.
       await vi.waitFor(() => {
-        expect(backlog.distinctPrepared()).toBe(count + enqueued.size);
+        expect(backlog.preparedIdCount()).toBe(count + enqueued.size);
         expect(h.processed).toHaveLength(enqueued.size);
-      }, { timeout: 60_000, interval: 100 });
+      }, { timeout: 30_000, interval: 50 });
+      // Retain the published idle observation so repeated scans remain in the read budget.
       await new Promise(resolve => setTimeout(resolve, 2000));
       const preparations = preparationStats(backlog, [...enqueued.keys()]);
       const sample = { backlog: count, added: enqueued.size, started: waits.length, notStarted: enqueued.size - waits.length,

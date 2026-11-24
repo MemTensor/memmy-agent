@@ -296,7 +296,12 @@ export function ThreadFilesView(props: {
     return <p className={`thread-panel-empty thread-panel-empty--${props.variant}`}>{t("home.threadPanel.files.unavailable")}</p>;
   }
   if (!rootPath) {
-    return <p className={`thread-panel-empty thread-panel-empty--${props.variant}`}>{t("home.threadPanel.files.noWorkspace")}</p>;
+    return (
+      <div className={`thread-files-empty thread-files-empty--${props.variant}`}>
+        <Folder size={28} strokeWidth={1.5} aria-hidden="true" />
+        <p>{t("home.threadPanel.files.noWorkspace")}</p>
+      </div>
+    );
   }
 
   function toggle(entry: MemmyWorkspaceDirectoryEntry) {

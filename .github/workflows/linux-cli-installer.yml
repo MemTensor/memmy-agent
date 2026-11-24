@@ -70,7 +70,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+      # onnxruntime-node tries to download the CUDA execution-provider binaries from a GitHub
+      # release on Linux x64, and that artifact is no longer published. Memory's embedder pins
+      # device: "cpu", so the CPU binaries bundled in the npm package are all we need.
       - run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
       - run: npm ci --prefix App/memmy-agent
       - name: Resolve and verify version
         id: version

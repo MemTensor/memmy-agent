@@ -1151,7 +1151,8 @@ export const ApiErrorCodeSchema = z.enum([
   "plugin_runtime_error",
   "plugin_timeout",
   "plugin_unavailable",
-  "plugin_interaction_invalid"
+  "plugin_interaction_invalid",
+  "collab_quota_exceeded"
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 

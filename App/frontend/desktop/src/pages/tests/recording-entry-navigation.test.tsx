@@ -36,18 +36,20 @@ describe("independent interview recording entries", () => {
   let root: Root;
   let container: HTMLDivElement;
   let current: RecordingEntryController;
+  let archiveScope: string;
   const invokePlugin = vi.fn();
   const deliver = vi.fn();
 
-  function Page() {
-    current = useRecordingEntry({} as never, undefined, deliver);
+  function Page(props: { conversationKey?: string }) {
+    current = useRecordingEntry({} as never, undefined, deliver, {
+      scope: archiveScope, conversationKey: props.conversationKey ?? "chat-a", resolveAudio: async () => null
+    });
     return <>
       <button data-testid="topbar" onClick={current.toggle}>录音图标</button>
       <PinnedPluginCommandBar targets={collectPluginCommandTargets([plugin])} disabled={false}
         active={new Set(["legal-labor:material-collect"])} recordingOpen={current.compactOpen}
         onRecordingPress={current.toggleCompact} onPress={invokePlugin} />
-      {current.compactOpen ? <RecordingEntryCard session={current.session} onClose={current.closeCompact}
-        onOpenList={() => { if (!current.open) current.toggle(); }} /> : null}
+      {current.compactOpen ? <RecordingEntryCard session={current.compactSession} disabled={current.compactBlocked} onClose={current.closeCompact} /> : null}
       {current.open ? <RecordingEntryPage session={current.session} /> : null}
     </>;
   }
@@ -57,6 +59,7 @@ describe("independent interview recording entries", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    archiveScope = `navigation-test-${crypto.randomUUID()}`;
     recorder.status = "idle";
     recorder.isRecording = false;
     recorder.start.mockImplementation(async () => { recorder.status = "recording"; recorder.isRecording = true; });
@@ -78,6 +81,47 @@ describe("independent interview recording entries", () => {
     act(() => root.unmount());
     container.remove();
     vi.restoreAllMocks();
+  });
+
+  it("keeps each conversation's recorder card and shortcut state separate", async () => {
+    const switchChat = (conversationKey: string) => act(async () => root.render(
+      <I18nProvider language="zh-CN"><Page conversationKey={conversationKey} /></I18nProvider>
+    ));
+    await click(pinned);
+    await switchChat("chat-b");
+    expect(container.querySelector(".recording-entry-card")).toBeNull();
+    expect(container.querySelector(pinned)?.getAttribute("aria-pressed")).toBe("false");
+    await click(pinned);
+    await click('.recording-entry-card .recording-bar__close');
+    await switchChat("chat-a");
+    expect(container.querySelector(".recording-entry-card")).not.toBeNull();
+    expect(container.querySelector(pinned)?.getAttribute("aria-pressed")).toBe("true");
+    await switchChat("chat-b");
+    expect(container.querySelector(".recording-entry-card")).toBeNull();
+  });
+
+  it("keeps capture running in its owner without exposing its state in another card", async () => {
+    const switchChat = (conversationKey: string) => act(async () => root.render(
+      <I18nProvider language="zh-CN"><Page conversationKey={conversationKey} /></I18nProvider>
+    ));
+    await click(pinned);
+    await click('.recording-entry-card .recording-bar__button--primary');
+    expect(current.compactSession.status).toBe("recording");
+    await switchChat("chat-b");
+    expect(container.querySelector(".recording-entry-card")).toBeNull();
+    expect(recorder.cancel).not.toHaveBeenCalled();
+    await click(pinned);
+    expect(current.compactSession.status).toBe("idle");
+    expect(current.compactSession.elapsedMs).toBe(0);
+    expect(current.compactSession.lines).toEqual([]);
+    expect(container.querySelector<HTMLButtonElement>('.recording-entry-card .recording-bar__button--primary')!.disabled).toBe(true);
+    expect(recorder.start).toHaveBeenCalledTimes(1);
+    await switchChat("chat-a");
+    expect(current.compactSession.status).toBe("recording");
+    expect(current.compactBlocked).toBe(false);
+    await click('.recording-entry-card .recording-bar__button:not(.recording-bar__button--primary)');
+    expect(recorder.pause).toHaveBeenCalledOnce();
+    expect(recorder.cancel).not.toHaveBeenCalled();
   });
 
   it("starts and finishes once when both recording views are clicked before state updates", async () => {
@@ -185,7 +229,7 @@ describe("independent interview recording entries", () => {
     await act(async () => current.session.back());
     await click('.recording-page__more-trigger');
     await click('.recording-page__more-menu button:has(.lucide-pencil)');
-    const field = container.querySelector<HTMLInputElement>('.recording-page__rename input')!;
+    const field = container.querySelector<HTMLInputElement>('.recording-name-editor input')!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(field, "企业现场访谈");
       field.dispatchEvent(new Event("input", { bubbles: true }));

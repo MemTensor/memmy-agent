@@ -1,6 +1,6 @@
 import type { SkillTarget } from "./types.js";
 import { renderMemmyDefaultSkillManifest } from "./templates/memmy-default.js";
-import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
   MEMMY_RESUME_SKILL_DIRECTORY_NAME,
@@ -8,6 +8,7 @@ import {
   renderMemmyResumeSkillFile,
   renderMemmySkillDirectoryFiles
 } from "./templates/memmy-skill-directory.js";
+import { MEMMY_PROJECT_SKILL_DIRECTORY_NAME, renderMemmyProjectSkillFile } from "./templates/memmy-project-skill.js";
 import type { SkillManifest } from "./types.js";
 
 export async function replaceMemmySkillDirectory(rootDirectory: string, manifest: SkillManifest): Promise<void> {
@@ -58,6 +59,32 @@ export async function removeMemmySkillDirectory(rootDirectory: string): Promise<
 
 export async function removeMemmyResumeSkillDirectory(rootDirectory: string): Promise<void> {
   await rm(join(rootDirectory, "skills", MEMMY_RESUME_SKILL_DIRECTORY_NAME), { recursive: true, force: true });
+}
+
+/** Whether the installed skill already matches this build's content. */
+export async function isMemmySkillDirectoryCurrent(rootDirectory: string, manifest: SkillManifest): Promise<boolean> {
+  const directory = join(rootDirectory, "skills", MEMMY_SKILL_DIRECTORY_NAME);
+  for (const file of renderMemmySkillDirectoryFiles(manifest)) {
+    const actual = await readFile(join(directory, file.relativePath), "utf8").catch(() => null);
+    if (actual !== file.content) return false;
+  }
+  return true;
+}
+
+/** Installs the memmy-project skill next to memmy-memory. */
+export async function replaceMemmyProjectSkillDirectory(rootDirectory: string, source?: string): Promise<void> {
+  const targetPath = join(rootDirectory, "skills", MEMMY_PROJECT_SKILL_DIRECTORY_NAME);
+  await replaceDirectory(targetPath, [{ relativePath: "SKILL.md", content: renderMemmyProjectSkillFile({ ...(source ? { source } : {}) }) }]);
+}
+export async function removeMemmyProjectSkillDirectory(rootDirectory: string): Promise<void> {
+  await rm(join(rootDirectory, "skills", MEMMY_PROJECT_SKILL_DIRECTORY_NAME), { recursive: true, force: true });
+}
+export async function isMemmyProjectSkillDirectoryCurrent(rootDirectory: string, source?: string): Promise<boolean> {
+  const actual = await readFile(join(rootDirectory, "skills", MEMMY_PROJECT_SKILL_DIRECTORY_NAME, "SKILL.md"), "utf8").catch(() => null);
+  return actual === renderMemmyProjectSkillFile({ ...(source ? { source } : {}) });
+}
+export async function memmyProjectSkillExists(rootDirectory: string): Promise<boolean> {
+  return pathExists(join(rootDirectory, "skills", MEMMY_PROJECT_SKILL_DIRECTORY_NAME));
 }
 
 function temporarySiblingPath(path: string): string {
@@ -121,4 +148,13 @@ export async function rollbackSkillInstallation(
   await target.uninstallPlugin?.(sourceId);
   if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
   if (before.skillInstalled) await target.install(renderMemmyDefaultSkillManifest(sourceId));
+}
+
+/** Which kind of Memmy skill is installed, judged by its own text. */
+export async function readInstalledSkillKind(rootDirectory: string): Promise<"skill" | "plugin" | null> {
+  const content = await readFile(join(rootDirectory, "skills", MEMMY_SKILL_DIRECTORY_NAME, "SKILL.md"), "utf8").catch(() => null);
+  if (content === null) return null;
+  if (content.includes("## Automatic Memory")) return "plugin";
+  if (content.includes("## Agent Loop")) return "skill";
+  return null;
 }

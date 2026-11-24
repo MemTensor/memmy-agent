@@ -40,7 +40,8 @@ export const HTTP_STATUS_BY_CODE: Readonly<Record<ApiErrorCode, number>> = Objec
   plugin_runtime_error: 502,
   plugin_timeout: 504,
   plugin_unavailable: 409,
-  plugin_interaction_invalid: 409
+  plugin_interaction_invalid: 409,
+  collab_quota_exceeded: 429
 });
 
 export interface ApiError extends Error {

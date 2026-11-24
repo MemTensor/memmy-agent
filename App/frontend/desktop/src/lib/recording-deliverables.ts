@@ -17,6 +17,22 @@ export interface RecordingDeliverables {
   transcript?: UploadedAgentMedia;
 }
 
+/** Keep the original audio independently of whether transcription succeeds. */
+export async function persistRecordingAudio(
+  result: Pick<AsrRecordingTranscription, "recording" | "recordingMimeType" | "transcribedAt">,
+  t: Translate,
+  uploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>
+): Promise<UploadedAgentMedia | undefined> {
+  if (!uploadFiles) return undefined;
+  const format = recordingFormat(result.recordingMimeType);
+  const [audio] = await uploadFiles([{
+    blob: result.recording,
+    name: `${t("plugin.ui.audio.recordingFile", { stamp: recordingStamp(result.transcribedAt) })}${format.extension}`,
+    kind: "audio", mime: format.mime, target: "recordings"
+  }]);
+  return audio;
+}
+
 /**
  * Stores a finished recording and its transcript as files.
  *
@@ -34,10 +50,19 @@ export interface RecordingDeliverables {
 export async function persistRecording(
   result: AsrRecordingTranscription,
   t: Translate,
-  uploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>
+  uploadFiles?: (files: UploadAgentMediaInput[]) => Promise<UploadedAgentMedia[]>,
+  storedAudio?: UploadedAgentMedia
 ): Promise<RecordingDeliverables> {
   if (!uploadFiles) return {};
   const stamp = recordingStamp(result.transcribedAt);
+  if (storedAudio) {
+    const [transcript] = await uploadFiles([{
+      blob: new Blob([formatTranscript(result, t)], { type: "text/plain" }),
+      name: `${t("plugin.ui.audio.transcriptFile", { stamp })}.txt`,
+      kind: "file", mime: "text/plain", target: "recordings"
+    }]);
+    return { audio: storedAudio, ...(transcript ? { transcript } : {}) };
+  }
   const audio = recordingFormat(result.recordingMimeType);
   const uploaded = await uploadFiles([
     {

@@ -113,8 +113,7 @@ describe("HomePage", () => {
     expect(html).not.toContain("停止");
     expect(html).not.toContain('data-icon="image-plus"');
     expect(html).not.toContain('data-icon="pause"');
-    expect(html).toContain("内容由 AI 生成，请仔细甄别");
-    expect(html).toContain("text-center text-[11px] text-text-ink/40 mt-4");
+    expect(html).not.toContain("内容由 AI 生成，请仔细甄别");
     expect(html).not.toContain("未选择任何文件");
   });
 
@@ -125,7 +124,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
     const chipStyles = styles.slice(
-      styles.indexOf(".composer-command-chip-slot {"),
+      styles.indexOf(".composer-command-chip {"),
       styles.indexOf(".home-project-picker {")
     );
 
@@ -144,7 +143,9 @@ describe("HomePage", () => {
     expect(html).toContain("lucide-x");
     expect(chipStyles).toContain("height: 32px;");
     expect(chipStyles).toContain("border-radius: 9px;");
-    expect(chipStyles).toContain("bottom: 12px;");
+    // 引用任务与 Goal 的 chip 跟着工具行走：不再用绝对定位浮在输入框左下角，那里是 + 按钮的位置。
+    expect(styles).toMatch(/\.composer-mention-chips\s*{[^}]*flex:\s*0 1 auto;/s);
+    expect(styles).not.toContain(".composer-command-chip-slot");
     expect(chipStyles).toContain(".composer-command-chip:hover");
     expect(chipStyles).toContain("border: 0;");
     expect(chipStyles).toContain("opacity: 0;");
@@ -263,14 +264,14 @@ describe("HomePage", () => {
     expect(agentStatusText("connected", "agent_chat", (key, values) => `${key}:${values?.model ?? ""}`)).toBeNull();
     expect(agentStatusText("connecting", null, (key) => key)).toBe("home.agent.connecting");
     expect(agentStatusText("reconnecting", null, (key) => key)).toBe("home.agent.reconnecting");
-    expect(agentStatusText("error", null, (key) => key)).toBe("home.agent.failed");
+    expect(agentStatusText("error", null, (key) => key)).toBe("home.agent.connecting");
     expect(agentStatusText("error", null, (key) => key, {
       startupIssue: "model_config_invalid"
     })).toBe("home.modelSelector.unavailable");
     expect(agentStatusText("error", null, (key) => key, {
       startupIssue: "model_config_invalid",
       hasConnected: true
-    })).toBe("home.agent.failed");
+    })).toBe("home.agent.connecting");
   });
 
   it("shows the specific queue steer failure messages", () => {
@@ -399,9 +400,9 @@ describe("HomePage", () => {
     expect(source).toContain("state.agent.composerPendingAttachmentsByScope");
     expect(source).toContain("agentActions.composerDraftUpdated(scopeKey, nextValue)");
     expect(source).toContain("const sendScopeKey = chatScopeKey;");
-    expect(source).toContain("clearComposer: () => stageComposerForSend(sendScopeKey)");
-    expect(source).toContain("restoreComposer: () => restoreComposerAfterFailedSend(");
-    expect(source).toContain("settleComposer: () => settleComposerAfterSend(sendScopeKey, submittedAttachments)");
+    expect(source).toContain("if (!fromRecommendation) stageComposerForSend(sendScopeKey)");
+    expect(source).toContain("if (!fromRecommendation) restoreComposerAfterFailedSend(");
+    expect(source).toContain("if (!fromRecommendation) settleComposerAfterSend(sendScopeKey, submittedAttachments)");
     expect(source).not.toContain("useState<Record<string, string>>({})");
     expect(source).not.toContain("useState<Record<string, PendingAttachment[]>>({})");
     expect(source).not.toContain("composerMediaErrorByScope");
@@ -520,8 +521,8 @@ describe("HomePage", () => {
     expect(source).toContain('className="home-project-picker__projects"');
     expect(source).toContain('className="home-project-picker__actions"');
     expect(optionStyles).toContain("min-height: 32px;");
-    expect(styles).toContain(".home-project-picker__option--action {\n  min-height: 30px;");
-    expect(source).toContain("<ChevronDown");
+    expect(styles).toContain(".home-project-picker__option--action {\n  min-height: 40px;");
+    expect(source).not.toContain("<ChevronDown");
     expect(source).not.toContain("<FolderPlus");
     expect(source).toContain("<LucidePlus");
   });
@@ -545,7 +546,7 @@ describe("HomePage", () => {
 
   it("passes the current UI language into agent websocket messages", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
-    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
+    const sendBlock = source.slice(source.indexOf("async function sendMessage("), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
 
     expect(source).toContain("const { language, t } = useTranslation();");
     expect(sendBlock).toContain("language,");
@@ -553,10 +554,10 @@ describe("HomePage", () => {
 
   it("intercepts exact local slash commands before normal message submission", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
-    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
+    const sendBlock = source.slice(source.indexOf("async function sendMessage("), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
     const localSlashBlock = source.slice(source.indexOf("function runExactLocalSlashCommand"), source.indexOf("  /**\n   * 停止当前 Agent 回合"));
 
-    expect(sendBlock).toContain("if (runExactLocalSlashCommand(input))");
+    expect(sendBlock).toContain("if (!fromRecommendation && runExactLocalSlashCommand(input))");
     expect(sendBlock.indexOf("runExactLocalSlashCommand(input)")).toBeLessThan(sendBlock.indexOf("submitAgentComposerMessage({"));
     expect(localSlashBlock).toContain("if (pendingAttachments.length > 0) return false;");
     expect(localSlashBlock).toContain('normalized === "/last-compaction"');
@@ -565,6 +566,17 @@ describe("HomePage", () => {
     expect(localSlashBlock).toContain("requestHistoryDagPanel();");
     expect(localSlashBlock).toContain('normalized === "/status"');
     expect(localSlashBlock).toContain("requestStatusPanel();");
+  });
+
+  it("sends home recommendations directly without staging composer content", () => {
+    const source = readFileSync(homePageSourcePath, "utf8");
+    const sendBlock = source.slice(source.indexOf("async function sendMessage("), source.indexOf("async function removeQueuedMessage"));
+
+    expect(source).toContain("onSend={(prompt) => void sendMessage(prompt)}");
+    expect(sendBlock).toContain("const messageInput = suggestedPrompt ?? input;");
+    expect(sendBlock).toContain("const submittedAttachments = fromRecommendation ? [] : [...pendingAttachments];");
+    expect(sendBlock).toContain("content: contentWithReferences,");
+    expect(sendBlock).toContain("clearComposer: () => { if (!fromRecommendation) stageComposerForSend(sendScopeKey); }");
   });
 
   it("keeps last-compaction as a local composer panel backed by the session HTTP snapshot", () => {
@@ -661,7 +673,7 @@ describe("HomePage", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
     const styles = readFileSync(stylesSourcePath, "utf8");
 
-    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm resize-none focus:outline-none rounded-card-lg bg-background-paper placeholder:text-text-ink/40');
+    expect(source).toContain('${isComposerSingleLine ? "agent-composer-input--single " : ""}agent-composer-input--conversation block w-full pl-4 py-3 text-sm rounded-card-lg bg-background-paper');
     expect(source).not.toContain("agent-composer-input--command-selected");
     expect(styles).not.toContain("padding-left: 86px;");
     expect(source).toContain('className="relative agent-composer-shell agent-composer-shell--expanded rounded-card-lg"');
@@ -690,7 +702,7 @@ describe("HomePage", () => {
     expect(source).toContain('className="agent-conversation-content agent-conversation-column space-y-3"');
     expect(source).toContain('className="agent-conversation-content agent-conversation-content--composer agent-conversation-column"');
     const composerRule = styles.match(/\.agent-conversation-composer\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(composerRule).toContain("padding: 40px var(--codex-content-padding-x) 0;");
+    expect(composerRule).toContain("padding: 40px var(--codex-content-padding-x) 36px;");
     expect(styles).toContain("container-name: agent-workspace;");
     expect(source).toContain("const threadPanel = useAgentThreadPanel({");
     expect(source).toContain("className={`agent-workspace-layout ${threadPanelMotionClass}`}");
@@ -730,12 +742,12 @@ describe("HomePage", () => {
 
     const shell = window.document.createElement("div");
     shell.className = "agent-composer-shell agent-composer-shell--expanded";
-    const textarea = window.document.createElement("textarea");
-    textarea.className = "agent-composer-input--conversation";
-    shell.append(textarea);
+    const editor = window.document.createElement("textarea");
+    editor.className = "agent-composer-input--conversation";
+    shell.append(editor);
     window.document.body.append(shell);
 
-    expect(window.getComputedStyle(textarea).paddingRight).toBe("16px");
+    expect(window.getComputedStyle(editor).paddingRight).toBe("16px");
   });
 
   it("keeps the single-line conversation composer on a 76px field with the first line 12px from the top", () => {
@@ -748,13 +760,13 @@ describe("HomePage", () => {
     composer.className = "agent-conversation-composer";
     const shell = window.document.createElement("div");
     shell.className = "agent-composer-shell agent-composer-shell--expanded";
-    const textarea = window.document.createElement("textarea");
-    textarea.className = "agent-composer-input--single agent-composer-input--conversation py-3 text-sm";
-    shell.append(textarea);
+    const editor = window.document.createElement("textarea");
+    editor.className = "agent-composer-input--single agent-composer-input--conversation py-3 text-sm";
+    shell.append(editor);
     composer.append(shell);
     window.document.body.append(composer);
 
-    const computed = window.getComputedStyle(textarea);
+    const computed = window.getComputedStyle(editor);
     expect(computed.height).toBe("76px");
     expect(computed.fontSize).toBe("15px");
     expect(computed.lineHeight).toBe("26.25px");
@@ -769,7 +781,7 @@ describe("HomePage", () => {
     expect(source).toContain("useLayoutEffect(() => {\n    if (!inputRef.current) {\n      return;\n    }\n    resizeComposerInput(inputRef.current);\n  }, [input, hasActiveConversation]);");
   });
 
-  it("applies the composer single-line treatment only while the textarea is one line", () => {
+  it("applies the composer single-line treatment only while the input is one line", () => {
     vi.stubGlobal("window", {
       getComputedStyle: () => ({
         lineHeight: "24px",
@@ -778,7 +790,7 @@ describe("HomePage", () => {
       })
     });
 
-    const element = { clientHeight: 48, scrollHeight: 48 } as HTMLTextAreaElement;
+    const element = { clientHeight: 48, scrollHeight: 48 } as HTMLElement;
     expect(isSingleLineComposerInput(element)).toBe(true);
 
     Object.defineProperty(element, "scrollHeight", { value: 76 });
@@ -839,7 +851,7 @@ describe("HomePage", () => {
 
   it("prechecks platform quota only for the resolved account-sourced candidate", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
-    const sendBlock = source.slice(source.indexOf("async function sendMessage()"), source.indexOf("async function removeQueuedMessage"));
+    const sendBlock = source.slice(source.indexOf("async function sendMessage("), source.indexOf("async function removeQueuedMessage"));
 
     expect(sendBlock).toContain('resolvedConversationModel.candidate?.source === "platform"');
     expect(sendBlock).toContain("isAccountTokenQuotaExhausted(state.bootstrap)");
@@ -896,7 +908,7 @@ describe("HomePage", () => {
     );
     const conversationComposer = source.slice(
       source.indexOf("{state.agent.currentChatId && currentGoal ? ("),
-      source.indexOf('<p className="agent-conversation-disclaimer">')
+      source.indexOf('<input ref={fileInputRef}', source.indexOf("{state.agent.currentChatId && currentGoal ? ("))
     );
     expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: false })).toBe("stop");
     expect(agentComposerPrimaryAction({ isRunning: true, isGoalActive: true, hasIntent: true })).toBe("send");
@@ -917,7 +929,7 @@ describe("HomePage", () => {
       source.indexOf("/**\n   * Updates the input draft")
     );
     const sendBlock = source.slice(
-      source.indexOf("async function sendMessage()"),
+      source.indexOf("async function sendMessage("),
       source.indexOf("/**\n   * Stops the current Agent turn.")
     );
 
@@ -1750,6 +1762,32 @@ describe("HomePage", () => {
     expect(panel.style.getPropertyValue("--agent-composer-overlay-height")).toBe("223px");
   });
 
+  it("names the task after the sentence the person saw", async () => {
+    // 正文与气泡里显示的文案不一致时，任务标题取气泡里那句话，不从正文取。
+    const sentence = "请小饭团查一下上次分享会一共来了多少人";
+    const onMessageSent = vi.fn();
+
+    await expect(submitAgentComposerMessage({
+      chatId: "chat-demo",
+      connection: {
+        getReadyGeneration: () => 1,
+        newChat: vi.fn(async () => ({ chatId: "unused-chat", modelPreset: "desktop-openai-gpt-5" })),
+        submitMessage: vi.fn(async () => ({ status: "accepted" as const }))
+      },
+      content: `${sentence}\n\n补充说明：只统计现场签到的人数`,
+      displayContent: sentence,
+      pendingAttachments: [],
+      uploadAgentMedia: vi.fn(async () => []),
+      dispatch: vi.fn(),
+      track: vi.fn(),
+      clearComposer: vi.fn(),
+      onMessageSent
+    })).resolves.toBe(true);
+
+    // 发出之后才有 chatId：引导用它在拿到 id 之后把标题显式写成那一句话。
+    expect(onMessageSent).toHaveBeenCalledWith("chat-demo");
+  });
+
   it("keeps the Goal command on the wire but shows only its objective", async () => {
     const sendMessage = vi.fn(async () => ({ status: "accepted" as const }));
     const dispatch = vi.fn();
@@ -2046,7 +2084,7 @@ describe("HomePage", () => {
     expect(dataTransferHasAttachmentFiles(null)).toBe(false);
   });
 
-  it("wires pasted attachments into both composer textareas", () => {
+  it("wires pasted attachments into both composer inputs", () => {
     const source = readFileSync(homePageSourcePath, "utf8");
 
     expect(source).toContain("function handleComposerPaste(event: ClipboardEvent<HTMLTextAreaElement>)");

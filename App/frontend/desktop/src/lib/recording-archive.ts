@@ -10,7 +10,8 @@ const schema = z.object({
   transcript: z.object({ text: z.string(), segments: z.array(z.object({
     text: z.string(), speakerId: z.number().optional(), startMs: z.number().optional(), endMs: z.number().optional()
   })) }),
-  status: z.enum(["ready", "failed", "transcribing"]).optional()
+  status: z.enum(["ready", "failed", "transcribing"]).optional(),
+  transcriptionError: z.string().optional()
 });
 const empty: RecordingArchiveEntry[] = [];
 const snapshots = new Map<string, RecordingArchiveEntry[]>();
