@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenAICompatProvider } from "../../src/providers/openai-compat-provider.js";
 import { ChatExceptionCache, chatExceptions, protocolPreferenceKey, rejectsProtocol } from "../../src/providers/protocol-preference.js";
-import { convertMessages, parseResponseOutput } from "../../src/providers/openai-responses/index.js";
+import { convertMessages } from "../../src/providers/openai-responses/index.js";
 import { LLMResponse, ToolCallRequest } from "../../src/providers/base.js";
 import { Config } from "../../src/config/schema.js";
 import { makeProvider } from "../../src/providers/factory.js";

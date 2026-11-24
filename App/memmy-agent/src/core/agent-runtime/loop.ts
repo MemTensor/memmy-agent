@@ -32,7 +32,7 @@ import {
   type ResolvedModelSelection,
 } from "../../providers/model-catalog.js";
 import { CloudModelCapabilitySchema, CloudModelThinkingConfigSchema } from "@memmy/local-api-contracts";
-import { createRuntimeModelCapabilityCatalog, type RuntimeModelCapabilityCatalogState } from "../../providers/model-capability-catalog.js";
+import { createRuntimeModelCapabilityCatalog } from "../../providers/model-capability-catalog.js";
 import { resolveTurnModelCapabilities } from "../../providers/turn-model-capabilities.js";
 import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
 

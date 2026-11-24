@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -109,14 +109,19 @@ describe("app state store migrations", () => {
   it("creates initial tables and seed rows idempotently", () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
     const databasePath = join(tempDir, "app.sqlite");
+    const expectedMigrations = [
+      new URL("../migrations/", import.meta.url),
+      new URL("../../agent-source-store/migrations/", import.meta.url),
+      new URL("../../idempotency-store/migrations/", import.meta.url)
+    ].flatMap((dir) => readdirSync(dir).filter((name) => name.endsWith(".sql"))).sort();
 
     const firstStore = createAppStateStore({ databasePath });
     const onboarding = firstStore.repositories.bootstrap.getOnboardingState();
-    const firstMigrationCount = getMigrationCount(firstStore.db);
+    const firstMigrations = getAppliedMigrationNames(firstStore.db);
     firstStore.close();
 
     const secondStore = createAppStateStore({ databasePath });
-    const secondMigrationCount = getMigrationCount(secondStore.db);
+    const secondMigrations = getAppliedMigrationNames(secondStore.db);
     const settings = secondStore.repositories.bootstrap.getAppSettings();
     const agentSources = secondStore.repositories.agentSources.listSources();
     secondStore.close();
@@ -131,8 +136,8 @@ describe("app state store migrations", () => {
     expect(settings.menuBarIconEnabled).toBe(true);
     expect(settings.stopMemoryServiceOnExit).toBe(false);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(39);
-    expect(secondMigrationCount).toBe(39);
+    expect(firstMigrations).toEqual(expectedMigrations);
+    expect(secondMigrations).toEqual(firstMigrations);
   });
 
   it("preserves the authenticated account when upgrading the legacy 0007 database", () => {
@@ -2376,9 +2381,9 @@ describe("bootstrap repository writes", () => {
   });
 });
 
-function getMigrationCount(db: { prepare(sql: string): { get(): unknown } }): number {
-  const row = db.prepare("SELECT COUNT(*) AS count FROM _migrations").get() as { count: number };
-  return row.count;
+function getAppliedMigrationNames(db: DatabaseSync): string[] {
+  const rows = db.prepare("SELECT name FROM _migrations ORDER BY name").all() as { name: string }[];
+  return rows.map((row) => row.name);
 }
 
 function resetInstallationScanPermissionMigration(db: DatabaseSync): void {
