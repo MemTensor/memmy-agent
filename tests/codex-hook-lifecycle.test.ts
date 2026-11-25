@@ -5,6 +5,7 @@ import { createAgentSourceExecutor } from "../Memory/src/agent-source/runtime.js
 import { createSourceRegistry } from "../Memory/src/agent-source/adapters/source-registry.js";
 import { createSkillTargetRegistry as memoryRegistry } from "../Memory/src/agent-source/integration/target-registry.js";
 import type { MemoryService } from "../Memory/src/service/memory-service.js";
+import { DEVICE_MEMORY_OWNER } from "../Memory/src/service/namespace/memory-owner.js";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -229,7 +230,10 @@ describe.each([
       }
       const captures = requests.filter(request => request.path === "/api/v1/source-turns/complete");
       expect(captures).toHaveLength(1);
-      expect(captures[0]!.body).toMatchObject({ adapterId: "memmy-codex-hook", namespace: { source: "codex", userId: "fixture-owner" } });
+      expect(captures[0]!.body).toMatchObject({
+        adapterId: "memmy-codex-hook",
+        namespace: { source: "codex", userId: DEVICE_MEMORY_OWNER },
+      });
       expect(JSON.stringify(captures[0]!.body)).toContain("Parser fixed");
       // Removal must still work when the executable is gone or its override is invalid.
       vi.stubEnv("MEMMY_CODEX_EXECUTABLE", join(f.rootDirectory, "removed-codex"));
