@@ -11,6 +11,7 @@ const AGENT_SOURCE_FAMILIES = [
   "claude_code",
   "opencode",
   "codex",
+  "antigravity",
   "cursor",
   "openclaw",
   "hermes",

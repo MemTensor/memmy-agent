@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -8,6 +8,7 @@ const skillWriterDirectory = resolve(workspaceBridgeDirectory, "..");
 const projectHookDirectory = join(skillWriterDirectory, "project-hook");
 const backendDirectory = resolve(workspaceBridgeDirectory, "../../../../..");
 const mode = process.argv.includes("--dist") ? "dist" : "source";
+const outputDirectory = mode === "dist" ? join(backendDirectory, "dist/src/adapters/outbound/skill-writer") : skillWriterDirectory;
 
 /**
  * 两个运行时各打一份，放在与各自源码相邻的位置：
@@ -31,16 +32,15 @@ const runtimes = [
 ];
 
 for (const runtime of runtimes) {
-  const destination = mode === "dist"
-    ? join(
-        backendDirectory,
-        "dist/src/adapters/outbound/skill-writer",
-        runtime.directoryName,
-        runtime.fileName
-      )
-    : join(skillWriterDirectory, runtime.directoryName, runtime.fileName);
+  const destination = join(outputDirectory, runtime.directoryName, runtime.fileName);
   await buildRuntime(runtime.entryPoint, destination, runtime.name);
 }
+const antigravityDirectory = join(outputDirectory, "antigravity");
+await mkdir(antigravityDirectory, { recursive: true });
+await copyFile(
+  resolve(backendDirectory, "../frontend/desktop/src/assets/memmy-app-icon.png"),
+  join(antigravityDirectory, "memmy-app-icon.png")
+);
 
 async function buildRuntime(entryPoint, destination, name) {
   const temporary = `${destination}.${process.pid}.tmp`;

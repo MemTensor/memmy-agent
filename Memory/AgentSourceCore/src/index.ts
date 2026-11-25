@@ -1,4 +1,6 @@
 export * from "./source-turn.js";
+export * from "./antigravity-source-turn.js";
+export * from "./antigravity-memory-plugin.js";
 export * from "./codex-source-turn.js";
 export * from "./codex-executable.js";
 export * from "./codex-installation.js";

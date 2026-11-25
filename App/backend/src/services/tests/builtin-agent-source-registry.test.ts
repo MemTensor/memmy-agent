@@ -9,6 +9,7 @@ describe("built-in agent source registry", () => {
       "cursor",
       "claude_code",
       "codex",
+      "antigravity",
       "opencode",
       "openclaw",
       "hermes",

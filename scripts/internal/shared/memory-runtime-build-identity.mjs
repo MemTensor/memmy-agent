@@ -9,6 +9,7 @@ export async function memoryRuntimeBuildIdentity(repoRoot) {
     "Memory/src", "Memory/viewer/src", "Memory/viewer/public", "Memory/adapters", "Memory/AgentSourceCore/src",
     "Memory/package.json", "Memory/tsconfig.json", "Memory/tsconfig.base.json",
     "Memory/viewer/package.json", "Memory/viewer/vite.config.ts", "Memory/viewer/index.html",
+    "App/frontend/desktop/src/assets/memmy-app-icon.png",
     "Memory/AgentSourceCore/package.json", "Memory/AgentSourceCore/tsconfig.json", "tsconfig.base.json", "package-lock.json"
   ];
   const hash = createHash("sha256");
@@ -26,8 +27,9 @@ export async function memoryRuntimeBuildIdentity(repoRoot) {
     for (const entry of entries) {
       if (entry.name.startsWith(".") || ["node_modules", "dist"].includes(entry.name)) continue;
       const child = `${path}/${entry.name}`;
-      // This ignored bridge is generated from sources in the same directory.
-      if (child === "Memory/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs") continue;
+      // Use the source inputs, regardless of whether the development assets have been generated.
+      if (child === "Memory/src/agent-source/integration/workspace-bridge/memmy-workspace-bridge.mjs"
+        || child === "Memory/src/agent-source/integration/antigravity/memmy-app-icon.png") continue;
       if (entry.isDirectory()) await addDirectory(child);
       else if (entry.isFile()) await addFile(child);
     }

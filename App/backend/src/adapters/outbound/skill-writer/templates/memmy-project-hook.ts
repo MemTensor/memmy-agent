@@ -32,6 +32,10 @@ const KNOWLEDGE_QUERY_MAX_CHARS = 8000;
 
 async function main() {
   const payload = parseJson(await readStdin()) || {};
+  if (MODE === "antigravity" && process.argv[2] === "pre-invocation" && payload.invocationNum > 0) {
+    writeLifecycleOutput(payload, "");
+    return;
+  }
   // Cursor 会执行一遍从 Claude 设置导入的钩子；它自己的钩子负责这些事件，这里直接跳过，免得同一段输出两遍。
   if (MODE === "claude-code" && normalizeText(payload.cursor_version)) return;
   if (isPromptSubmitEvent(payload)) {
@@ -162,6 +166,10 @@ function joinSections(sections) {
 
 function writeLifecycleOutput(payload, context) {
   const event = normalizeText(payload.hook_event_name || payload.hookEventName) || "SessionStart";
+  if (MODE === "antigravity") {
+    process.stdout.write(JSON.stringify(context ? { injectSteps: [{ systemMessage: { systemMessage: context } }] } : {}));
+    return;
+  }
   if (MODE === "cursor") {
     process.stdout.write(context ? JSON.stringify({ additional_context: context }) : "{}");
     return;
@@ -175,6 +183,10 @@ function writeLifecycleOutput(payload, context) {
 }
 
 function writePromptOutput(context) {
+  if (MODE === "antigravity") {
+    writeLifecycleOutput({}, context);
+    return;
+  }
   if (MODE === "cursor") {
     process.stdout.write(context ? JSON.stringify({ additional_context: context }) : "{}");
     return;
@@ -208,6 +220,7 @@ function parseJson(value) {
 }
 
 function hookEventName(payload) {
+  if (MODE === "antigravity") return process.argv[2] === "pre-invocation" ? "userpromptsubmit" : "sessionstart";
   return normalizeText(payload.hook_event_name || payload.hookEventName).toLowerCase();
 }
 
@@ -228,7 +241,8 @@ function extractPrompt(payload) {
     payload.userPrompt,
     payload.prompt_text,
     payload.promptText,
-    payload.input
+    payload.input,
+    payload.lastUserInput
   ].map(normalizeText).find(Boolean);
   if (direct) {
     return direct;
@@ -278,7 +292,7 @@ function workspacePath(payload) {
   if (direct) {
     return direct;
   }
-  const roots = Array.isArray(payload.workspace_roots) ? payload.workspace_roots : payload.workspaceRoots;
+  const roots = Array.isArray(payload.workspace_roots) ? payload.workspace_roots : payload.workspaceRoots || payload.workspacePaths;
   if (!Array.isArray(roots)) {
     return "";
   }

@@ -889,7 +889,8 @@ function fixtureRoot() {
 }
 
 function seedMemoryBuildInputs(root) {
-  for (const path of ["Memory/src/storage", "Memory/viewer/src", "Memory/viewer/public", "Memory/adapters", "Memory/AgentSourceCore/src"]) {
+  for (const path of ["Memory/src/storage", "Memory/viewer/src", "Memory/viewer/public", "Memory/adapters", "Memory/AgentSourceCore/src",
+    "App/frontend/desktop/src/assets"]) {
     mkdirSync(join(root, path), { recursive: true });
   }
   for (const path of ["Memory/package.json", "Memory/tsconfig.json", "Memory/tsconfig.base.json",
@@ -898,6 +899,7 @@ function seedMemoryBuildInputs(root) {
   writeFileSync(join(root, "Memory/src/storage/schema.ts"), "export const SCHEMA_VERSION = 9;\n");
   writeFileSync(join(root, "Memory/viewer/vite.config.ts"), "export default {};\n");
   writeFileSync(join(root, "Memory/viewer/index.html"), "<html></html>\n");
+  writeFileSync(join(root, "App/frontend/desktop/src/assets/memmy-app-icon.png"), "fixture-icon");
   const relative = "scripts/internal/shared/memory-runtime-build-identity.mjs";
   mkdirSync(dirname(join(root, relative)), { recursive: true });
   writeFileSync(join(root, relative), readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", relative)));

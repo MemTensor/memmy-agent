@@ -1,3 +1,4 @@
+import { createAntigravitySourceAdapter } from "@memmy/agent-source-readers/adapters/antigravity/index";
 import { createClaudeCodeSourceAdapter } from "@memmy/agent-source-readers/adapters/claude-code/index";
 import { createCodexSourceAdapter } from "@memmy/agent-source-readers/adapters/codex/index";
 import { createCursorSourceAdapter } from "@memmy/agent-source-readers/adapters/cursor/index";
@@ -15,6 +16,7 @@ export function createBuiltinAgentSourceRegistry(): SourceRegistry {
     createCursorSourceAdapter(),
     createClaudeCodeSourceAdapter(),
     createCodexSourceAdapter(),
+    createAntigravitySourceAdapter(),
     createOpencodeSourceAdapter(),
     createOpenclawSourceAdapter(),
     createHermesSourceAdapter(),

@@ -14,7 +14,10 @@ import {
   createOpencodeDatabaseSource,
   type SourceTurn
 } from "@memmy/agent-source-core";
-export { readClaudeCodeSourceTurn, readCodexSourceTurn } from "@memmy/agent-source-core";
+export {
+  antigravityConversationId, antigravityUserText, findAntigravityTranscript, readAntigravityHookTurn,
+  readClaudeCodeSourceTurn, readCodexSourceTurn
+} from "@memmy/agent-source-core";
 import { createHash, randomUUID } from "node:crypto";
 import {
   resolveCursorDataPaths,
@@ -98,9 +101,12 @@ export async function readRuntimeConfig(configUrl: URL, pinnedOwner = false): Pr
   };
 }
 
-export async function openRuntimeSession(input: OpenRuntimeSessionInput): Promise<RuntimeSession | null> {
+export async function openRuntimeSession(
+  input: OpenRuntimeSessionInput,
+  options: { timeoutMs?: number } = {},
+): Promise<RuntimeSession | null> {
   const config = await readRuntimeConfig(input.configUrl, input.pinnedOwner === true);
-  const client = new RuntimeHttpClient(config);
+  const client = new RuntimeHttpClient(config, options.timeoutMs);
   const health = await client.get("/api/v1/health").catch(() => null);
   if (!health && input.pinnedOwner === true) return null;
   const features = objectValue(objectValue(health).features);
@@ -168,9 +174,12 @@ async function openLegacyRuntimeSession(
   };
 }
 
-export async function loadRuntimeL3(session: RuntimeSession): Promise<LoadedRuntimeSession> {
+export async function loadRuntimeL3(
+  session: RuntimeSession,
+  options: { timeoutMs?: number } = {},
+): Promise<LoadedRuntimeSession> {
   if (session.protocol !== "v2") return { ...session, additionalContext: "", renderedContext: "", memoryVersion: null };
-  const client = new RuntimeHttpClient(session.config);
+  const client = new RuntimeHttpClient(session.config, options.timeoutMs);
   const envelope = runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId);
   const result = objectValue(await client.get(
     `/api/v1/l3-world-model/sessions/${encodeURIComponent(session.sessionId)}/context`,
@@ -218,8 +227,9 @@ export async function startRuntimeTurn(
   session: RuntimeSession,
   turnId: string,
   query: string,
+  options: { timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
-  const client = new RuntimeHttpClient(session.config);
+  const client = new RuntimeHttpClient(session.config, options.timeoutMs);
   const body = session.protocol === "v2"
     ? { ...runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId), sessionId: session.sessionId, turnId, query }
     : { source: session.source, adapterId: session.adapterId, requestId: `${session.source}-start:${turnId}`, sessionId: session.sessionId, turnId, query };
@@ -512,7 +522,7 @@ async function resolveDeepseekHarnessSessionFile(input: {
 }
 
 class RuntimeHttpClient {
-  constructor(private readonly config: RuntimeConfig) {}
+  constructor(private readonly config: RuntimeConfig, private readonly timeoutMs = 45_000) {}
 
   async get(path: string, transport: { query?: Record<string, string>; headers?: Record<string, string> } = {}): Promise<unknown> {
     const url = new URL(path, `${this.config.endpoint.replace(/\/+$/u, "")}/`);
@@ -541,7 +551,7 @@ class RuntimeHttpClient {
     if (current.token) headers.set("authorization", `Bearer ${current.token}`);
     let response: Response;
     try {
-      response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(45_000) });
+      response = await fetch(url, { ...init, headers, signal: AbortSignal.timeout(this.timeoutMs) });
     } catch (error) {
       throw new Error(`Memmy request to ${url} failed: ${formatErrorWithCause(error)}`, { cause: error });
     }

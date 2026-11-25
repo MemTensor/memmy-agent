@@ -226,6 +226,8 @@ export function runningConversation(env: NodeJS.ProcessEnv): { sourceId: string;
   if (claude) return { sourceId: "claude_code", conversationId: claude };
   const codex = env.CODEX_THREAD_ID?.trim();
   if (codex) return { sourceId: "codex", conversationId: codex };
+  const antigravity = env.ANTIGRAVITY_CONVERSATION_ID?.trim();
+  if (antigravity) return { sourceId: "antigravity", conversationId: antigravity };
   return undefined;
 }
 

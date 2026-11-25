@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { bundledCliInstallDecision, memmyCliAppCandidates, renderMemmyCliLauncher, shellSingleQuote } from "../src/main/cli-auto-install.js";
 
@@ -72,5 +73,33 @@ describe("user CLI launcher", () => {
     const missingApp = spawnSync(absentPath, [], { encoding: "utf8" });
     expect(missingApp.status).toBe(127);
     expect(missingApp.stderr).toContain("找不到 Memmy");
+  });
+
+  it("allows a development CLI to replace a packaged launcher only when it has no app to run", () => {
+    const root = mkdtempSync(join(tmpdir(), "memmy-orphaned-cli-"));
+    try {
+      const absentApp = join(root, "Memmy's old copy.app");
+      const presentApp = join(root, "Memmy.app");
+      const packagedCli = join(presentApp, "Contents", "Resources", "cli", "memmy-memory");
+      mkdirSync(dirname(packagedCli), { recursive: true });
+      writeFileSync(packagedCli, "#!/bin/sh\n", { mode: 0o755 });
+      const orphaned = join(root, "orphaned");
+      const active = join(root, "active");
+      const unmanaged = join(root, "unmanaged");
+      writeFileSync(orphaned, renderMemmyCliLauncher("memmy-memory", [absentApp]));
+      writeFileSync(active, renderMemmyCliLauncher("memmy-memory", [absentApp, presentApp]));
+      writeFileSync(unmanaged, "#!/bin/sh\n");
+      const devStart = fileURLToPath(new URL("../../../../scripts/dev-start.sh", import.meta.url));
+      const result = spawnSync("bash", ["-c", [
+        'source "$1"',
+        "uname() { printf 'Darwin\\n'; }",
+        'is_managed_user_cli_target memmy-memory "$2"',
+        'if is_managed_user_cli_target memmy-memory "$3"; then exit 1; fi',
+        'if is_managed_user_cli_target memmy-memory "$4"; then exit 1; fi'
+      ].join("\n"), "check-launchers", devStart, orphaned, active, unmanaged], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

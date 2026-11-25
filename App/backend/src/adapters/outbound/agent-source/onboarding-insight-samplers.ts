@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { access, open, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { ANTIGRAVITY_SOURCE_ID, ANTIGRAVITY_TRANSCRIPT_NAME, antigravityAppDirectory, antigravityConversationId, parseAntigravityStep } from "@memmy/agent-source-core";
 import { stripInlineMediaPayloads } from "../../../shared/inline-media-sanitizer.js";
 import {
   resolveClaudeCodeProjectsDirectory,
@@ -63,6 +64,7 @@ export function createBuiltinOnboardingInsightSamplers(): OnboardingInsightSampl
     createCursorInsightSampler(),
     createClaudeCodeInsightSampler({ root: resolveClaudeCodeProjectsDirectory() }),
     createCodexInsightSampler({ root: resolveCodexSessionsDirectory() }),
+    createAntigravityInsightSampler({ root: join(antigravityAppDirectory(), "brain") }),
     createOpencodeInsightSampler({ databasePath: resolveOpencodeDatabasePath() }),
     createOpenclawInsightSampler({ root: resolveOpenclawStateDirectory() }),
     createHermesInsightSampler({ root: resolveHermesHomeDirectory() }),
@@ -183,6 +185,30 @@ export function createCodexInsightSampler(input: { root: string }): OnboardingIn
     matchesFile: (name) => name.startsWith("rollout-") && name.endsWith(".jsonl") && !/\.jsonl\.bak-/u.test(name),
     shouldParseLine: isPotentialCodexMessageLine,
     extractMessage: extractCodexMessage
+  });
+}
+
+export function createAntigravityInsightSampler(input: { root: string }): OnboardingInsightSampler {
+  return createJsonlInsightSampler({
+    sourceId: ANTIGRAVITY_SOURCE_ID,
+    displayName: "Antigravity",
+    root: input.root,
+    matchesFile: (name) => name === ANTIGRAVITY_TRANSCRIPT_NAME,
+    shouldParseLine: (line) => /"type"\s*:\s*"(?:USER_INPUT|PLANNER_RESPONSE)"/u.test(line),
+    extractMessage(record, { sourceId, filePath }) {
+      const step = parseAntigravityStep(record);
+      if (!step?.content || (step.role === "assistant" && !step.final)) return null;
+      const conversationId = antigravityConversationId(filePath);
+      return {
+        sourceId,
+        conversationId,
+        messageId: `${sourceId}:${conversationId}:${step.index}:${step.createdAt}`,
+        role: step.role,
+        createdAt: step.createdAt,
+        text: redactSecrets(step.content),
+        workspacePath: null
+      };
+    }
   });
 }
 

@@ -381,6 +381,35 @@ user_cli_path() {
   printf '%s/%s\n' "$MEMMY_BIN_DIR" "$name"
 }
 
+is_orphaned_packaged_mac_cli() {
+  [[ "$(uname -s)" == "Darwin" ]] || return 1
+  node --input-type=module - "$1" "$2" <<'NODE'
+import { accessSync, constants, readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+
+const [name, launcher] = process.argv.slice(2);
+const lines = readFileSync(launcher, "utf8").split(/\r?\n/u);
+if (lines[0] !== "#!/usr/bin/env bash" || lines[2] !== "# Memmy CLI launcher"
+  || !lines.includes('  local launcher="$app/Contents/Resources/cli/' + name + '"')) process.exit(1);
+
+const candidates = lines.filter(line => line.startsWith("search_app "));
+if (!candidates.length) process.exit(1);
+for (const line of candidates) {
+  const match = /^search_app ('.*') "\$@"$/u.exec(line);
+  if (!match) process.exit(1);
+  const quoted = match[1];
+  const app = quoted.slice(1, -1).replaceAll("'\\''", "'");
+  if (!isAbsolute(app) || quoted !== "'" + app.replaceAll("'", "'\\''") + "'") process.exit(1);
+  try {
+    accessSync(join(app, "Contents", "Resources", "cli", name), constants.X_OK);
+    process.exit(1);
+  } catch (error) {
+    if (error.code !== "ENOENT" && error.code !== "ENOTDIR") process.exit(1);
+  }
+}
+NODE
+}
+
 is_managed_user_cli_target() {
   local name="$1"
   local path="$2"
@@ -409,8 +438,24 @@ is_managed_user_cli_target() {
   if [[ "$contents" == $'#!/bin/sh\nexec env ELECTRON_RUN_AS_NODE=1 '*"$expected_suffix"*' "$@"' ]]; then
     return 0
   fi
+  if [[ "$contents" == *'# Memmy CLI launcher'* ]] && is_orphaned_packaged_mac_cli "$name" "$path"; then
+    return 0
+  fi
   [[ "$contents" == *'rem Managed by Memmy dev-start.'* ]] \
     && [[ "$contents" == *'node "'*"$expected_suffix"'" %*'* ]]
+}
+
+select_dev_cli_bin() {
+  local name target
+  for name in memmy-memory memmy memmy-project; do
+    target="$(user_cli_path "$name")"
+    if [[ -e "$target" || -L "$target" ]] && ! is_managed_user_cli_target "$name" "$target"; then
+      MEMMY_BIN_DIR="$LOG_DIR/bin"
+      export PATH="$MEMMY_BIN_DIR:$PATH"
+      log "keeping existing CLI at $target; using development commands in $MEMMY_BIN_DIR"
+      return
+    fi
+  done
 }
 
 install_user_cli_link() {
@@ -762,6 +807,7 @@ NODE
     export VITE_MEMMY_AGENT_WEBUI_URL
   fi
 
+  select_dev_cli_bin
   build_and_install_memory_cli
 
   ensure_electron_runtime

@@ -39,6 +39,7 @@ const EXTERNAL_AGENT_SOURCE_IDS = new Set([
   "cursor",
   "claude_code",
   "codex",
+  "antigravity",
   "opencode",
   "openclaw",
   "hermes",
@@ -46,7 +47,7 @@ const EXTERNAL_AGENT_SOURCE_IDS = new Set([
 ]);
 
 const HOOK_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex"]);
-const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes", "deepseek_harness"]);
+const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["antigravity", "opencode", "openclaw", "hermes", "deepseek_harness"]);
 
 /** Ingest stores `memmy-agent`. `memmy-memory` is rejected before the row is written. */
 const PLUGIN_RUNTIME_SOURCE = "memmy-agent";

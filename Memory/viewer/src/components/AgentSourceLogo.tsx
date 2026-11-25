@@ -1,3 +1,4 @@
+import antigravityLogoUrl from "../../../../App/frontend/desktop/src/assets/agent-logos/antigravity.svg";
 import claudeCodeLogoUrl from "../../../../App/frontend/desktop/src/assets/agent-logos/claude-code.svg";
 import codexLogoUrl from "../../../../App/frontend/desktop/src/assets/agent-logos/codex.svg";
 import cursorLogoUrl from "../../../../App/frontend/desktop/src/assets/agent-logos/cursor.svg";
@@ -18,6 +19,7 @@ const AGENT_SOURCE_LOGOS: Partial<Record<string, string>> = {
   cursor: cursorLogoUrl,
   claude_code: claudeCodeLogoUrl,
   codex: codexLogoUrl,
+  antigravity: antigravityLogoUrl,
   opencode: opencodeLogoUrl,
   openclaw: openclawLogoUrl,
   hermes: hermesLogoUrl,
