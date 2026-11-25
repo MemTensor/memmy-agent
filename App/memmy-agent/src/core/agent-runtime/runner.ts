@@ -14,6 +14,7 @@ import {
 import type { ActualModelContext } from "@memmy/local-api-contracts";
 import { CONTEXT_SAFETY_BUFFER_TOKENS } from "../../token-budget.js";
 import { MessageTool } from "./tools/message.js";
+import { ToolDiscovery, TOOL_DEFINITION_TOKEN_BUDGET } from "./tool-discovery.js";
 import { ToolRegistry } from "./tools/registry.js";
 import type { FileMutationOutcome, ToolExecutionContext } from "./tools/base.js";
 import { withToolExecutionRequestContext } from "./tools/context.js";
@@ -154,6 +155,7 @@ export class AgentRunSpec {
   onPrivateSkillRefsChanged?: (refs: PluginSkillRef[]) => void;
   messages: Record<string, any>[];
   initialMessages: Record<string, any>[];
+  toolDiscovery: ToolDiscovery;
   tools?: ToolRegistry | any;
   provider?: LLMProvider;
   model?: string | null;
@@ -203,6 +205,7 @@ export class AgentRunSpec {
     messages?: Record<string, any>[];
     initialMessages?: Record<string, any>[];
     provider?: LLMProvider;
+    toolDiscovery?: ToolDiscovery;
     tools?: ToolRegistry | any;
     model?: string | null;
     maxIterations?: number;
@@ -247,6 +250,7 @@ export class AgentRunSpec {
     this.messages = this.initialMessages = init.messages ?? init.initialMessages ?? [];
     this.provider = init.provider;
     this.tools = init.tools;
+    this.toolDiscovery = init.toolDiscovery ?? new ToolDiscovery();
     this.model = init.model ?? null;
     this.maxIterations = init.maxIterations ?? 200;
     this.modelCapabilities = init.modelCapabilities;
@@ -487,7 +491,10 @@ export class AgentRunner {
 
   private toolDefinitions(spec: AgentRunSpec): Record<string, any>[] {
     const definitions = spec.tools?.getDefinitions?.() ?? [];
-    return spec.outputLocation ? withOutputPaths(definitions) : definitions;
+    const all = spec.outputLocation ? withOutputPaths(definitions) : definitions;
+    const inputBudget = this.inputTokenBudget(spec);
+    return spec.toolDiscovery.definitions(all, inputBudget == null
+      ? TOOL_DEFINITION_TOKEN_BUDGET : Math.max(0, Math.floor(inputBudget / 4)));
   }
 
   private withOutputInstruction(spec: AgentRunSpec, messages: Record<string, any>[]): Record<string, any>[] {
@@ -1171,6 +1178,14 @@ export class AgentRunner {
       const event = { name: call.name, status: "error", detail: "task cancelled" };
       return { call, result: "Error: task cancelled", event, error: spec.failOnToolError ? createAbortError() : null };
     }
+    if (call.name === "tool_search") {
+      // Discovery reads the allowed catalog; business calls still go through Host authorization.
+      this.toolDefinitions(spec);
+      const result = spec.toolDiscovery.search(call.arguments);
+      const failed = result.startsWith("Error:");
+      return { call, result, event: { name: call.name, status: failed ? "error" : "ok" },
+        error: failed && spec.failOnToolError ? new Error(result) : null };
+    }
     if (managedExecutionRequired()) {
       try {
         const authorized = await executeManagedTool(call.name, call.arguments, spec.abortSignal, call.id);
@@ -1227,7 +1242,7 @@ export class AgentRunner {
       const event = { name: call.name, status: "error", detail: eventDetail("", prepError, 120) };
       const handled = this.classifyViolation(prepError, prepError + hint, event, call, workspaceViolationCounts);
       if (handled) return { call, ...handled };
-      return { call, result: prepError + hint, event, error: spec.failOnToolError ? new Error(prepError) : null };
+      return { call, result: prepError + "\nUse tool_search to inspect the current tool definition before retrying." + hint, event, error: spec.failOnToolError ? new Error(prepError) : null };
     }
 
     const progressCallback = spec.progressCallback && onProgressAcceptsFileEditEvents(spec.progressCallback)
@@ -1578,6 +1593,7 @@ export class AgentRunner {
       estimatePromptTokens: (messages) => this.estimateMessagesBeforeSnip(spec, messages, options),
     });
     if (!update) return projection;
+    spec.toolDiscovery.reset();
     return {
       messages: update.messages.map((message) => ({ ...message })),
       transcriptLength: transcriptMessages.length,
@@ -1795,7 +1811,7 @@ export class AgentRunner {
         error = finalContent;
         break;
       }
-      const toolsForRequest = this.toolDefinitions(spec);
+      let toolsForRequest = this.toolDefinitions(spec);
       if (iteration > 0) {
         modelContextProjection = await this.updateProjectionBeforeFollowup(
           spec,
@@ -1815,6 +1831,7 @@ export class AgentRunner {
           break;
         }
       }
+      toolsForRequest = this.toolDefinitions(spec);
       const context = new AgentHookContext({ spec, messages, iteration, usage });
       const beforeIterationInjections = await hook.beforeIteration(context) ?? [];
       const requestOnlyInjections = [...pendingHookInjections, ...beforeIterationInjections];
@@ -1840,7 +1857,7 @@ export class AgentRunner {
         context,
         imageTextState,
         // A reply claiming delivery must not reach the user before it is verified.
-        { forceNonStreaming: requiresBufferedLlmContent || Boolean(spec.outputLocation?.hasFiles) },
+        { toolsOverride: toolsForRequest, forceNonStreaming: requiresBufferedLlmContent || Boolean(spec.outputLocation?.hasFiles) },
       );
       const iterationUsage = this.usageDict(response.usage);
       this.accumulateUsage(usage, iterationUsage);
