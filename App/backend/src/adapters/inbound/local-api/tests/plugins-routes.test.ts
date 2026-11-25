@@ -98,6 +98,17 @@ describe("plugin routes", () => {
     expect(refreshAgentTools).toHaveBeenCalledTimes(3);
   });
 
+  it("preserves the installed-version guard when a desktop monitor requests an update", async () => {
+    const plugins = createService();
+    const refreshAgentTools = vi.fn();
+    app = createApp(plugins, undefined, refreshAgentTools);
+    const res = await app.inject({ method: "POST", url: `/api/v1/plugins/${plugin.id}/update`,
+      payload: { version: "2.0.0", autoUpdateFromVersion: "1.0.0" } });
+    expect(res.statusCode).toBe(200);
+    expect(plugins.update).toHaveBeenCalledWith(plugin.id, "2.0.0", "1.0.0");
+    expect(refreshAgentTools).toHaveBeenCalledOnce();
+  });
+
   it("returns the installed plugin renderer", async () => {
     const plugins = createService();
     app = createApp(plugins);

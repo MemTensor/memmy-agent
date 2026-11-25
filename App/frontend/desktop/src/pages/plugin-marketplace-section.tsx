@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { BookOpen, Check, Clock3, FileText, Loader2, LogIn, MessageSquare, MoreHorizontal, Plus, Puzzle, RefreshCw, Scale, X } from "lucide-react";
 import { SearchField } from "../components/search-field.js";
-import type { InstalledPlugin, PluginEligibility } from "@memmy/local-api-contracts";
+import { isNewerPluginVersion, type InstalledPlugin, type PluginEligibility } from "@memmy/local-api-contracts";
 import { Button } from "../components/button.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
 import { Modal } from "../components/modal.js";
@@ -10,7 +10,6 @@ import { Tooltip } from "../components/tooltip.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { PluginDetailPreview } from "./plugin-detail-preview.js";
-import { isNewerPluginVersion } from "./plugin-version.js";
 
 export interface MarketplacePlugin {
   id: string;

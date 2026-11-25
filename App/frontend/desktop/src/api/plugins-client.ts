@@ -23,7 +23,7 @@ export interface PluginsClient {
   list(): Promise<InstalledPlugin[]>;
   catalog?(): Promise<PluginCatalogEntry[]>;
   install(pluginId: string, version?: string): Promise<InstalledPlugin>;
-  update(pluginId: string, version: string): Promise<InstalledPlugin>;
+  update(pluginId: string, version: string, autoUpdateFromVersion?: string): Promise<InstalledPlugin>;
   approvePermissions(pluginId: string, permissions: PluginPermission[]): Promise<InstalledPlugin>;
   enable(pluginId: string): Promise<InstalledPlugin>;
   disable(pluginId: string): Promise<InstalledPlugin>;
@@ -74,8 +74,8 @@ export function createHttpPluginsClient(config: RuntimeConfig): PluginsClient {
         body: { pluginId, ...(version ? { version } : {}) }
       });
     },
-    async update(pluginId, version) {
-      const updated = await requestJson({ config, path: pluginEndpointPaths.update(pluginId), schema: InstalledPluginSchema, body: { version } });
+    async update(pluginId, version, autoUpdateFromVersion) {
+      const updated = await requestJson({ config, path: pluginEndpointPaths.update(pluginId), schema: InstalledPluginSchema, body: { version, autoUpdateFromVersion } });
       for (const key of uiCache.keys()) {
         if (key.startsWith(`${pluginId}:`)) uiCache.delete(key);
       }

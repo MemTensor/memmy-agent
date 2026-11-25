@@ -66,9 +66,8 @@ async function reconcileOnce(
       if (existing?.update) continue;
       // Freeze the catalog selection across resolve/download, even if the server default changes.
       const entry = declared.get(pluginId);
-      // Publishing a new catalog entry never authorizes replacing an installed
-      // plugin. Updates are an explicit user action, including legacy manifests
-      // with autoUpdate=true and entitlement-only/offline catalog paths.
+      // Grant reconciliation installs missing plugins. The desktop update monitor
+      // handles eligible public upgrades separately from private grants and first installs.
       let plugin = existing ?? (entry
         ? await options.plugins.install(pluginId, entry.manifest.version)
         : await options.plugins.install(pluginId));

@@ -4,6 +4,8 @@ import {
   CapabilityCallSchema,
   PluginManifestSchema,
   PluginPermissionSchema,
+  isNewerPluginVersion,
+  type PluginManifest,
   type InstalledPlugin,
   type PluginCatalogEntry,
   type CapabilityCall,
@@ -38,7 +40,7 @@ export interface PluginService {
   readUi(id: string, slot: PluginUiSlot): Promise<string>;
   openArtifact(id: string, token: string): Promise<HostedPluginArtifact>;
   install(pluginId: string, version?: string): Promise<InstalledPlugin>;
-  update(id: string, version?: string): Promise<InstalledPlugin>;
+  update(id: string, version?: string, autoUpdateFromVersion?: string): Promise<InstalledPlugin>;
   configure(id: string, input: UpdatePluginConfigInput): InstalledPlugin;
   approvePermissions(id: string, permissions: PluginPermission[]): Promise<InstalledPlugin>;
   enable(id: string): Promise<InstalledPlugin>;
@@ -78,7 +80,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
   const activeCalls = new Map<string, number>();
   const suspended = new Set<string>();
   const enabling = new Map<string, Promise<InstalledPlugin>>();
-  const updates = new Map<string, { status: "waiting" | "installing"; version?: string; promise: Promise<InstalledPlugin> }>();
+  const updates = new Map<string, { status: "waiting" | "installing"; version?: string; automatic: boolean; promise: Promise<InstalledPlugin> }>();
   const idleWaiters = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   let closing = false;
   const shutdown = new AbortController();
@@ -95,6 +97,18 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       `Plugin requires an account entitlement that is not granted: ${manifest.id}`
     );
   };
+  const automaticSwap = (id: string) => {
+    const update = updates.get(id);
+    return update?.automatic && update.status === "installing" ? update.promise : undefined;
+  };
+  const canAutoUpdate = (installed: PluginRecord, manifest: PluginManifest): boolean =>
+    (installed.state === "active" || installed.state === "disabled" || installed.state === "installed")
+    && [installed.manifest, manifest].every(item => item.rules?.autoUpdate === true
+      && item.rules.distribution === "public" && !item.requiredEntitlement && eligibility(item).canUse)
+    && isNewerPluginVersion(manifest.version, installed.version)
+    && options.runtimeHost.supports(manifest.runtime.adapter)
+    && manifest.permissions.every(declared => installed.approvedPermissions.some(approved => permissionKey(approved) === permissionKey(declared)))
+    && acceptsInstalledConfig(manifest, installed.config);
   const required = (id: string) => {
     const plugin = options.repository.get(id);
     if (!plugin) throw pluginError("plugin_unavailable", `Plugin not found: ${id}`);
@@ -127,6 +141,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     async catalog() {
       const listed = await options.registry.list?.() ?? [];
       const manifests = new Map(listed.map((manifest) => [manifest.id, manifest]));
+      const publicIds = new Set(manifests.keys());
       const privatePluginIds = [...new Set(options.catalogPluginIds?.() ?? [])]
         .filter((pluginId) => !manifests.has(pluginId));
       const privateReleases = await Promise.allSettled(
@@ -137,10 +152,14 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
           manifests.set(result.value.manifest.id, result.value.manifest);
         }
       }
-      return [...manifests.values()].filter((manifest) => eligibility(manifest).visible).map((manifest) => ({
-        manifest, eligibility: eligibility(manifest),
-        ...(options.repository.get(manifest.id) ? { installed: this.list().find((plugin) => plugin.id === manifest.id) } : {})
-      }));
+      return [...manifests.values()].filter((manifest) => eligibility(manifest).visible).map((manifest) => {
+        const installed = options.repository.get(manifest.id);
+        return {
+          manifest, eligibility: eligibility(manifest),
+          ...(installed && { installed: withActivity({ ...publicPlugin(installed), eligibility: eligibility(installed.manifest) }) }),
+          ...(installed && publicIds.has(manifest.id) && canAutoUpdate(installed, manifest) && { autoUpdateFromVersion: installed.version })
+        };
+      });
     },
     async suspend(id) {
       suspended.add(id);
@@ -196,7 +215,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       }
     },
 
-    async update(id, version) {
+    async update(id, version, autoUpdateFromVersion) {
       if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
       required(id);
       const current = updates.get(id);
@@ -204,26 +223,48 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
         if (current.version !== version) throw pluginError("conflict", "An update to another version is already pending");
         return current.promise;
       }
-      const entry = { status: "waiting" as "waiting" | "installing", version, promise: undefined as unknown as Promise<InstalledPlugin> };
+      const entry = { status: "waiting" as "waiting" | "installing", version, automatic: Boolean(autoUpdateFromVersion), promise: undefined as unknown as Promise<InstalledPlugin> };
       updates.set(id, entry);
+      const waitForIdle = async (reserve: boolean) => {
+        // A gap between calls is not a task boundary. Keep serving the old
+        // version until the Agent turn AND all capability iterators finish.
+        for (;;) {
+          while (activeCalls.get(id)) {
+            if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
+            await new Promise<void>((resolve, reject) => idleWaiters.set(id, { resolve, reject }));
+          }
+          if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
+          const busy = await options.hasActiveAgentTasks?.(shutdown.signal) ?? false;
+          if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
+          // A call can start while the runtime status request is in flight.
+          if (!busy && !activeCalls.get(id)) break;
+          await delay(1_000, undefined, { signal: shutdown.signal });
+        }
+        if (reserve) entry.status = "installing";
+      };
+      const mayReactivate = (manifest: PluginManifest) =>
+        !entry.automatic || (!closing && !suspended.has(id) && eligibility(manifest).canUse);
+      const reactivate = async (plugin: PluginRecord, secrets: Record<string, string>): Promise<PluginRecord> => {
+        await activateContributions(plugin, secrets);
+        // A logout during activation sees the persisted disabled state and may not issue a suspension.
+        if (!mayReactivate(plugin.manifest)) {
+          await deactivateContributions(id);
+          return plugin;
+        }
+        return options.repository.setState(id, "active");
+      };
       entry.promise = Promise.resolve().then(async () => {
         try {
-          // A gap between calls is not a task boundary. Keep serving the old
-          // version until the Agent turn AND all capability iterators finish.
-          for (;;) {
-            while (activeCalls.get(id)) {
-              if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
-              await new Promise<void>((resolve, reject) => idleWaiters.set(id, { resolve, reject }));
+          await waitForIdle(!entry.automatic);
+          if (autoUpdateFromVersion) {
+            // A grant-only/private release must never become an unattended installation.
+            const listed = await options.registry.list?.() ?? [];
+            const advertised = listed.filter(candidate => candidate.id === id).at(-1);
+            const installed = required(id);
+            if (installed.version !== autoUpdateFromVersion || !advertised || advertised.version !== version || !canAutoUpdate(installed, advertised)) {
+              throw pluginError("conflict", "Plugin is no longer eligible for this automatic update");
             }
-            if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
-            const busy = await options.hasActiveAgentTasks?.(shutdown.signal) ?? false;
-            if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
-            // A call can start while the runtime status request is in flight.
-            if (!busy && !activeCalls.get(id)) break;
-            await delay(1_000, undefined, { signal: shutdown.signal });
           }
-          entry.status = "installing";
-          const previous = required(id);
           const release = await options.registry.resolve(id, version);
           const manifest = PluginManifestSchema.parse(release.manifest);
           if (manifest.id !== id || (version && manifest.version !== version)) {
@@ -233,6 +274,10 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
             throw pluginError("plugin_adapter_unsupported", `Unsupported plugin adapter: ${manifest.runtime.adapter}`);
           }
           assertEntitled(manifest);
+          let previous = required(id);
+          if (autoUpdateFromVersion && (previous.version !== autoUpdateFromVersion || !canAutoUpdate(previous, manifest))) {
+            throw pluginError("conflict", "Plugin is no longer eligible for this automatic update");
+          }
           if (previous.version === manifest.version) {
             if (!manifestsEqual(previous.manifest, manifest)) {
               throw pluginError("conflict", `Plugin release manifest changed: ${id}@${manifest.version}`);
@@ -242,6 +287,19 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
           }
 
           const artifact = await options.artifactManager.install({ ...release, manifest });
+          if (autoUpdateFromVersion) {
+            // Continue serving the old release while staging. A task may start during the download.
+            try {
+              await waitForIdle(true);
+              previous = required(id);
+              if (previous.version !== autoUpdateFromVersion || !canAutoUpdate(previous, manifest)) {
+                throw pluginError("conflict", "Plugin access or permissions changed while the update was downloading");
+              }
+            } catch (error) {
+              if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
+              throw error;
+            }
+          }
           const approvedPermissions = previous.approvedPermissions.filter((approved) =>
             manifest.permissions.some((declared) => permissionKey(approved) === permissionKey(declared))
           );
@@ -251,12 +309,18 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
             version: manifest.version,
             manifest,
             approvedPermissions,
-            state: pendingApproval ? "pending_approval" : "disabled",
+            state: pendingApproval ? "pending_approval" : entry.automatic && previous.state === "installed" ? "installed" : "disabled",
             ...artifact
           };
+          let secrets: Record<string, string>;
           try {
-            validateConfig(draft, draft.config);
-            const secrets = pendingApproval ? {} : readSecrets(draft, options.secretStore);
+            validateConfig(draft.manifest, draft.config);
+            secrets = pendingApproval ? {} : readSecrets(draft, options.secretStore);
+          } catch (error) {
+            if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
+            throw error;
+          }
+          try {
             if (previous.state === "active") await deactivateContributions(id);
             let updated = options.repository.save({
               manifest,
@@ -264,9 +328,8 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
               ...artifact
             });
             updated = options.repository.setApprovedPermissions(id, approvedPermissions);
-            if (previous.state === "active" && !pendingApproval) {
-              await activateContributions(updated, secrets);
-              updated = options.repository.setState(id, "active");
+            if (previous.state === "active" && !pendingApproval && mayReactivate(manifest)) {
+              updated = await reactivate(updated, secrets);
             }
             if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(previous);
             return publicPlugin(updated);
@@ -281,10 +344,9 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
             restored = options.repository.setApprovedPermissions(id, previous.approvedPermissions);
             restored = options.repository.setConfig(id, previous.config);
             let rollbackError: unknown;
-            if (previous.state === "active") {
+            if (previous.state === "active" && mayReactivate(restored.manifest)) {
               try {
-                await activateContributions(restored, readSecrets(restored, options.secretStore));
-                options.repository.setState(id, "active");
+                await reactivate(restored, readSecrets(restored, options.secretStore));
               } catch (restoreError) {
                 rollbackError = restoreError;
                 options.repository.setState(id, "failed", `Update rollback failed: ${errorMessage(restoreError)}`);
@@ -308,11 +370,12 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     },
 
     configure(id, input) {
+      if (automaticSwap(id)) throw pluginError("conflict", "Wait for the plugin update before changing its configuration");
       const plugin = required(id);
       if (plugin.state === "active" || plugin.state === "enabling" || plugin.state === "disabling") {
         throw pluginError("conflict", "Disable plugin before changing its configuration");
       }
-      validateConfig(plugin, input.config);
+      validateConfig(plugin.manifest, input.config);
       const allowedSecrets = declaredSecretKeys(plugin.manifest.permissions);
       for (const [key, secret] of Object.entries(input.secrets ?? {})) {
         if (!allowedSecrets.has(key)) {
@@ -325,6 +388,8 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     },
 
     async approvePermissions(id, permissions) {
+      const swap = automaticSwap(id);
+      if (swap) await swap.catch(() => undefined);
       const plugin = required(id);
       const approved = permissions.map((permission) => PluginPermissionSchema.parse(permission));
       assertPermissionSubset(approved, plugin.manifest.permissions);
@@ -346,6 +411,8 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     },
 
     async enable(id) {
+      const swap = automaticSwap(id);
+      if (swap) await swap.catch(() => undefined);
       if (closing) throw pluginError("plugin_unavailable", "Plugin host is shutting down");
       const inFlight = enabling.get(id);
       if (inFlight) return inFlight;
@@ -356,7 +423,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       if (!hasAllPermissions(plugin)) {
         throw pluginError("plugin_permission_denied", "Plugin permissions have not been approved");
       }
-      validateConfig(plugin, plugin.config);
+      validateConfig(plugin.manifest, plugin.config);
       const secrets = readSecrets(plugin, options.secretStore);
       options.repository.setState(id, "enabling");
       // Account reconciliation and the marketplace can enable concurrently.
@@ -375,6 +442,8 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     },
 
     async disable(id) {
+      const swap = automaticSwap(id);
+      if (swap) await swap.catch(() => undefined);
       const plugin = required(id);
       if (plugin.state !== "active" && plugin.state !== "enabling" && plugin.state !== "failed") {
         return publicPlugin(options.repository.setState(id, "disabled"));
@@ -390,6 +459,8 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
     },
 
     async uninstall(id) {
+      const swap = automaticSwap(id);
+      if (swap) await swap.catch(() => undefined);
       if (updates.has(id)) throw pluginError("conflict", "Wait for the pending plugin update before uninstalling");
       options.onSkillContentInvalidated?.(id);
       let plugin = required(id);
@@ -493,7 +564,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
           }
           assertEntitled(plugin.manifest);
           if (!hasAllPermissions(plugin)) throw new Error("Plugin permissions have changed");
-          validateConfig(plugin, plugin.config);
+          validateConfig(plugin.manifest, plugin.config);
           await activateContributions(plugin, readSecrets(plugin, options.secretStore));
         } catch (error) {
           options.repository.setState(plugin.id, "failed", errorMessage(error));
@@ -506,6 +577,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       shutdown.abort();
       for (const waiter of idleWaiters.values()) waiter.reject(pluginError("plugin_unavailable", "Plugin host is shutting down"));
       options.onSkillContentInvalidated?.();
+      await Promise.allSettled([...updates.values()].filter(update => update.automatic && update.status === "installing").map(update => update.promise));
       await Promise.allSettled(options.repository.list()
         .filter((plugin) => plugin.state === "active" || plugin.state === "enabling")
         .map((plugin) => deactivateContributions(plugin.id)));
@@ -543,9 +615,18 @@ function publicPlugin(plugin: PluginRecord): InstalledPlugin {
   return result;
 }
 
-function validateConfig(plugin: PluginRecord, config: Record<string, unknown>): void {
-  if (!plugin.manifest.configSchema) return;
-  const validate = new Ajv({ allErrors: true, strict: false }).compile(plugin.manifest.configSchema);
+function acceptsInstalledConfig(manifest: PluginManifest, config: Record<string, unknown>): boolean {
+  try {
+    validateConfig(manifest, config);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validateConfig(manifest: PluginManifest, config: Record<string, unknown>): void {
+  if (!manifest.configSchema) return;
+  const validate = new Ajv({ allErrors: true, strict: false }).compile(manifest.configSchema);
   if (!validate(config)) {
     throw pluginError("plugin_invalid", `Invalid plugin config: ${validate.errors?.[0]?.message ?? "unknown error"}`);
   }

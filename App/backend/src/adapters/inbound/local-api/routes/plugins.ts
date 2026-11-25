@@ -105,7 +105,7 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
   app.post("/api/v1/plugins/:id/update", protectedRoute, withErrorEnvelope(async (request, reply) => {
     const { id } = PluginParamsSchema.parse(request.params);
     const input = UpdatePluginInputSchema.parse(request.body ?? {});
-    const plugin = InstalledPluginSchema.parse(await options.plugins.update(id, input.version));
+    const plugin = InstalledPluginSchema.parse(await options.plugins.update(id, input.version, input.autoUpdateFromVersion));
     await refreshAgentTools(options);
     return reply.send(plugin);
   }));

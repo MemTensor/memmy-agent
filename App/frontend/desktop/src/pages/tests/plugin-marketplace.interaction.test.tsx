@@ -126,7 +126,7 @@ describe("live marketplace controller", () => {
     }
   });
 
-  it("only updates after a click and displays the queued update until running tasks finish", async () => {
+  it("requests a manual marketplace update on click and shows the queued update until running tasks finish", async () => {
     vi.useFakeTimers();
     try {
       records = [{ ...pending, version: "0.5.17", state: "active", activeCallCount: 0 }];

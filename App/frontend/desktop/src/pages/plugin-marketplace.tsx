@@ -1,6 +1,6 @@
 import { notifyPluginChange, PLUGIN_CHANGE_EVENT } from "../lib/plugin-change-event.js";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { InstalledPlugin, PluginCatalogEntry } from "@memmy/local-api-contracts";
+import { isNewerPluginVersion, type InstalledPlugin, type PluginCatalogEntry } from "@memmy/local-api-contracts";
 import { useApiClients } from "../app/providers.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { agentActions, appActions } from "../state/app-actions.js";
@@ -13,7 +13,6 @@ import {
   type MarketplacePlugin
 } from "./plugin-marketplace-section.js";
 import { writeSettingsTabHash } from "./settings-nav.js";
-import { isNewerPluginVersion } from "./plugin-version.js";
 import { resolveLanguage } from "../i18n/messages.js";
 import { officialPluginCatalog } from "./official-plugin-catalog.js";
 

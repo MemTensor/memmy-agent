@@ -2,14 +2,18 @@ import { useMemo, useSyncExternalStore } from "react";
 import type { PluginsClient } from "../api/plugins-client.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { PLUGIN_CHANGE_EVENT } from "../lib/plugin-change-event.js";
-import { isNewerPluginVersion } from "./plugin-version.js";
+import { isNewerPluginVersion } from "@memmy/local-api-contracts";
 
-/** Checks metadata only. Never resolves packages, downloads or installs. */
-export function createPluginUpdateMonitor(client: Pick<PluginsClient, "catalog" | "list">) {
+const CHECK_INTERVAL_MS = 30_000;
+
+/** Shares the desktop update check across subscribers; the Host authorizes and queues each upgrade. */
+export function createPluginUpdateMonitor(client: Pick<PluginsClient, "catalog" | "list" | "update">) {
   let available = false;
   let revision = 0;
   let inFlight = false;
   let rerun = false;
+  const pending = new Set<string>();
+  const retryAfter = new Map<string, number>();
   const listeners = new Set<() => void>();
   let timer: ReturnType<typeof setInterval> | undefined;
   const emit = (next: boolean) => {
@@ -24,8 +28,21 @@ export function createPluginUpdateMonitor(client: Pick<PluginsClient, "catalog" 
     try {
       const [catalog, installed] = await Promise.all([client.catalog?.() ?? [], client.list()]);
       if (current !== revision) return;
-      emit(catalog.some(entry => entry.eligibility.canInstall && installed.some(plugin =>
-        plugin.id === entry.manifest.id && isNewerPluginVersion(entry.manifest.version, plugin.version))));
+      const byId = new Map(installed.map(plugin => [plugin.id, plugin]));
+      let hasUpdates = false;
+      for (const { manifest, eligibility, autoUpdateFromVersion } of catalog) {
+        const plugin = byId.get(manifest.id);
+        if (!eligibility.canInstall || !plugin || !isNewerPluginVersion(manifest.version, plugin.version)) continue;
+        hasUpdates = true;
+        if (autoUpdateFromVersion !== plugin.version || plugin.update || pending.has(plugin.id)
+          || (retryAfter.get(plugin.id) ?? 0) > Date.now() || !listeners.size) continue;
+        retryAfter.delete(plugin.id);
+        pending.add(plugin.id);
+        void client.update(plugin.id, manifest.version, autoUpdateFromVersion)
+          .catch(() => { retryAfter.set(plugin.id, Date.now() + CHECK_INTERVAL_MS); })
+          .finally(() => { pending.delete(plugin.id); });
+      }
+      emit(hasUpdates);
     } catch {
       // A failed check is not evidence that a known update has disappeared.
     } finally {
@@ -41,7 +58,7 @@ export function createPluginUpdateMonitor(client: Pick<PluginsClient, "catalog" 
       listeners.add(listener);
       if (listeners.size === 1) {
         void refresh();
-        timer = setInterval(changed, 30_000);
+        timer = setInterval(changed, CHECK_INTERVAL_MS);
         window.addEventListener("focus", changed);
         window.addEventListener(PLUGIN_CHANGE_EVENT, changed);
       }

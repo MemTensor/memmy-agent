@@ -404,7 +404,9 @@ export const UpdatePluginPermissionsInputSchema = z.object({
 export type UpdatePluginPermissionsInput = z.infer<typeof UpdatePluginPermissionsInputSchema>;
 
 export const UpdatePluginInputSchema = z.object({
-  version: z.string().trim().min(1).max(64).optional()
+  version: z.string().trim().min(1).max(64).optional(),
+  /** Background checks apply only to this exact installed version. */
+  autoUpdateFromVersion: z.string().trim().min(1).max(64).optional()
 });
 export type UpdatePluginInput = z.infer<typeof UpdatePluginInputSchema>;
 
@@ -459,6 +461,8 @@ export type PluginCapabilityEventPayload = z.infer<typeof PluginCapabilityEventP
 export const PluginCatalogEntrySchema = z.object({
   manifest: PluginManifestSchema,
   eligibility: PluginEligibilitySchema,
+  /** Present only for a public update the Host can apply with existing approvals. */
+  autoUpdateFromVersion: z.string().optional(),
   installed: InstalledPluginSchema.optional()
 });
 export const PluginCatalogSchema = z.array(PluginCatalogEntrySchema);

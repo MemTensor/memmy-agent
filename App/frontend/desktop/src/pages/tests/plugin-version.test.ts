@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isNewerPluginVersion } from "../plugin-version.js";
+import { isNewerPluginVersion } from "@memmy/local-api-contracts";
 
 describe("plugin update ordering", () => {
   it.each([

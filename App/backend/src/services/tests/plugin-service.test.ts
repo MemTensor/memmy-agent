@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PluginRulesSchema } from "@memmy/local-api-contracts";
 import { reconcileEntitledPlugins } from "../plugin-entitlement-reconcile-service.js";
 import { createInMemoryPluginRegistry, type PluginRelease } from "../../adapters/outbound/plugin-registry/index.js";
 import { createAppStateStore, type AppStateStore } from "../../infrastructure/app-state-store/index.js";
@@ -105,6 +106,157 @@ function createContext(
 }
 
 describe("PluginService", () => {
+  const publicPlugin = {
+    ...release.manifest, rules: PluginRulesSchema.parse({ autoUpdate: true, distribution: "public" }),
+    permissions: [], configSchema: undefined
+  };
+
+  it("queues a public automatic update once and preserves a disabled installation after active work finishes", async () => {
+    const next = { ...publicPlugin, version: "1.1.0" };
+    let releaseTask!: (busy: boolean) => void;
+    const busy = new Promise<boolean>(resolve => { releaseTask = resolve; });
+    const { service, registry, artifactManager } = createContext([{ manifest: publicPlugin }, { manifest: next }],
+      undefined, undefined, undefined, undefined, async () => busy);
+    expect((await service.catalog())[0]?.autoUpdateFromVersion).toBeUndefined();
+    await service.install(publicPlugin.id, "1.0.0");
+    await service.disable(publicPlugin.id);
+    expect((await service.catalog())[0]?.autoUpdateFromVersion).toBe("1.0.0");
+    const resolveSpy = vi.spyOn(registry, "resolve");
+    const updates = [service.update(next.id, next.version, "1.0.0"), service.update(next.id, next.version, "1.0.0")];
+    expect(service.list()[0]?.update).toMatchObject({ status: "waiting", version: next.version });
+    expect(resolveSpy).not.toHaveBeenCalled();
+    releaseTask(false);
+    for (const result of await Promise.all(updates)) {
+      expect(result).toMatchObject({ version: "1.1.0", state: "disabled" });
+    }
+    expect(resolveSpy).toHaveBeenCalledOnce();
+    expect(artifactManager.install).toHaveBeenCalledTimes(2); // Initial installation and one update.
+    expect((await service.catalog())[0]?.autoUpdateFromVersion).toBeUndefined();
+    await expect(service.update(next.id, "1.0.0", "1.0.0")).rejects.toThrow(/eligible/);
+    expect(service.get(next.id).version).toBe("1.1.0");
+  });
+
+  it.each(["publisher opt-out", "installed opt-out", "new permissions", "unsupported", "account-only", "revoked access", "grant-only", "withdrawn"] as const)(
+    "leaves %s releases to the manual path", async scenario => {
+      const current = { ...publicPlugin, rules: { ...publicPlugin.rules, autoUpdate: scenario !== "installed opt-out" } };
+      const next = { ...publicPlugin, version: "1.1.0",
+        rules: { ...publicPlugin.rules, autoUpdate: scenario !== "publisher opt-out",
+          distribution: scenario === "account-only" ? "account" as const : "public" as const,
+          requiresLogin: scenario === "revoked access" },
+        permissions: scenario === "new permissions" ? release.manifest.permissions : [] };
+      const { service, registry, runtimeHost, artifactManager } = createContext([{ manifest: current }, { manifest: next }],
+        undefined, () => false, () => scenario === "grant-only" ? [current.id] : []);
+      await service.install(current.id, current.version);
+      if (scenario === "unsupported") vi.mocked(runtimeHost.supports).mockReturnValue(false);
+      if (scenario === "grant-only" || scenario === "withdrawn") vi.spyOn(registry, "list").mockResolvedValue([]);
+      const [entry] = await service.catalog();
+      if (scenario === "grant-only") expect(entry?.manifest.version).toBe(next.version);
+      expect(entry?.autoUpdateFromVersion).toBeUndefined();
+      await expect(service.update(current.id, next.version, current.version)).rejects.toThrow(/eligible/);
+      expect(artifactManager.install).toHaveBeenCalledOnce();
+      expect(service.get(current.id).version).toBe(current.version);
+    }
+  );
+
+  it("keeps serving the old plugin when an Agent turn starts during the download", async () => {
+    const next = { ...publicPlugin, version: "1.1.0" };
+    let endTask!: (busy: boolean) => void;
+    const task = vi.fn<() => Promise<boolean>>().mockResolvedValueOnce(false)
+      .mockImplementationOnce(() => new Promise(resolve => { endTask = resolve; }));
+    const { service, artifactManager, runtimeHost } = createContext([{ manifest: publicPlugin }, { manifest: next }],
+      undefined, undefined, undefined, undefined, task);
+    await service.install(publicPlugin.id, publicPlugin.version);
+    await service.enable(publicPlugin.id);
+    let finishDownload!: () => void;
+    vi.mocked(artifactManager.install).mockImplementationOnce(() => new Promise(resolve => {
+      finishDownload = () => resolve({ artifactHash: null, rootPath: null });
+    }));
+    const updating = service.update(next.id, next.version, publicPlugin.version);
+    await vi.waitFor(() => expect(finishDownload).toBeDefined());
+    expect(service.get(next.id).update?.status).toBe("waiting");
+    finishDownload();
+    await vi.waitFor(() => expect(endTask).toBeDefined());
+    expect(service.get(next.id).version).toBe(publicPlugin.version);
+    const iterator = service.invoke({ callId: "mid-download", conversationId: "chat", pluginId: next.id,
+      capabilityId: "run", input: {} })[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toMatchObject({ type: "result" });
+    await iterator.next();
+    expect(runtimeHost.deactivate).not.toHaveBeenCalled();
+    endTask(false);
+    await expect(updating).resolves.toMatchObject({ version: next.version, state: "active" });
+  });
+
+  it.each(["deactivate", "activate"] as const)("honors a disable and permission revocation requested during %s", async phase => {
+    const current = { ...publicPlugin, permissions: [release.manifest.permissions[0]!] };
+    const next = { ...current, version: "1.1.0" };
+    const { service, runtimeHost } = createContext([{ manifest: current }, { manifest: next }]);
+    await service.install(current.id, current.version);
+    await service.approvePermissions(current.id, current.permissions);
+    await service.enable(current.id);
+    let finishSwap!: () => void;
+    const pausedSwap = new Promise<void>(resolve => { finishSwap = resolve; });
+    const pausePoint = vi.mocked(runtimeHost[phase]).mockClear().mockReturnValueOnce(pausedSwap);
+    const upgrading = service.update(next.id, next.version, current.version);
+    await vi.waitFor(() => expect(pausePoint).toHaveBeenCalledOnce());
+    const disable = service.disable(current.id);
+    const revoke = service.approvePermissions(current.id, []);
+    finishSwap();
+    await upgrading;
+    await Promise.all([disable, revoke]);
+    expect(service.get(current.id)).toMatchObject({ version: next.version, state: "disabled", approvedPermissions: [] });
+  });
+
+  it.each(["update", "rollback"] as const)("keeps a login-required public plugin disabled after logout during %s activation", async phase => {
+    let signedIn = true;
+    const current = { ...publicPlugin, rules: { ...publicPlugin.rules, requiresLogin: true } };
+    const next = { ...current, version: "1.1.0" };
+    const { service, runtimeHost, skillManager } = createContext([{ manifest: current }, { manifest: next }], undefined, () => signedIn);
+    await service.install(current.id, current.version);
+    await service.enable(current.id);
+
+    let resume!: () => void;
+    vi.mocked(runtimeHost.activate).mockImplementation(async record => {
+      if (phase === "rollback" && record.version === next.version) throw new Error("new version failed");
+      await new Promise<void>(resolve => { resume = resolve; });
+    });
+    const updating = service.update(current.id, next.version, current.version);
+    await vi.waitFor(() => expect(resume).toBeDefined());
+    expect(service.get(current.id).state).toBe("disabled");
+    signedIn = false;
+    await reconcileEntitledPlugins({ plugins: service, entitlements: [] });
+    vi.mocked(runtimeHost.deactivate).mockClear();
+    vi.mocked(skillManager.deactivate).mockClear();
+    resume();
+    if (phase === "rollback") await expect(updating).rejects.toThrow("new version failed");
+    else await expect(updating).resolves.toMatchObject({ state: "disabled" });
+    expect(service.get(current.id)).toMatchObject({ version: phase === "rollback" ? current.version : next.version, state: "disabled" });
+    expect(runtimeHost.deactivate).toHaveBeenCalledExactlyOnceWith(current.id);
+    expect(skillManager.deactivate).toHaveBeenCalledExactlyOnceWith(current.id);
+  });
+
+  it("leaves a running plugin untouched when the new configuration is incompatible", async () => {
+    const next = { ...publicPlugin, version: "1.1.0", configSchema: release.manifest.configSchema };
+    const { service, artifactManager, runtimeHost } = createContext([{ manifest: publicPlugin }, { manifest: next }]);
+    await service.install(publicPlugin.id, publicPlugin.version);
+    await service.enable(publicPlugin.id);
+    expect((await service.catalog())[0]?.autoUpdateFromVersion).toBeUndefined();
+    await expect(service.update(next.id, next.version, publicPlugin.version)).rejects.toThrow(/eligible/);
+    expect(service.get(next.id)).toMatchObject({ version: publicPlugin.version, state: "active" });
+    expect(artifactManager.install).toHaveBeenCalledOnce();
+    expect(runtimeHost.deactivate).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the resolved release before an automatic update downloads it", async () => {
+    const next = { ...publicPlugin, version: "1.1.0" };
+    const { service, registry, artifactManager } = createContext([{ manifest: publicPlugin }, { manifest: next }]);
+    await service.install(publicPlugin.id, publicPlugin.version);
+    expect((await service.catalog())[0]?.autoUpdateFromVersion).toBe(publicPlugin.version);
+    vi.spyOn(registry, "resolve").mockResolvedValue({ manifest: { ...next, permissions: release.manifest.permissions } });
+    await expect(service.update(next.id, next.version, publicPlugin.version)).rejects.toThrow(/eligible/);
+    expect(artifactManager.install).toHaveBeenCalledOnce();
+    expect(service.get(next.id)).toMatchObject({ version: publicPlugin.version, approvedPermissions: [] });
+  });
+
   it("hides a legacy private install after revocation and restores visibility when regranted", async () => {
     let granted = true;
     const legalRelease: PluginRelease = { manifest: {
