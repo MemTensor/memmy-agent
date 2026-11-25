@@ -34,6 +34,24 @@ export function createCreditsService(cloud: CloudClient, accounts: AccountSessio
     async usageDetail(callId: string) { return CreditsUsageDetailSchema.parse(await read(`usage/${encodeURIComponent(callId)}`)); },
     async usageExport(query: CreditsUsageExportQuery) { return CreditsUsageExportSchema.parse(await read("usage/export", query)); },
     async usageDownload(query: CreditsUsageExportQuery & { token: string }) { return CreditsUsageDownloadSchema.parse(await read("usage/download", query)); },
+    async streamUsageDownload(query: CreditsUsageExportQuery & { token: string }, signal: AbortSignal) {
+      const uuid = accounts.getCloudUuid();
+      if (!uuid) throw Object.assign(new Error("Account session is not authenticated"), { code: "unauthorized" });
+      const filters = Object.fromEntries(Object.entries(query).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+      const response = await cloud.streamCreditsDownload({ uuid, query: filters, signal });
+      if (accounts.getCloudUuid() !== uuid) {
+        await response.body?.cancel();
+        throw Object.assign(new Error("Account session changed"), { code: "unauthorized" });
+      }
+      return {
+        bytes: response.headers.get("X-Memmy-Credits-Export-Bytes"),
+        body: response.body!.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+          flush() {
+            if (accounts.getCloudUuid() !== uuid) throw new Error("Account session changed");
+          }
+        }))
+      };
+    },
     async checkin(body: { requestId: string }) { return CreditsCheckinSchema.parse(await write("check-ins", body)); },
     async redeem(body: { requestId: string; code: string }) { return CreditsRedemptionSchema.parse(await write("redemptions", body)); },
     async invitationSummary() { return CreditsInvitationSummarySchema.parse(await read("invitations/summary")); },

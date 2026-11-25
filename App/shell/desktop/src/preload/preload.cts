@@ -8,6 +8,8 @@ type DesktopUpdateInstallResult = import("@memmy/desktop-interface").DesktopUpda
 type DesktopMenuBarIconResult = import("@memmy/desktop-interface").DesktopMenuBarIconResult;
 type DesktopImageActionRequest = import("@memmy/desktop-interface").DesktopImageActionRequest;
 type DesktopImageSaveResult = import("@memmy/desktop-interface").DesktopImageSaveResult;
+type DesktopCreditsExportResult = import("@memmy/desktop-interface").DesktopCreditsExportResult;
+type CreditsUsageExportQuery = import("@memmy/local-api-contracts").CreditsUsageExportQuery;
 type DesktopMemoryServiceRestartResult = import("@memmy/desktop-interface").DesktopMemoryServiceRestartResult;
 type DesktopProjectDirectorySelection = import("@memmy/desktop-interface").DesktopProjectDirectorySelection;
 type AgentGatewayStartupIssue = import("@memmy/local-api-contracts").AgentGatewayStartupIssue;
@@ -85,6 +87,8 @@ interface MemmyPreloadApi {
   copyImageToClipboard(request: DesktopImageActionRequest): Promise<void>;
   saveImage(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult>;
   saveFile(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult>;
+  saveCreditsExport(id: string, query: CreditsUsageExportQuery): Promise<DesktopCreditsExportResult>;
+  cancelCreditsExport(id: string): void;
   exportMemoryDatabase(): Promise<unknown>;
   installCliTools(): Promise<unknown>;
   restartMemoryService(): Promise<DesktopMemoryServiceRestartResult>;
@@ -349,6 +353,14 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   async saveFile(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult> {
     return ipcRenderer.invoke("memmy:save-file", request);
+  },
+
+  async saveCreditsExport(id: string, query: CreditsUsageExportQuery): Promise<DesktopCreditsExportResult> {
+    return ipcRenderer.invoke("memmy:save-credits-export", id, query);
+  },
+
+  cancelCreditsExport(id: string): void {
+    ipcRenderer.send("memmy:cancel-credits-export", id);
   },
 
   async notifyTaskDone(payload: { title: string; body: string; silent: boolean; deliveryId?: string }): Promise<void> {

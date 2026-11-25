@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Download, RefreshCw } from "lucide-react";
 import { Button } from "../components/button.js";
+import { useOptionalNotificationCenter } from "../components/notification-center.js";
 import { CreditRequestHover } from "./credit-request-hover.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { useCreditDemo } from "../app/use-credit-demo.js";
@@ -10,7 +11,14 @@ import { useOptionalApiClients } from "../app/providers.js";
 import { useAppState } from "../state/app-state.js";
 import { useCreditRefresh } from "../app/use-credit-refresh.js";
 import { formatCreditAmount } from "../app/credit-display.js";
+import { ApiRequestError } from "../api/http.js";
 import styles from "./credits-usage-ledger.module.css";
+
+const MAX_DATE_RANGE_DAYS = 31;
+
+function exceedsDateRange(start: string, end: string) {
+  return Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`) >= MAX_DATE_RANGE_DAYS * 86_400_000;
+}
 
 function presetStart(span: LedgerSpan, now: Date) {
   const start=creditRangeStart(span,now);
@@ -85,6 +93,7 @@ function Pagination(props: { total: number | null; page: number; size: number; h
 
 export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
   const { t, language }=useTranslation();
+  const notifications = useOptionalNotificationCenter();
   const { demo, now: demoNow, reload }=useCreditDemo(!live);
   const { clients } = useOptionalApiClients();
   const { state } = useAppState();
@@ -101,7 +110,8 @@ export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
   const [pickingEnd,setPickingEnd]=useState(false);
   const [custom,setCustom]=useState({start:draftStart,end:draftEnd});
   const [page,setPage]=useState(1), [size,setSize]=useState(10);
-  const [exportStatus,setExportStatus]=useState("");
+  const [listStatus, setListStatus] = useState("");
+  const [exporting, setExporting] = useState(false);
   const tableRef=useRef<HTMLDivElement|null>(null);
   const tableHeight=useRef(0);
   const calendarRef=useRef<HTMLDivElement|null>(null);
@@ -139,7 +149,7 @@ export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
   useLayoutEffect(() => {
     if (!waitingForRows) tableHeight.current = tableRef.current?.getBoundingClientRect().height ?? 0;
   }, [waitingForRows, liveUsage.data, tab, size]);
-  useEffect(() => { setPage(1); setCursors([undefined]); setExportStatus(""); }, [userId, client, tab, from, to, size]);
+  useEffect(() => { setPage(1); setCursors([undefined]); setListStatus(""); }, [userId, client, tab, from, to, size]);
   useEffect(() => () => { exportController.current?.abort(); }, [userId, client, tab, from, to]);
   const currentPage=live ? page : Math.min(page,Math.max(1,Math.ceil(rows.length/size)));
   const visible=rows.slice((currentPage-1)*size,currentPage*size);
@@ -151,13 +161,13 @@ export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
   const title=(row:UsageRow)=>row.source==="memory" ? operation(row.calls[0]!) : row.operation==="title" ? `${operation(row.calls[0]!)} · ${prompt(row.calls[0]!)}` : prompt(row.calls[0]!);
   const model=(row:UsageRow)=>row.models.length===1 ? row.models[0] : t("usage.multipleModels",{model:row.models[0]!,count:row.models.length});
   const dateLabel=(row:UsageRow)=>row.source==="agent" ? stamp(row.at) : row.date===formatDayKey(now) ? stamp(now.toISOString()) : new Date(row.at).toLocaleDateString(language,{month:"2-digit",day:"2-digit"});
-  const reset=()=>{setPage(1);setCursors([undefined]);setExportStatus("");};
+  const reset=()=>{setPage(1);setCursors([undefined]);setListStatus("");};
   function refreshUsage() {
     if (live) { if (page > 1) { setPage(1); setCursors([undefined]); } else liveUsage.refresh(); return; }
     reload();
-    setExportStatus(t("usage.refreshed",{time:new Date().toLocaleTimeString(language,{hour:"2-digit",minute:"2-digit",hour12:false})}));
+    setListStatus(t("usage.refreshed",{time:new Date().toLocaleTimeString(language,{hour:"2-digit",minute:"2-digit",hour12:false})}));
   }
-  const draftValid=Boolean(usageRange(draftStart,draftEnd)) && draftEnd<=formatDayKey(now);
+  const draftValid=Boolean(usageRange(draftStart,draftEnd)) && draftEnd<=formatDayKey(now) && !exceedsDateRange(draftStart,draftEnd);
   function toggleCalendar() {
     if(customOpen) {setCustomOpen(false);return;}
     setDraftStart(start);setDraftEnd(end);setPickingEnd(false);
@@ -169,28 +179,66 @@ export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
   function selectCalendarDay(day:string) {
     if(!pickingEnd) {setDraftStart(day);setDraftEnd("");setPickingEnd(true);return;}
     if(day<draftStart) {setDraftStart(day);setDraftEnd("");return;}
+    if (exceedsDateRange(draftStart, day)) {
+      const message = t("usage.dateRangeTooLarge");
+      if (notifications) notifications.notify({ variant: "warning", title: message, autoDismissMs: 4000 });
+      else setListStatus(message);
+      return;
+    }
     setDraftEnd(day);setPickingEnd(false);
   }
   async function exportCsv() {
     if (live) {
-      if (!client) return;
-      exportController.current?.abort();
+      if (!client || exportController.current) return;
       const controller = new AbortController(); exportController.current = controller;
+      setExporting(true);
       try {
+        const bridge = window.memmy;
+        if (bridge?.saveCreditsExport && bridge.cancelCreditsExport) {
+          const requestId = crypto.randomUUID();
+          const cancel = () => bridge.cancelCreditsExport?.(requestId);
+          controller.signal.addEventListener("abort", cancel, { once: true });
+          try {
+            const result = await bridge.saveCreditsExport(requestId, { domain: tab, from, to });
+            if (controller.signal.aborted) return;
+            if (result.status === "saved") showExportSuccess(result.rowCount);
+            else if (result.status === "failed") showExportError(result.code);
+          } finally {
+            controller.signal.removeEventListener("abort", cancel);
+          }
+          return;
+        }
         const result = await client.usageExport({ domain: tab, from, to }, controller.signal);
         const { csv } = await client.usageDownload(result.downloadUrl, controller.signal);
         if (controller.signal.aborted) return;
         saveCsv(csv, result.fileName);
-        setExportStatus(t("usage.exported", { count: result.rowCount }));
-      } catch { if (!controller.signal.aborted) setExportStatus(t("usage.exportFailed")); }
+        showExportSuccess(result.rowCount);
+      } catch (error) {
+        if (!controller.signal.aborted) showExportError(error instanceof ApiRequestError ? error.code : null);
+      } finally {
+        exportController.current = null;
+        setExporting(false);
+      }
       return;
     }
-    const headers=["RequestID",t("usage.requestContent"),t("usage.operation"),t("credits.ledger.model"),t("credits.ledger.credits")];
-    const csv=usageCsv(headers,filtered.map(c=>[c.id,c.modelInput,operation(c),c.model,c.credits.toFixed(2)]));
     try {
+      const headers=["RequestID",t("usage.requestContent"),t("usage.operation"),t("credits.ledger.model"),t("credits.ledger.credits")];
+      const csv=usageCsv(headers,filtered.map(c=>[c.id,c.modelInput,operation(c),c.model,c.credits.toFixed(2)]));
       saveCsv(csv, `memmy-usage-${tab}-${start}-${end}.csv`);
-      setExportStatus(t("usage.exported",{count:filtered.length}));
-    } catch {setExportStatus(t("usage.exportFailed"));}
+      showExportSuccess(filtered.length);
+    } catch {
+      showExportError(null);
+    }
+  }
+  function showExportSuccess(count: number) {
+    notifications?.notify({ variant: "success", title: t("usage.exported", { count }), autoDismissMs: 4000 });
+  }
+  function showExportError(code: string | null) {
+    const message = code === "EXPORT_TOO_LARGE" ? "usage.exportTooLarge"
+      : code === "EXPORT_RANGE_TOO_LARGE" ? "usage.exportRowLimit"
+      : code === "USAGE_DATE_RANGE_TOO_LARGE" ? "usage.dateRangeTooLarge"
+      : code === "EXPORT_SAVE_FAILED" ? "usage.exportSaveFailed" : "usage.exportFailed";
+    notifications?.notify({ variant: "warning", title: t(message), autoDismissMs: 4000 });
   }
   return <section className={styles.section} aria-label={t("credits.ledger.title")}>
     <h2>{t("credits.ledger.title")}</h2>
@@ -205,9 +253,15 @@ export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
           {(["today","7","30"] as const).map(value=><button key={value} aria-pressed={span===value} onClick={()=>{setSpan(value);setCustomOpen(false);reset();}}>{t(value==="today"?"credits.ledger.today":value==="7"?"credits.ledger.week":"credits.ledger.month")}</button>)}
         </div>
         <div className={styles.toolbarActions}>
-          <button type="button" className={styles.dateTrigger} onClick={refreshUsage} aria-busy={live && liveUsage.loading} aria-label={t("usage.refresh")} title={t("usage.refresh")}><RefreshCw size={14}/></button>
+          <button type="button" className={`${styles.dateTrigger} ${styles.refreshTrigger}`} onClick={refreshUsage} aria-busy={live && liveUsage.loading} aria-label={t("usage.refresh")} title={t("usage.refresh")}><RefreshCw size={14}/></button>
           <button type="button" ref={calendarTriggerRef} className={styles.dateTrigger} aria-label={t("usage.chooseDate")} aria-expanded={customOpen} aria-controls="usage-date-calendar" onClick={toggleCalendar}><CalendarDays size={14} aria-hidden="true" />{start} – {end}</button>
-          <button type="button" className={styles.dateTrigger} disabled={live ? !liveUsage.data?.items.length || !!liveUsage.error : !filtered.length} onClick={() => void exportCsv()}><Download size={14}/>{t("usage.export")}</button>
+          <button
+            type="button"
+            className={styles.dateTrigger}
+            disabled={exporting || (live ? !liveUsage.data?.items.length || !!liveUsage.error : !filtered.length)}
+            aria-busy={exporting}
+            onClick={() => void exportCsv()}
+          ><Download size={14} aria-hidden="true" />{t(exporting ? "usage.exporting" : "usage.export")}</button>
         </div>
         {customOpen && <div ref={calendarRef} id="usage-date-calendar" className={styles.calendarPopover} role="dialog" aria-label={t("usage.chooseDate")}>
           <div className={styles.calendarMonths}>
@@ -216,7 +270,7 @@ export function CreditsUsageLedger({ live = false }: { live?: boolean }) {
           <div className={styles.calendarFooter}><span aria-live="polite">{draftStart} – {draftEnd||"…"}</span><Button size="sm" variant="secondary" disabled={!draftValid} onClick={()=>{setCustom({start:draftStart,end:draftEnd});setSpan("custom");setCustomOpen(false);reset();}}>{t("usage.apply")}</Button></div>
         </div>}
       </div>
-      <div className={styles.exportStatus} role="status">{liveUsage.error && !liveUsage.data ? t(liveUsage.error === "auth" ? "credits.live.auth" : "credits.live.error") : exportStatus}</div>
+      <div className={styles.listStatus} role="status">{liveUsage.error && !liveUsage.data ? t(liveUsage.error === "auth" ? "credits.live.auth" : "credits.live.error") : listStatus}</div>
       <div role="tabpanel" id="usage-list" aria-labelledby={`usage-tab-${tab}`} aria-busy={live && liveUsage.loading} className={styles.tableScroll} ref={tableRef} style={waitingForRows ? { minHeight: tableHeight.current } : undefined}>
         <table className={styles.table}><thead><tr><th>{t(tab==="agent"?"credits.ledger.time":"usage.date")}</th><th>{t(tab==="agent"?"usage.request":"usage.operation")}</th><th>{t("credits.ledger.model")}</th><th className={styles.amount}>{t("credits.ledger.credits")}</th></tr></thead>
           <tbody>{!live && visible.map(row=><tr key={row.id}><td className={styles.time}>{dateLabel(row)}</td><td>{row.source==="agent" ? <CreditRequestHover content={title(row)} requestId={row.calls[0]!.id} /> : <span>{title(row)}</span>}{row.source==="agent" && <small className={styles.rowRequestId}>{row.calls[0]!.id}</small>}{row.source==="agent" && row.status==="interrupted" && <small className={styles.state}>{t(`usage.status.${row.status}`)}</small>}</td><td className={styles.model}>{model(row)}</td><td className={styles.amount}>{number(row.credits)}</td></tr>)}{live && liveUsage.data?.items.map(row => <tr key={row.callId ?? JSON.stringify([row.businessDate, row.operation, row.model])}>

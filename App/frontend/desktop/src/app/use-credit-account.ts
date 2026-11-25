@@ -25,7 +25,7 @@ export async function readCreditGrants(client: CreditsClient, cancelled = () => 
 const accountVersion = (data: { summary: CreditsSummary }) => data.summary.account.version;
 
 export const CreditAccountContext = createContext<ReturnType<typeof useCreditAccountState>>({
-  live: false, loading: false, error: null, summary: null, grants: [], reload: () => {}
+  live: false, loading: false, error: null, completedAt: null, summary: null, grants: [], reload: () => {}
 });
 
 export function useCreditAccount() {
@@ -53,5 +53,5 @@ export function useCreditAccountState() {
   const result = useCreditRefresh(load, live && !!client, userId, version, accountVersion);
   const reload = useCallback(() => { window.dispatchEvent(new Event("memmy:credits-refresh")); }, []);
   return { live, loading: live && (result.loading || (!result.data && !result.error)), error: result.error,
-    summary: result.data?.summary ?? null, grants: result.data?.grants ?? [], reload };
+    completedAt: result.completedAt, summary: result.data?.summary ?? null, grants: result.data?.grants ?? [], reload };
 }

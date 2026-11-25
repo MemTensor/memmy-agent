@@ -100,3 +100,7 @@ export interface DesktopWorkspaceDirectoryResult {
   entries: DesktopWorkspaceDirectoryEntry[];
   truncated: boolean;
 }
+export type DesktopCreditsExportResult =
+  | { status: "saved"; rowCount: number }
+  | { status: "cancelled" }
+  | { status: "failed"; code: "EXPORT_TOO_LARGE" | "EXPORT_RANGE_TOO_LARGE" | "USAGE_DATE_RANGE_TOO_LARGE" | "EXPORT_SAVE_FAILED" | "EXPORT_FAILED" };

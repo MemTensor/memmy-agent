@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppProviders } from "../../app/providers.js";
+import { NotificationCenterProvider } from "../../components/notification-center.js";
 import { createCreditDemo, writeCreditDemo, readCreditDemo } from "../../app/credits-preview-quota.js";
 import { CreditsUsageLedger } from "../credits-usage-ledger.js";
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT:boolean }).IS_REACT_ACT_ENVIRONMENT=true;
@@ -113,13 +114,27 @@ describe("usage list interaction",()=>{
     click(button('今天'));
     expect(host.querySelector('[aria-controls="usage-date-calendar"]')?.textContent).toContain('2026-10-16 – 2026-10-16');
   });
+  it("warns on 32 calendar days and lets the user correct the end date to 31 days", () => {
+    act(() => root.render(<AppProviders><NotificationCenterProvider><CreditsUsageLedger /></NotificationCenterProvider></AppProviders>));
+    click(button('选择日期'));
+    click(host.querySelector<HTMLButtonElement>('[data-day="2026-09-15"]:not(:disabled)')!);
+    click(host.querySelector<HTMLButtonElement>('[data-day="2026-10-16"]:not(:disabled)')!);
+    expect(document.querySelector('.memmy-notification-stack')?.textContent).toContain('日期范围不能超过 31 天');
+    expect(button('确定').disabled).toBe(true);
+    expect(button('选择日期').textContent).toBe('2026-10-09 – 2026-10-16');
+    click(host.querySelector<HTMLButtonElement>('[data-day="2026-10-15"]:not(:disabled)')!);
+    expect(button('确定').disabled).toBe(false);
+    click(button('确定'));
+    expect(button('选择日期').textContent).toBe('2026-09-15 – 2026-10-15');
+  });
   it("exports all filtered calls, including off-page records and zero usage",()=>{
+    act(() => root.render(<AppProviders><NotificationCenterProvider><CreditsUsageLedger /></NotificationCenterProvider></AppProviders>));
     let blob:Blob|undefined;
     vi.spyOn(URL,'createObjectURL').mockImplementation(b=>{blob=b as Blob;return 'blob:usage-test';});
     vi.spyOn(URL,'revokeObjectURL').mockImplementation(()=>{});
     vi.spyOn(HTMLAnchorElement.prototype,'click').mockImplementation(()=>{});
     click(button('导出'));expect(blob).toBeDefined();expect(blob!.size).toBeGreaterThan(1000);
-    expect(host.textContent).toContain('已导出 48 条请求记录');
+    expect(document.querySelector('.memmy-notification--success')?.textContent).toContain('已导出 48 条请求记录');
     expect(rows()).toHaveLength(10);
   });
 });

@@ -1,5 +1,5 @@
 /** Credits balance, plans, and check-in, using the settings usage visual language. */
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Coins, Gift, RefreshCw, X } from "lucide-react";
 import { Button } from "../components/button.js";
 import { useOptionalNotificationCenter } from "../components/notification-center.js";
@@ -228,13 +228,37 @@ function CreditAccountStatus({ account }: { account: ReturnType<typeof useCredit
 
 /** Original credits layout, with server data in account mode. */
 export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
-  const { dispatch } = useAppState();
+  const { state, dispatch } = useAppState();
   const { language, t } = useTranslation();
+  const notifications = useOptionalNotificationCenter();
   const account = useCreditAccount();
   const { demo, reload, now } = useCreditDemo(!account.live);
-  const [refreshing, setRefreshing] = useState(false);
+  const [demoRefreshing, setDemoRefreshing] = useState(false);
+  const [pendingRefresh, setPendingRefresh] = useState<{ userId: string | null; previousCompletion: Date | null } | null>(null);
+  const userId = state.account.userId;
+  const refreshing = account.live ? pendingRefresh !== null && pendingRefresh.userId === userId : demoRefreshing;
   const [redeemOpen, setRedeemOpen] = useState(false);
-  const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
+  const [lastRefresh, setLastRefresh] = useState<{ userId: string | null; at: Date } | null>(null);
+  const refreshedAt = lastRefresh?.userId === userId ? lastRefresh.at : null;
+
+  useEffect(() => {
+    if (!pendingRefresh) return;
+    if (!account.live || pendingRefresh.userId !== userId) {
+      setPendingRefresh(null);
+      return;
+    }
+    if (account.loading || !account.completedAt || account.completedAt === pendingRefresh.previousCompletion) return;
+
+    setPendingRefresh(null);
+    if (!account.error) setLastRefresh({ userId, at: account.completedAt });
+    notifications?.notify({
+      variant: account.error ? "warning" : "success",
+      title: t(account.error === "auth" ? "credits.live.auth" : account.error ? "credits.refreshFailed" : "credits.refreshSuccess"),
+      autoDismissMs: 3000,
+    });
+  }, [account.completedAt, account.error, account.live, account.loading, notifications, pendingRefresh, t, userId]);
+  const refreshLabel = t(refreshing ? "credits.refreshing" : "credits.refresh");
+  const refreshTitle = !refreshing && refreshedAt ? t("credits.refreshed", { time: formatStamp(refreshedAt) }) : refreshLabel;
   const cycleKey = account.summary?.plan.cycleStart ?? creditCycleKey(demo, now);
   const [dismissedCycle, setDismissedCycle] = useState(() => (
     typeof window !== "undefined" ? window.sessionStorage.getItem(LOW_DISMISS_KEY) : null
@@ -253,13 +277,17 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
   }
 
   function refreshBalance() {
-    if (account.live) { account.reload(); setRefreshedAt(new Date()); return; }
     if (refreshing) return;
-    setRefreshing(true);
+    if (account.live) {
+      setPendingRefresh({ userId, previousCompletion: account.completedAt });
+      account.reload();
+      return;
+    }
+    setDemoRefreshing(true);
     window.setTimeout(() => {
       reload();
-      setRefreshedAt(new Date());
-      setRefreshing(false);
+      setLastRefresh({ userId, at: new Date() });
+      setDemoRefreshing(false);
     }, 450);
   }
 
@@ -298,7 +326,7 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
             <div className={usageStyles.balanceAmount}>
               <strong>{account.summary ? formatCreditAmount(account.summary.account.spendable, language) : formatCredits(pool.totalRemaining, language)}</strong>
               <span>{t("credits.balance.total")}</span>
-              <button type="button" className={usageStyles.balanceRefresh} onClick={refreshBalance} disabled={refreshing} aria-label={t(refreshing ? "credits.refreshing" : "credits.refresh")} title={refreshedAt ? t("credits.refreshed", {time:formatStamp(refreshedAt)}) : t("credits.refresh")}>
+              <button type="button" className={usageStyles.balanceRefresh} onClick={refreshBalance} disabled={refreshing} aria-busy={refreshing} aria-label={refreshLabel} title={refreshTitle}>
                 <RefreshCw size={15} className={refreshing ? usageStyles.creditsRefreshSpin : undefined} aria-hidden="true" />
               </button>
             </div>
@@ -308,7 +336,7 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
               ))}
             </dl>
           </div>
-          <span className={usageStyles.balanceLive} role="status">{refreshedAt ? t("credits.refreshed", {time:formatStamp(refreshedAt)}) : ""}</span>
+          {(!account.live || !notifications) && <span className={usageStyles.balanceLive} role="status">{refreshedAt ? t("credits.refreshed", {time:formatStamp(refreshedAt)}) : ""}</span>}
         </div>
       </section>
 

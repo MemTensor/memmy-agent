@@ -9,14 +9,16 @@ afterEach(async () => { await Promise.all(apps.splice(0).map(app => app.close())
 function fixture() {
   let credential: string | null = "private-account-token";
   const getCredits = vi.fn(async () => ({ items: [], nextCursor: null, hasMore: false }));
-  const credits = createCreditsService({ ...createMockCloudClient(), getCredits }, { getCloudUuid: () => credential } as never);
+  const cloud = createMockCloudClient();
+  const streamCreditsDownload = vi.fn(cloud.streamCreditsDownload);
+  const credits = createCreditsService({ ...cloud, getCredits, streamCreditsDownload }, { getCloudUuid: () => credential } as never);
   const app = Fastify(); apps.push(app);
   registerCreditsRoutes(app, { credits, authenticateRuntimeToken: async (request, reply) => {
     if (request.headers["x-memmy-local-token"] !== "runtime-token") return reply.code(401).send({ error: "unauthorized" });
   } });
-  const read = (url: string, authenticated = true) => app.inject({ method: "GET", url,
-    headers: authenticated ? { "x-memmy-local-token": "runtime-token" } : {} });
-  return { read, getCredits, setCredential: (value: string | null) => { credential = value; } };
+  const read = (url: string, authenticated = true, accept?: string) => app.inject({ method: "GET", url,
+    headers: { ...(authenticated && { "x-memmy-local-token": "runtime-token" }), ...(accept && { accept }) } });
+  return { read, getCredits, streamCreditsDownload, setCredential: (value: string | null) => { credential = value; } };
 }
 describe("credits local proxy", () => {
   it("forwards region and language and supports no application", async () => {
@@ -67,6 +69,27 @@ describe("credits local proxy", () => {
       return { items: [], nextCursor: null, hasMore: false };
     });
     expect((await f.read("/api/credits/grants")).statusCode).toBe(401);
+  });
+  it("forwards authenticated CSV streams and preserves size errors and the legacy JSON response", async () => {
+    const f = fixture();
+    const url = "/api/credits/usage/download?token=signed&domain=memory";
+    const csv = "\ufeffRequestID,积分消耗\r\nrequest-1,0.01\r\n";
+    f.streamCreditsDownload.mockResolvedValueOnce(new Response(csv, {
+      headers: { "X-Memmy-Credits-Export-Bytes": String(Buffer.byteLength(csv)) }
+    }));
+    expect((await f.read(url, false, "text/csv")).statusCode).toBe(401);
+    const streamed = await f.read(url, true, "text/csv");
+    expect(streamed.statusCode).toBe(200);
+    expect(streamed.headers["content-type"]).toBe("text/csv;charset=UTF-8");
+    expect(streamed.headers["x-memmy-credits-export-bytes"]).toBe(String(Buffer.byteLength(csv)));
+    expect(streamed.body).toBe(csv);
+    expect(f.streamCreditsDownload).toHaveBeenCalledWith({ uuid: "private-account-token", query: { domain: "memory", token: "signed" }, signal: expect.any(AbortSignal) });
+    f.streamCreditsDownload.mockRejectedValueOnce(Object.assign(new Error("file too large"), { code: "EXPORT_TOO_LARGE" }));
+    const rejected = await f.read(url, true, "text/csv");
+    expect(rejected.statusCode).toBe(413);
+    expect(rejected.json().error.code).toBe("EXPORT_TOO_LARGE");
+    f.getCredits.mockResolvedValueOnce({ csv } as never);
+    expect((await f.read(url)).json()).toEqual({ csv });
   });
 });
 

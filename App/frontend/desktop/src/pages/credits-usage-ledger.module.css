@@ -36,12 +36,12 @@
 .calendarFooter { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:8px; padding-top:8px; border-top:1px solid var(--usage-track); color:var(--usage-secondary); font-size:var(--codex-text-sm); }
 .calendarMonthHeader button:focus-visible,.calendarMonthSelectors select:focus-visible,.calendarDay:focus-visible { outline:2px solid var(--color-action-sky); outline-offset:2px; }
 .pagination select { font:inherit; border:1px solid var(--color-border-stone); border-radius:6px; padding:5px 8px; background:var(--color-background-paper); color:inherit; }
-.exportStatus { color:var(--usage-muted); font-size:var(--codex-text-sm); }
-.exportStatus:empty { display:none; }
+.listStatus { color:var(--usage-muted); font-size:var(--codex-text-sm); }
+.listStatus:empty { display:none; }
 .tableScroll { overflow-x:auto; }
-.dateTrigger[aria-busy="true"] svg { animation:usage-refresh 1s linear infinite; }
+.refreshTrigger[aria-busy="true"] svg { animation:usage-refresh 1s linear infinite; }
 @keyframes usage-refresh { to { transform:rotate(360deg); } }
-@media (prefers-reduced-motion:reduce) { .dateTrigger[aria-busy="true"] svg { animation:none; } }
+@media (prefers-reduced-motion:reduce) { .refreshTrigger[aria-busy="true"] svg { animation:none; } }
 .table { width:100%; border-collapse:collapse; font-size:var(--codex-text-sm); table-layout:fixed; text-align:left; }
 .table th { font-weight:400; color:var(--usage-muted); padding:10px 8px; border-bottom:1px solid var(--color-border-stone); }
 .table th:first-child { width:21%; }

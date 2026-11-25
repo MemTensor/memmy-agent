@@ -100,6 +100,8 @@ declare global {
       copyImageToClipboard(request: DesktopImageActionRequest): Promise<void>;
       saveImage(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult>;
       saveFile(request: DesktopImageActionRequest): Promise<DesktopImageSaveResult>;
+      saveCreditsExport?(id: string, query: import("@memmy/local-api-contracts").CreditsUsageExportQuery): Promise<import("@memmy/desktop-interface").DesktopCreditsExportResult>;
+      cancelCreditsExport?(id: string): void;
       exportMemoryDatabase(): Promise<{ canceled: true } | { canceled: false; exportPath: string; bytes: number }>;
       installCliTools(): Promise<MemmyCliInstallResult>;
       restartMemoryService(): Promise<DesktopMemoryServiceRestartResult>;

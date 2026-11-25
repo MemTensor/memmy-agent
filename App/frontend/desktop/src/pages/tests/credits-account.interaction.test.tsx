@@ -2,6 +2,7 @@
 import { act, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { DesktopCreditsExportResult } from "@memmy/desktop-interface";
 import type { CreditsGrant } from "@memmy/local-api-contracts";
 import type { AppClients } from "../../api/client-types.js";
 import type { CreditsClient } from "../../api/credits-client.js";
@@ -10,6 +11,7 @@ import { readCreditGrants, useCreditAccount } from "../../app/use-credit-account
 import { useCreditsExhaustedPrompt, requestCreditsExhaustedPrompt } from "../../app/credits-exhausted-prompt.js";
 import { creditDisplayBuckets, creditUsagePercent, formatCreditAmount } from "../../app/credit-display.js";
 import { ApiRequestError } from "../../api/http.js";
+import { NotificationCenterProvider } from "../../components/notification-center.js";
 import { useAppState } from "../../state/app-state.js";
 import { appActions } from "../../state/app-actions.js";
 import { CreditsSettingsPanel, CreditsSourceDetailPage, HomeCheckinCard } from "../credits-in-app.js";
@@ -27,28 +29,25 @@ const summary = {
 };
 const reward: CreditsGrant = { grantId: "9007199254740993", sourceType: "INVITATION", sourceId: "invite", sourceName: "真实邀请奖励", granted: "250.00", remaining: "214.56", reserved: "20.00", grantedAt: "2026-11-03T00:00+08:00", expiresAt: null, status: "AVAILABLE" };
 function fixture() {
-  return { submitApplication: vi.fn(async () => ({applicationId: "1", status: "APPROVED" as const, plan: "PRO" as const, submittedAt: "2026-11-04T10:00:00+08:00", processedAt: "2026-11-04T10:00:00+08:00", failureReason: null})), checkin: vi.fn(), redeem: vi.fn(), invitationSummary: vi.fn(), invitations: vi.fn(), plans: vi.fn(async () => ({ currentPlan: "FREE" as const, plans: [
-    { code: "FREE" as const, name: "Free", cycleGrant: "1000.00", knowledgeEntitlement: { baseLimit: 10, storageBytes: 10737418240, membersPerBase: 5 } },
-    { code: "PRO" as const, name: "Pro", cycleGrant: "5000.00", knowledgeEntitlement: { baseLimit: 50, storageBytes: 53687091200, membersPerBase: 10 } }
-  ], application: { eligible: true, formType: "CN_ZH" as const, formUrl: "https://alidocs.dingtalk.com/notable/share/form/v01GXn4ZWgaXodwdODQ_Gb8aww9_hSDStju?source=link" } })),
+  return { submitApplication: vi.fn(async () => ({applicationId: "1", status: "APPROVED" as const, plan: "PRO" as const, submittedAt: "2026-11-04T10:00:00+08:00", processedAt: "2026-11-04T10:00:00+08:00", failureReason: null})), checkin: vi.fn(), redeem: vi.fn(), invitationSummary: vi.fn(), invitations: vi.fn(), plans: vi.fn<CreditsClient["plans"]>(),
     latestApplication: vi.fn(async () => null), usage: vi.fn(async () => ({ items: [], hasMore: false, nextCursor: null })), usageDetail: vi.fn(), usageExport: vi.fn(), usageDownload: vi.fn(), summary: vi.fn(async () => summary),
     grants: vi.fn(async () => ({ items: [reward, { ...reward, grantId: "2", sourceType: "PLAN" as const, sourceName: "Free", granted: "1000.00", remaining: "1000.00", reserved: "0.00" }], hasMore: false, nextCursor: null as string | null })),
     ledger: vi.fn(async () => ({ items: [], hasMore: false, nextCursor: null })) } satisfies CreditsClient;
 }
-function Harness({ client, home = false }: { client: CreditsClient; home?: boolean | "compact" }) {
+function Harness({ client, home = false, language = "zh-CN" }: { client: CreditsClient; home?: boolean | "compact"; language?: "zh-CN" | "en-US" }) {
   const { state, dispatch } = useAppState(); const { setClients } = useApiClients();
   switchAccount = id => dispatch(appActions.accountUpdated({ userId: id }));
   useEffect(() => {
     setClients({ credits: client } as AppClients);
-    dispatch(appActions.bootstrapLoaded({ ...mockBootstrap, app: { ...mockBootstrap.app, userMode: "account", language: "zh-CN" } }, "/settings"));
+    dispatch(appActions.bootstrapLoaded({ ...mockBootstrap, app: { ...mockBootstrap.app, userMode: "account", language } }, "/settings"));
     switchAccount("100001");
-  }, [client, dispatch, setClients]);
+  }, [client, dispatch, language, setClients]);
   if (state.bootstrap?.app.userMode !== "account") return null;
   if (state.navigation.currentPath === "/credit-reward-details") return <CreditsSourceDetailPage source="reward" />;
   if (state.navigation.currentPath === "/plans") return <CreditsPlansPage />;
   return home ? <HomeCheckinCard compact={home === "compact"} dismissible={home === true} /> : <CreditsSettingsPanel />;
 }
-async function mount(client: CreditsClient) { await act(async () => root.render(<AppProviders><Harness client={client} /></AppProviders>)); }
+async function mount(client: CreditsClient, language?: "zh-CN" | "en-US") { await act(async () => root.render(<AppProviders><Harness client={client} language={language} /></AppProviders>)); }
 async function click(label: string) {
   const button = [...document.querySelectorAll<HTMLButtonElement>("button")].find(el => el.getAttribute("aria-label") === label || el.textContent?.trim() === label);
   expect(button).toBeTruthy(); await act(async () => { button!.click(); });
@@ -164,6 +163,38 @@ it("keeps precise spendable amounts without treating held credits as consumed", 
   expect(creditDisplayBuckets([], [{ ...reward, status: "EXPIRED", remaining: "0.00" }])[0]?.usageKnown).toBe(false); expect(creditUsagePercent(1544n, 25000n)).toBe(6.17);
 });
 
+it("opens both complete plans using fixed benefits and the shared account summary", async () => {
+  const client = fixture();
+  const cycleEnd = "2026-12-18T10:52:00+08:00";
+  client.summary.mockResolvedValue({
+    ...summary,
+    plan: { ...summary.plan, code: "PRO", cycleEnd, nextCycleGrant: "6000.00" },
+    balanceBySource: { ...summary.balanceBySource, plan: "973.25" },
+  } as never);
+  await mount(client);
+  await click("查看权益");
+
+  expect(host.querySelector("h1")?.textContent).toBe("套餐");
+  const cards = Array.from(host.querySelectorAll("article"));
+  expect(cards.map(card => card.querySelector("h2")?.textContent)).toEqual(["免费版", "进阶版"]);
+  expect(cards[0]?.textContent).toContain("1,000.00");
+  expect(cards[0]?.textContent).toContain("10 个知识库");
+  expect(cards[0]?.textContent).toContain("10G 知识库容量");
+  expect(cards[0]?.textContent).toContain("5 人共享");
+  expect(cards[1]?.textContent).toContain("5,000.00");
+  expect(cards[1]?.textContent).toContain("50 个知识库");
+  expect(cards[1]?.textContent).toContain("50G 知识库容量");
+  expect(cards[1]?.textContent).toContain("10 人共享");
+  expect(host.textContent).toContain("当前套餐：进阶版");
+  expect(host.textContent).toContain("本周期套餐积分973.25");
+  const nextGrant = new Date(cycleEnd).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  expect(host.textContent).toContain(`下次积分发放${nextGrant}`);
+  expect(host.textContent).not.toContain("正在读取积分");
+  expect(client.summary).toHaveBeenCalledTimes(1);
+  expect(client.plans).not.toHaveBeenCalled();
+  expect(client.latestApplication).not.toHaveBeenCalled();
+});
+
 it("opens a local questionnaire, keeps failed answers and retry ID, then refreshes the real Pro plan", async () => {
   const client = fixture(); const openExternal = vi.fn(); const previous=window.memmy;
   Object.defineProperty(window,"memmy",{value:{openExternal}, configurable:true});
@@ -191,8 +222,6 @@ it("opens a local questionnaire, keeps failed answers and retry ID, then refresh
     const first=client.submitApplication.mock.calls[0]![0];
     expect(first.answers.additionalContact).toBe('');
     expect(first).not.toHaveProperty('userId'); expect(first).not.toHaveProperty('phoneNumber');
-    const plans=await client.plans();
-    client.plans.mockResolvedValue({...plans,currentPlan:'PRO',application:{...plans.application,eligible:false}} as never);
     client.summary.mockResolvedValue({...summary,plan:{...summary.plan,code:'PRO'},account:{...summary.account,balance:'5234.56',version:3}} as never);
     await click("提交申请");
     expect(client.submitApplication.mock.calls[1]![0]).toEqual(first);
@@ -201,9 +230,8 @@ it("opens a local questionnaire, keeps failed answers and retry ID, then refresh
     expect(host.textContent).not.toContain("现在申请");
   } finally { Object.defineProperty(window,"memmy",{value:previous,configurable:true}); }
 });
-it("does not use an external URL returned in the plan response", async () => {
-  const client = fixture(); const value = await client.plans();
-  client.plans.mockResolvedValue({ ...value, application: { ...value.application, formUrl: "https://example.invalid" } });
+it("keeps the questionnaire local and closes it when the account changes", async () => {
+  const client = fixture();
   await mount(client); await click("申请升级"); await click("现在申请");
   expect(document.querySelector('a[target="_blank"]')).toBeNull();
   expect(document.querySelector('[role="dialog"]')).not.toBeNull();
@@ -216,9 +244,12 @@ it.each([
   ["INTL_ZH", ["upgradeReason", "useCases", "usageFrequency", "organization", "role"]],
   ["INTL_EN", ["upgradeReason", "useCases", "role", "organization", "usageFrequency"]]
 ] as const)("preserves the source questionnaire field order for %s", async (formType, order) => {
-  const client=fixture(); const plans=await client.plans();
-  client.plans.mockResolvedValue({...plans,application:{...plans.application,formType}} as never);
-  await mount(client); await click("申请升级"); await click("现在申请");
+  const client = fixture();
+  const english = formType.endsWith("_EN");
+  vi.stubEnv("MEMMY_APP_EDITION", formType.startsWith("INTL_") ? "intl" : "cn");
+  await mount(client, english ? "en-US" : "zh-CN");
+  await click(english ? "Apply for upgrade" : "申请升级");
+  await click(english ? "Apply now" : "现在申请");
   const form=document.querySelector('[role="dialog"] form')!;
   const fields=[...form.children].slice(0,5).map(el => el.tagName==='FIELDSET' ? el.querySelector('input')!.name : el.querySelector('input,textarea')!.id.replace('upgrade-',''));
   expect(fields).toEqual(order);
@@ -250,6 +281,35 @@ it("loads billing details into the existing request hover and cancels them when 
   expect(signal.aborted).toBe(true);
   expect(document.querySelector('[role="region"]')).toBeNull();
 });
+it("shows the actual result of a manual balance refresh even when the amount is unchanged", async () => {
+  const client = fixture();
+  await act(async () => root.render(<AppProviders><NotificationCenterProvider><Harness client={client} /></NotificationCenterProvider></AppProviders>));
+  const button = host.querySelector<HTMLButtonElement>('button[aria-label="刷新"]')!;
+  expect(document.querySelector(".memmy-notification-stack")).toBeNull();
+
+  let finishRefresh!: (value: typeof summary) => void;
+  client.summary.mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }));
+  await click("刷新");
+  expect(button.disabled).toBe(true);
+  expect(button.getAttribute("aria-busy")).toBe("true");
+  expect(button.title).toBe("刷新中");
+  expect(document.querySelector(".memmy-notification-stack")).toBeNull();
+
+  await act(async () => finishRefresh(summary));
+  expect(button.disabled).toBe(false);
+  expect(button.title).toMatch(/^已更新 /);
+  expect(document.querySelector(".memmy-notification--success")?.textContent).toContain("积分余额已刷新");
+  expect(host.textContent).toContain("1,214.56");
+
+  const updatedTitle = button.title;
+  client.summary.mockRejectedValueOnce(new Error("offline"));
+  await click("刷新");
+  expect(button.disabled).toBe(false);
+  expect(button.title).toBe(updatedTitle);
+  expect(document.querySelector(".memmy-notification--warning")?.textContent).toContain("积分余额刷新失败，请重试。");
+  expect(host.textContent).toContain("1,214.56");
+});
+
 it("keeps cached balance, usage and rewards visible after a refresh fails", async () => {
   const client = fixture();
   client.usage.mockResolvedValueOnce({ items: [usageRow], hasMore: false, nextCursor: null } as never);
@@ -341,6 +401,29 @@ it("uses server CSV export and rejects a late download after switching accounts"
   await act(async () => switchAccount("100002")); await act(async () => resolve({ csv: "test-data" }));
   expect(create).not.toHaveBeenCalled(); create.mockRestore();
 });
+it("disables native CSV export while saving and shows a specific size error toast", async () => {
+  const client = fixture();
+  client.usage.mockResolvedValue({ items: [usageRow], hasMore: false, nextCursor: null } as never);
+  let finishExport!: (result: DesktopCreditsExportResult) => void;
+  const saveCreditsExport = vi.fn(() => new Promise<DesktopCreditsExportResult>(resolve => { finishExport = resolve; }));
+  vi.stubGlobal("memmy", { saveCreditsExport, cancelCreditsExport: vi.fn() });
+  try {
+    await act(async () => root.render(<AppProviders><NotificationCenterProvider><Harness client={client} /></NotificationCenterProvider></AppProviders>));
+    const exportButton = [...host.querySelectorAll("button")].find(button => button.textContent === "导出")!;
+    await click("导出");
+    expect(exportButton.disabled).toBe(true);
+    expect(exportButton.textContent).toBe("正在导出...");
+    expect(host.querySelector('[role="status"]')?.textContent).toBe("");
+    expect(saveCreditsExport).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ domain: "agent" }));
+    expect(client.usageDownload).not.toHaveBeenCalled();
+    await act(async () => finishExport({ status: "failed", code: "EXPORT_TOO_LARGE" }));
+    expect(document.querySelector(".memmy-notification--warning")?.textContent).toContain("导出文件过大，请缩小日期范围后重试。");
+    expect(exportButton.disabled).toBe(false);
+    expect(exportButton.textContent).toBe("导出");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 it("uses ledger-derived consumed amounts for expired grants", () => {
   const bucket = creditDisplayBuckets([], [{ ...reward, used: "15.44", remaining: "0.00", reserved: "0.00", status: "EXPIRED" }])[0]!;
   expect(bucket.usageKnown).toBe(true); expect(bucket.used).toBe(1544n);
@@ -358,7 +441,7 @@ it.each([
   expect(host.textContent).toContain(`已使用 ${used} / 250.00`);
 });
 
-it("keeps the original account menu and shows the account balance, not spendable", async () => {
+it("shows the spendable balance in the account menu when the server includes holds in balance", async () => {
   const { AppFrame } = await vi.importActual<typeof import("../app-frame.js")>("../app-frame.js");
   const client = fixture();
   function MenuHarness() {
@@ -374,21 +457,24 @@ it("keeps the original account menu and shows the account balance, not spendable
   const trigger = host.querySelector<HTMLButtonElement>('[data-account-menu-trigger="true"]'); expect(trigger).not.toBeNull();
   await act(async () => trigger!.click());
   const menu = document.querySelector('[role="menu"]');
-  // Spendable drops to 0 under every in-flight hold; the menu label says "balance", so it shows balance.
-  expect(menu?.textContent).toContain("免费版"); expect(menu?.textContent).toContain("1,234.56");
-  expect(menu?.textContent).not.toContain("1,214.56");
+  expect(menu?.textContent).toContain("免费版"); expect(menu?.textContent).toContain("1,214.56");
+  expect(menu?.textContent).not.toContain("1,234.56");
   expect(menu?.textContent).not.toContain("套餐积分"); expect(menu?.textContent).not.toContain("平台奖励积分");
   let resolveRefresh!: (value: typeof summary) => void;
   client.summary.mockImplementationOnce(() => new Promise(resolve => { resolveRefresh = resolve; }));
   await click("刷新积分余额");
-  expect(menu?.textContent).toContain("1,234.56");
+  expect(menu?.textContent).toContain("1,214.56");
   expect(menu?.textContent).not.toContain("正在读取积分");
   expect(menu?.textContent).not.toContain("—");
-  await act(async () => resolveRefresh({ ...summary, account: { balance: "83.27", held: "0.00", spendable: "83.27", version: 3 } }));
-  expect(menu?.textContent).toContain("83.27");
+  await act(async () => resolveRefresh({
+    ...summary,
+    account: { balance: "1233.56", held: "0.00", spendable: "1233.56", version: 3 },
+    balanceBySource: { plan: "1000.00", reward: "233.56" },
+  }));
+  expect(menu?.textContent).toContain("1,233.56");
   client.summary.mockRejectedValueOnce(new Error("offline"));
   await click("刷新积分余额");
-  expect(menu?.textContent).toContain("83.27");
+  expect(menu?.textContent).toContain("1,233.56");
   expect(menu?.textContent).not.toContain("数据可能不是最新");
 });
 it("retries a live redemption with the same request ID and displays its actual result", async () => {
@@ -418,7 +504,6 @@ it("dismissal is per account and never claims a live check-in", async () => {
   expect(host.querySelector(".home-checkin")).not.toBeNull();
 });
 it("home check-in reminder collapses after a successful claim and confirms with a toast", async () => {
-  const { NotificationCenterProvider } = await import("../../components/notification-center.js");
   const client = fixture();
   client.checkin.mockImplementationOnce(async () => {
     client.summary.mockResolvedValue({ ...summary, account: { ...summary.account, version: 3 }, checkin: { ...summary.checkin, claimedToday: true } });
@@ -435,7 +520,6 @@ it("home check-in reminder collapses after a successful claim and confirms with 
   expect(document.body.textContent).toContain("+100 积分已到账");
 });
 it("shows the compact check-in confirmation for three seconds before sliding out", async () => {
-  const { NotificationCenterProvider } = await import("../../components/notification-center.js");
   const client = fixture();
   client.checkin.mockResolvedValue({ claimed: true, alreadyClaimed: false, grant: { amount: "100.00" }, accountVersion: 3 });
   await act(async () => root.render(<AppProviders><NotificationCenterProvider><Harness client={client} home="compact" /></NotificationCenterProvider></AppProviders>));
@@ -471,7 +555,6 @@ it("check-in retries reuse the request ID and refresh the authoritative status",
   expect(host.querySelector(".home-checkin")).toBeNull();
 });
 it("an already claimed check-in refreshes the status without showing a new reward toast", async () => {
-  const { NotificationCenterProvider } = await import("../../components/notification-center.js");
   window.localStorage.removeItem("memmy.home.checkinDismissedOn:100001");
   const client = fixture();
   client.checkin.mockImplementationOnce(async () => {
