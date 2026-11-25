@@ -28,6 +28,7 @@ import {
   resolveQwenworkHomeDirectory,
   resolveWorkbuddyHomeDirectory
 } from "./agent-paths.js";
+import { createAntigravitySourceAdapter } from "./adapters/antigravity/index.js";
 import { createClaudeCodeSourceAdapter } from "./adapters/claude-code/index.js";
 import { createCodexSourceAdapter } from "./adapters/codex/index.js";
 import { createCursorSourceAdapter } from "./adapters/cursor/index.js";
@@ -40,6 +41,7 @@ import { createQwenworkSourceAdapter } from "./adapters/qwenwork/index.js";
 import { createSourceRegistry, type SourceRegistry } from "./adapters/source-registry.js";
 import type { ConversationMessage, ScanProgress, SourceAdapter } from "./adapters/types.js";
 import {
+  antigravityConfigDirectory,
   hasStagedSourceTurn,
   isCompleteTurn,
   orderedTurns,
@@ -62,6 +64,7 @@ import {
 } from "@memmy/agent-source-core";
 import { openMemoryAgentSourceScanStore, readScanRequestedMode, type MemoryAgentSourceScanStore } from "./scan-store.js";
 import { createWorkbuddySourceAdapter } from "./adapters/workbuddy/index.js";
+import { createAntigravitySkillTarget } from "./integration/antigravity/target.js";
 import { createClaudeCodeSkillTarget } from "./integration/claude-code/index.js";
 import { createCodexSkillTarget } from "./integration/codex/index.js";
 import { createCursorSkillTarget } from "./integration/cursor/index.js";
@@ -1398,6 +1401,7 @@ export function createBuiltinSourceRegistry(): SourceRegistry {
     createCursorSourceAdapter(),
     createClaudeCodeSourceAdapter(),
     createCodexSourceAdapter(),
+    createAntigravitySourceAdapter(),
     createOpencodeSourceAdapter(),
     createOpenclawSourceAdapter(),
     createHermesSourceAdapter(),
@@ -1413,6 +1417,7 @@ export function createBuiltinIntegrationRegistry(configPath: string): SkillTarge
     createCursorSkillTarget({ memmyConfigPath: configPath }),
     createClaudeCodeSkillTarget({ memmyConfigPath: configPath }),
     createCodexSkillTarget({ memmyConfigPath: configPath }),
+    createAntigravitySkillTarget({ memmyConfigPath: configPath }),
     createOpencodeSkillTarget({ memmyConfigPath: configPath }),
     createOpenclawSkillTarget({ memmyConfigPath: configPath }),
     createHermesSkillTarget({ memmyConfigPath: configPath }),
@@ -2131,6 +2136,7 @@ function agentRootDirectory(sourceId: string): string | null {
     case "cursor": return join(homedir(), ".cursor");
     case "claude_code": return resolveClaudeCodeHomeDirectory();
     case "codex": return resolveCodexHomeDirectory();
+    case "antigravity": return antigravityConfigDirectory();
     case "opencode": return resolveOpencodeConfigDirectory();
     case "openclaw": return resolveOpenclawStateDirectory();
     case "hermes": return resolveHermesHomeDirectory();
@@ -2324,7 +2330,7 @@ function connectionStatus(sourceId: string): AgentConnectionStatus {
 }
 
 function agentConnectionKind(sourceId: string): "plugin" | "skill" {
-  return ["cursor", "claude_code", "codex", "opencode", "openclaw", "hermes", "deepseek_harness"].includes(sourceId)
+  return ["cursor", "claude_code", "codex", "antigravity", "opencode", "openclaw", "hermes", "deepseek_harness"].includes(sourceId)
     ? "plugin"
     : "skill";
 }

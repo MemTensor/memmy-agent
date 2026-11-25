@@ -1,3 +1,4 @@
+import antigravityLogoUrl from "../assets/agent-logos/antigravity.svg";
 import claudeCodeLogoUrl from "../assets/agent-logos/claude-code.svg";
 import codexLogoUrl from "../assets/agent-logos/codex.svg";
 import cursorLogoUrl from "../assets/agent-logos/cursor.svg";
@@ -16,6 +17,7 @@ export const MEMORY_AGENT_SOURCE_VALUES = [
   "cursor",
   "claude_code",
   "codex",
+  "antigravity",
   "opencode",
   "openclaw",
   "hermes",
@@ -32,6 +34,7 @@ const AGENT_SOURCE_DISPLAY_NAMES: Record<string, string> = {
   cursor: "Cursor",
   claude_code: "Claude Code",
   codex: "Codex",
+  antigravity: "Antigravity",
   opencode: "OpenCode",
   openclaw: "OpenClaw",
   hermes: "Hermes",
@@ -45,6 +48,7 @@ export const AGENT_SOURCE_LOGOS: Partial<Record<string, string>> = {
   cursor: cursorLogoUrl,
   claude_code: claudeCodeLogoUrl,
   codex: codexLogoUrl,
+  antigravity: antigravityLogoUrl,
   opencode: opencodeLogoUrl,
   openclaw: openclawLogoUrl,
   hermes: hermesLogoUrl,

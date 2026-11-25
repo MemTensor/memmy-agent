@@ -78,6 +78,10 @@ describe("SourcesSubPage", () => {
     expect(agentSourceLogoUrl("workbuddy")).toContain("workbuddy.png");
   });
 
+  it("使用 Antigravity 品牌图标", () => {
+    expect(agentSourceLogoUrl("antigravity")).toContain("antigravity.svg");
+  });
+
   it("使用用户提供的 Pi、QwenWork 与黑色 DeepSeek Harness 图标", () => {
     expect(agentSourceLogoUrl("pi")).toContain("%3ctitle%3ePi%3c/title%3e");
     expect(agentSourceLogoUrl("qwenwork")).toContain("%3ctitle%3eQwen%3c/title%3e");

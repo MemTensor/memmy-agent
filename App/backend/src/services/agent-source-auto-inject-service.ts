@@ -7,6 +7,7 @@ const AUTO_INJECT_AGENT_SOURCE_IDS = new Set([
   "cursor",
   "claude_code",
   "codex",
+  "antigravity",
   "opencode",
   "openclaw",
   "hermes",
@@ -15,8 +16,8 @@ const AUTO_INJECT_AGENT_SOURCE_IDS = new Set([
   "pi",
   "qwenwork"
 ]);
-const HOOK_OR_PLUGIN_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex", "opencode", "openclaw", "hermes", "deepseek_harness"]);
-const UPDATABLE_HOOK_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex", "opencode"]);
+const HOOK_OR_PLUGIN_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex", "antigravity", "opencode", "openclaw", "hermes", "deepseek_harness"]);
+const UPDATABLE_HOOK_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex", "antigravity", "opencode"]);
 
 export interface AgentSourceAutoInjectService {
   runOnce(): Promise<AgentSourceAutoInjectResult>;

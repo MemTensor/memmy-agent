@@ -14,7 +14,10 @@ import {
   createOpencodeDatabaseSource,
   type SourceTurn
 } from "@memmy/agent-source-core";
-export { readClaudeCodeSourceTurn, readCodexSourceTurn } from "@memmy/agent-source-core";
+export {
+  antigravityConversationId, antigravityUserText, findAntigravityTranscript, readAntigravityHookTurn,
+  readClaudeCodeSourceTurn, readCodexSourceTurn
+} from "@memmy/agent-source-core";
 import { createHash, randomUUID } from "node:crypto";
 import {
   resolveCursorDataPaths,
@@ -224,8 +227,9 @@ export async function startRuntimeTurn(
   session: RuntimeSession,
   turnId: string,
   query: string,
+  options: { timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
-  const client = new RuntimeHttpClient(session.config);
+  const client = new RuntimeHttpClient(session.config, options.timeoutMs);
   const body = session.protocol === "v2"
     ? { ...runtimeEnvelope(session.source, session.sessionKey, session.config.userId, session.projectId, session.adapterId, session.profileId), sessionId: session.sessionId, turnId, query }
     : { source: session.source, adapterId: session.adapterId, requestId: `${session.source}-start:${turnId}`, sessionId: session.sessionId, turnId, query };

@@ -13,6 +13,7 @@ export function formatWorkBuddyAgentPrompt(prompt: string): string {
 }
 
 const AGENT_TOOL_PROMPT_DEEPLINK_BUILDERS: Readonly<Record<string, (prompt: string) => string>> = {
+  antigravity: (prompt) => `antigravity://open?prompt=${encodeURIComponent(prompt)}`,
   cursor: (prompt) => `cursor://anysphere.cursor-deeplink/prompt?text=${encodeURIComponent(prompt)}`,
   claude_code: (prompt) => `claude://claude.ai/new?q=${encodeURIComponent(prompt)}`,
   // WorkBuddy desktop task deeplink (not command?text — that host is unimplemented).

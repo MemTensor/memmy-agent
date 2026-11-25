@@ -1,6 +1,6 @@
 /** Memmy resume hook template. */
 
-export type MemmyResumeHookMode = "claude-code" | "codex" | "cursor";
+export type MemmyResumeHookMode = "claude-code" | "codex" | "cursor" | "antigravity";
 
 export interface RenderMemmyResumeHookScriptOptions {
   source: string;
@@ -10,6 +10,7 @@ export interface RenderMemmyResumeHookScriptOptions {
 /** Renders the Node hook script used by prompt-submit hooks. */
 export function renderMemmyResumeHookScript(options: RenderMemmyResumeHookScriptOptions): string {
   return String.raw`#!/usr/bin/env node
+import { createHash } from "node:crypto";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -31,7 +32,7 @@ const MODE = ${JSON.stringify(options.mode)};
 const CONFIG_URL = new URL("./memmy-memory-config.json", import.meta.url);
 const STATE_URL = new URL("./memmy-resume-state.json", import.meta.url);
 const DEFAULT_MEMMY_CONFIG_PATH = join(homedir(), ".memmy", "config.yaml");
-const FETCH_TIMEOUT_MS = 45000;
+const FETCH_TIMEOUT_MS = MODE === "antigravity" ? 2500 : 45000;
 const SEARCH_LIMIT = 20;
 const DISPLAY_LIMIT = 5;
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -73,45 +74,60 @@ async function main() {
   }
 
   const prompt = extractPrompt(payload);
+  if (await handleResumePrompt(payload, prompt)) return;
+  try {
+    const started = await startCapturedTurn(payload, prompt);
+    writeTurnStartOutput(started);
+  } catch (error) {
+    reportCaptureFailure("start_failed", error, payload);
+    writeAllowOutput();
+  }
+}
+
+let antigravityOutput = null;
+
+export async function handleAntigravityResume(conversationId, prompt) {
+  antigravityOutput = null;
+  if (MODE === "antigravity") await handleResumePrompt({ conversationId }, prompt);
+  return antigravityOutput;
+}
+
+async function handleResumePrompt(payload, prompt) {
+  const sessionKey = sessionStateKey(payload);
   const selection = parseResumeSelection(prompt);
   if (selection) {
     try {
-      const client = await createMemmyClient();
-      const state = await readPendingState();
-      const selected = resolvePendingSelection(state, selection, sessionStateKey(payload));
+      const state = await readPendingState(sessionKey);
+      const selected = resolvePendingSelection(state, selection, sessionKey);
       if (selected) {
+        const client = await createMemmyClient();
         const detail = await client.get("/api/v1/memory/" + encodeURIComponent(selected.episodeId));
-        await clearPendingState();
+        await clearPendingState(sessionKey);
         writeResumeContextOutput(buildResumeContext(selected, detail));
-        return;
+        return true;
       }
     } catch (error) {
       writeResultOutput("Memmy resume selection failed: " + formatError(error));
-      return;
+      return true;
     }
   }
 
-  const query = parseResumeQuery(prompt);
-  if (!isResumeCommand(prompt)) {
-    try {
-      const started = await startCapturedTurn(payload, prompt);
-      writeTurnStartOutput(started);
-    } catch (error) {
-      reportCaptureFailure("start_failed", error, payload);
-      writeAllowOutput();
-    }
-    return;
+  if (!isResumeCommand(prompt)) return false;
+  if (MODE === "antigravity" && selection) {
+    writeResultOutput("No active Memmy resume selection. Run /memmy-resume <query> first.");
+    return true;
   }
+  const query = parseResumeQuery(prompt);
 
   if (!query) {
     writeResultOutput("Usage: /memmy-resume <query>");
-    return;
+    return true;
   }
 
   if (query === "cancel") {
-    await clearPendingState();
+    await clearPendingState(sessionKey);
     writeResultOutput("Memmy resume selection cancelled.");
-    return;
+    return true;
   }
 
   try {
@@ -124,9 +140,9 @@ async function main() {
       source: SOURCE
     });
     const candidates = await buildEpisodeCandidates(client, query, result);
-    await writePendingState({
+    await writePendingState(sessionKey, {
       createdAt: new Date().toISOString(),
-      sessionKey: sessionStateKey(payload),
+      sessionKey,
       query,
       candidates: candidates.map(candidate => ({
         index: candidate.index,
@@ -139,6 +155,7 @@ async function main() {
   } catch (error) {
     writeResultOutput("Memmy resume search failed: " + formatError(error));
   }
+  return true;
 }
 
 function readStdin() {
@@ -729,6 +746,10 @@ function writeTurnStartOutput(started) {
 }
 
 function writeResultOutput(message) {
+  if (MODE === "antigravity") {
+    antigravityOutput = { kind: "result", text: message };
+    return;
+  }
   if (MODE === "cursor") {
     process.stdout.write(JSON.stringify({
       continue: false,
@@ -744,6 +765,10 @@ function writeResultOutput(message) {
 }
 
 function writeResumeContextOutput(context) {
+  if (MODE === "antigravity") {
+    antigravityOutput = { kind: "selection", text: context };
+    return;
+  }
   if (MODE === "cursor") {
     process.stdout.write(JSON.stringify({
       continue: false,
@@ -957,21 +982,27 @@ async function clearTurnState(payload) {
   await unlink(turnStateUrl(payload)).catch(() => undefined);
 }
 
-async function readPendingState() {
+function pendingStateUrl(sessionKey) {
+  if (MODE !== "antigravity") return STATE_URL;
+  const key = createHash("sha256").update(sessionKey).digest("hex");
+  return new URL("./memmy-resume-" + key + ".json", STATE_URL);
+}
+
+async function readPendingState(sessionKey) {
   try {
-    const state = parseJson(await readFile(STATE_URL, "utf8"));
+    const state = parseJson(await readFile(pendingStateUrl(sessionKey), "utf8"));
     return state && typeof state === "object" && !Array.isArray(state) ? state : null;
   } catch {
     return null;
   }
 }
 
-async function writePendingState(state) {
-  await writeFile(STATE_URL, JSON.stringify(state, null, 2) + "\n", "utf8");
+async function writePendingState(sessionKey, state) {
+  await writeFile(pendingStateUrl(sessionKey), JSON.stringify(state, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
 }
 
-async function clearPendingState() {
-  await unlink(STATE_URL).catch(() => undefined);
+async function clearPendingState(sessionKey) {
+  await unlink(pendingStateUrl(sessionKey)).catch(() => undefined);
 }
 
 function resolvePendingSelection(state, selection, sessionKey) {
@@ -992,27 +1023,21 @@ function resolvePendingSelection(state, selection, sessionKey) {
 
 async function buildEpisodeCandidates(client, query, result) {
   const hits = extractSearchHits(result).slice(0, SEARCH_LIMIT);
-  const enriched = [];
-  for (let index = 0; index < hits.length; index += 1) {
-    const hit = hits[index];
+  const enriched = (await mapResumeDetails(hits, async (hit, index) => {
     const memoryId = normalizeText(hit.id) || normalizeText(hit.memoryId) || normalizeText(hit.refId);
-    if (!memoryId) {
-      continue;
-    }
+    if (!memoryId) return null;
     const detail = await client.get("/api/v1/memory/" + encodeURIComponent(memoryId)).catch(() => null);
     const episodeRef = episodeRefFromDetail(detail);
-    if (!episodeRef.id) {
-      continue;
-    }
-    enriched.push({
+    if (!episodeRef.id) return null;
+    return {
       hit,
       rank: index + 1,
       score: normalizedScore(hit.score) || normalizedScore(hit.similarity),
       memoryId,
       detail,
       episodeRef
-    });
-  }
+    };
+  })).filter(Boolean);
 
   const groups = new Map();
   for (const item of enriched) {
@@ -1029,22 +1054,29 @@ async function buildEpisodeCandidates(client, query, result) {
     groups.set(episodeId, current);
   }
 
-  const candidates = [];
-  for (const group of groups.values()) {
+  const candidates = await mapResumeDetails([...groups.values()], async (group) => {
     const episodeDetail = await client.get("/api/v1/memory/" + encodeURIComponent(group.episodeId)).catch(() => null);
     const display = episodeDisplayFields(group.episodeRef, episodeDetail, group.details);
-    candidates.push({
+    return {
       ...display,
       episodeId: group.episodeId,
       score: episodeScore(group, episodeDetail, hits.length || SEARCH_LIMIT),
       components: episodeScoreComponents(group, episodeDetail, hits.length || SEARCH_LIMIT)
-    });
-  }
+    };
+  });
 
   return candidates
     .sort((left, right) => right.score - left.score)
     .slice(0, DISPLAY_LIMIT)
     .map((candidate, index) => ({ ...candidate, index: index + 1 }));
+}
+
+async function mapResumeDetails(items, map) {
+  // Antigravity's synchronous hook has a fixed wall-clock budget. Keep ranking order while fetching independent details together.
+  if (MODE === "antigravity") return Promise.all(items.map(map));
+  const results = [];
+  for (const [index, item] of items.entries()) results.push(await map(item, index));
+  return results;
 }
 
 function episodeRefFromDetail(detail) {
@@ -1326,8 +1358,10 @@ function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-main().catch((error) => {
-  writeResultOutput("Memmy resume search failed: " + formatError(error));
-});
+if (MODE !== "antigravity") {
+  main().catch((error) => {
+    writeResultOutput("Memmy resume search failed: " + formatError(error));
+  });
+}
 `;
 }

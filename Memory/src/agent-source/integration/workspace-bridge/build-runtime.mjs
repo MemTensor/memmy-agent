@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -38,3 +38,10 @@ try {
 } finally {
   await rm(temporary, { force: true });
 }
+
+const antigravityDirectory = join(dirname(destination), "..", "antigravity");
+await mkdir(antigravityDirectory, { recursive: true });
+await copyFile(
+  resolve(memoryDirectory, "../App/frontend/desktop/src/assets/memmy-app-icon.png"),
+  join(antigravityDirectory, "memmy-app-icon.png")
+);

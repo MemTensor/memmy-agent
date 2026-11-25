@@ -1912,7 +1912,7 @@ function SettingToggle({
   );
 }
 
-const NATIVE_PLUGIN_AGENT_IDS = new Set(["opencode", "openclaw", "hermes", "deepseek_harness"]);
+const NATIVE_PLUGIN_AGENT_IDS = new Set(["antigravity", "opencode", "openclaw", "hermes", "deepseek_harness"]);
 const HOOK_AGENT_IDS = new Set(["codex", "claude_code", "cursor"]);
 
 type AgentConnectionAction =

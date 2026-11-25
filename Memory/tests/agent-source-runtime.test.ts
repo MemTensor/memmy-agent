@@ -372,6 +372,7 @@ describe("standalone Agent source executor", () => {
       "cursor",
       "claude_code",
       "codex",
+      "antigravity",
       "opencode",
       "openclaw",
       "hermes",

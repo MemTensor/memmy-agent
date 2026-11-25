@@ -1,3 +1,4 @@
+import { createAntigravitySkillTarget } from "../adapters/outbound/skill-writer/antigravity/target.js";
 import { createClaudeCodeSkillTarget } from "../adapters/outbound/skill-writer/claude-code/index.js";
 import { createCodexSkillTarget } from "../adapters/outbound/skill-writer/codex/index.js";
 import { createCursorSkillTarget } from "../adapters/outbound/skill-writer/cursor/index.js";
@@ -15,6 +16,7 @@ export function createBuiltinSkillTargetRegistry(memmyConfigPath?: string): Skil
     createCursorSkillTarget({ memmyConfigPath }),
     createClaudeCodeSkillTarget({ memmyConfigPath }),
     createCodexSkillTarget({ memmyConfigPath }),
+    createAntigravitySkillTarget({ memmyConfigPath }),
     createOpencodeSkillTarget(),
     createOpenclawSkillTarget({ memmyConfigPath }),
     createHermesSkillTarget({ memmyConfigPath }),

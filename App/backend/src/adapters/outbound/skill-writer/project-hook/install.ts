@@ -18,7 +18,7 @@ export const PROJECT_HOOK_REVISION_FIELD = "project_hook_revision";
 
 /** 安装一份项目钩子需要知道的东西：谁、哪种宿主、它自己的配置内容。 */
 export interface ProjectHookBundle {
-  /** 与这个目标一致的来源 id：claude_code / codex / cursor。 */
+  /** 与安装目标一致的来源 id。 */
   source: string;
   mode: MemmyProjectHookMode;
   /** 写进 `memmy-project-config.json` 的内容，不含版本指纹。 */
@@ -150,7 +150,7 @@ async function readOptionalText(filePath: string): Promise<string> {
   }
 }
 
-async function writeFileAtomically(filePath: string, content: string): Promise<void> {
+export async function writeFileAtomically(filePath: string, content: string): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
   const tempPath = join(dirname(filePath), `.${basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
   try {
