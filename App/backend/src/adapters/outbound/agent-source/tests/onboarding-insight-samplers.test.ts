@@ -20,11 +20,12 @@ afterEach(() => {
 });
 
 describe("onboarding insight samplers", () => {
-  it("keeps all ten built-in Agents in the first-login scan", () => {
+  it("keeps the built-in agent sources in order for the first-login scan", () => {
     expect(createBuiltinOnboardingInsightSamplers().map((sampler) => sampler.sourceId)).toEqual([
       "cursor",
       "claude_code",
       "codex",
+      "antigravity",
       "opencode",
       "openclaw",
       "hermes",

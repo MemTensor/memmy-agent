@@ -7,8 +7,8 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createAntigravitySourceAdapter } from "@memmy/agent-source-readers/adapters/antigravity/index";
 import { expect, it } from "vitest";
-import { createAntigravityInsightSampler } from "../../agent-source/onboarding-insight-samplers.js";
-import { createAntigravitySkillTarget } from "./target.js";
+import { createAntigravityInsightSampler } from "../adapters/outbound/agent-source/onboarding-insight-samplers.js";
+import { createAntigravitySkillTarget } from "../adapters/outbound/skill-writer/antigravity/target.js";
 
 it("installs a local plugin and shares native turn identity across live capture and scans", async () => {
   const root = await mkdtemp(join(tmpdir(), "memmy-antigravity-"));
@@ -55,7 +55,8 @@ it("installs a local plugin and shares native turn identity across live capture 
     expect(manifest.name).toBe("memmy-memory");
     expect(manifest.logo).toBe("assets/memmy-app-icon.png");
     const logoPath = join(plugin, manifest.logo);
-    expect(await readFile(logoPath)).toEqual(await readFile(new URL("./memmy-app-icon.png", import.meta.url)));
+    const expectedLogo = new URL("../adapters/outbound/skill-writer/antigravity/memmy-app-icon.png", import.meta.url);
+    expect(await readFile(logoPath)).toEqual(await readFile(expectedLogo));
     await writeFile(logoPath, "stale icon");
     expect(await target.isInstalledHookCurrent!()).toBe(false);
     await target.installPlugin!("antigravity");
