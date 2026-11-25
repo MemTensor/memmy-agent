@@ -3,8 +3,8 @@ import { ApiRequestError } from "../api/http.js";
 
 /** One in-flight read per visible view; a changed account/filter invalidates every old response. */
 export function useCreditRefresh<T>(load: (signal: AbortSignal) => Promise<T>, enabled: boolean, userId: string | null, version = -1, readVersion?: (data: T) => number) {
-  const [snapshot, setSnapshot] = useState<{ load: typeof load; data: T } | null>(null);
-  const [failure, setFailure] = useState<{ load: typeof load; auth: boolean } | null>(null);
+  const [snapshot, setSnapshot] = useState<{ load: typeof load; data: T; completedAt: Date } | null>(null);
+  const [failure, setFailure] = useState<{ load: typeof load; auth: boolean; completedAt: Date } | null>(null);
   const [loading, setLoading] = useState(false);
   const refreshRef = useRef(() => {});
   const foreground = useRef(true);
@@ -26,12 +26,12 @@ export function useCreditRefresh<T>(load: (signal: AbortSignal) => Promise<T>, e
       try {
         const data = await load(current.signal);
         if (readVersion && readVersion(data) < Math.max(versionRef.current, eventVersion)) throw new Error("Stale credits version");
-        if (!disposed && ticket === sequence) { setSnapshot({ load, data }); setFailure(null); }
+        if (!disposed && ticket === sequence) { setSnapshot({ load, data, completedAt: new Date() }); setFailure(null); }
       } catch (error) {
         if (!disposed && ticket === sequence && !current.signal.aborted) {
           const auth = error instanceof ApiRequestError && error.status === 401;
           if (auth) setSnapshot(null);
-          setFailure({ load, auth });
+          setFailure({ load, auth, completedAt: new Date() });
         }
       } finally {
         current.abort();
@@ -71,6 +71,14 @@ export function useCreditRefresh<T>(load: (signal: AbortSignal) => Promise<T>, e
       document.removeEventListener("visibilitychange", visible);
     };
   }, [load, enabled, userId, readVersion]);
-  return { data: enabled && snapshot?.load === load ? snapshot.data : null,
-    error: enabled && failure?.load === load ? (failure.auth ? "auth" : "load") : null, loading, refresh };
+  const currentSnapshot = enabled && snapshot?.load === load ? snapshot : null;
+  const currentFailure = enabled && failure?.load === load ? failure : null;
+  const error = currentFailure ? (currentFailure.auth ? "auth" : "load") : null;
+  return {
+    data: currentSnapshot ? currentSnapshot.data : null,
+    error,
+    completedAt: currentFailure?.completedAt ?? currentSnapshot?.completedAt ?? null,
+    loading,
+    refresh,
+  };
 }

@@ -252,6 +252,35 @@ it("loads billing details into the existing request hover and cancels them when 
   expect(signal.aborted).toBe(true);
   expect(document.querySelector('[role="region"]')).toBeNull();
 });
+it("shows the actual result of a manual balance refresh even when the amount is unchanged", async () => {
+  const client = fixture();
+  await act(async () => root.render(<AppProviders><NotificationCenterProvider><Harness client={client} /></NotificationCenterProvider></AppProviders>));
+  const button = host.querySelector<HTMLButtonElement>('button[aria-label="刷新"]')!;
+  expect(document.querySelector(".memmy-notification-stack")).toBeNull();
+
+  let finishRefresh!: (value: typeof summary) => void;
+  client.summary.mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }));
+  await click("刷新");
+  expect(button.disabled).toBe(true);
+  expect(button.getAttribute("aria-busy")).toBe("true");
+  expect(button.title).toBe("刷新中");
+  expect(document.querySelector(".memmy-notification-stack")).toBeNull();
+
+  await act(async () => finishRefresh(summary));
+  expect(button.disabled).toBe(false);
+  expect(button.title).toMatch(/^已更新 /);
+  expect(document.querySelector(".memmy-notification--success")?.textContent).toContain("积分余额已刷新");
+  expect(host.textContent).toContain("1,214.56");
+
+  const updatedTitle = button.title;
+  client.summary.mockRejectedValueOnce(new Error("offline"));
+  await click("刷新");
+  expect(button.disabled).toBe(false);
+  expect(button.title).toBe(updatedTitle);
+  expect(document.querySelector(".memmy-notification--warning")?.textContent).toContain("积分余额刷新失败，请重试。");
+  expect(host.textContent).toContain("1,214.56");
+});
+
 it("keeps cached balance, usage and rewards visible after a refresh fails", async () => {
   const client = fixture();
   client.usage.mockResolvedValueOnce({ items: [usageRow], hasMore: false, nextCursor: null } as never);
@@ -383,7 +412,7 @@ it.each([
   expect(host.textContent).toContain(`已使用 ${used} / 250.00`);
 });
 
-it("keeps the original account menu and shows the account balance, not spendable", async () => {
+it("shows the spendable balance in the account menu when the server includes holds in balance", async () => {
   const { AppFrame } = await vi.importActual<typeof import("../app-frame.js")>("../app-frame.js");
   const client = fixture();
   function MenuHarness() {
@@ -399,21 +428,24 @@ it("keeps the original account menu and shows the account balance, not spendable
   const trigger = host.querySelector<HTMLButtonElement>('[data-account-menu-trigger="true"]'); expect(trigger).not.toBeNull();
   await act(async () => trigger!.click());
   const menu = document.querySelector('[role="menu"]');
-  // Spendable drops to 0 under every in-flight hold; the menu label says "balance", so it shows balance.
-  expect(menu?.textContent).toContain("免费版"); expect(menu?.textContent).toContain("1,234.56");
-  expect(menu?.textContent).not.toContain("1,214.56");
+  expect(menu?.textContent).toContain("免费版"); expect(menu?.textContent).toContain("1,214.56");
+  expect(menu?.textContent).not.toContain("1,234.56");
   expect(menu?.textContent).not.toContain("套餐积分"); expect(menu?.textContent).not.toContain("平台奖励积分");
   let resolveRefresh!: (value: typeof summary) => void;
   client.summary.mockImplementationOnce(() => new Promise(resolve => { resolveRefresh = resolve; }));
   await click("刷新积分余额");
-  expect(menu?.textContent).toContain("1,234.56");
+  expect(menu?.textContent).toContain("1,214.56");
   expect(menu?.textContent).not.toContain("正在读取积分");
   expect(menu?.textContent).not.toContain("—");
-  await act(async () => resolveRefresh({ ...summary, account: { balance: "83.27", held: "0.00", spendable: "83.27", version: 3 } }));
-  expect(menu?.textContent).toContain("83.27");
+  await act(async () => resolveRefresh({
+    ...summary,
+    account: { balance: "1233.56", held: "0.00", spendable: "1233.56", version: 3 },
+    balanceBySource: { plan: "1000.00", reward: "233.56" },
+  }));
+  expect(menu?.textContent).toContain("1,233.56");
   client.summary.mockRejectedValueOnce(new Error("offline"));
   await click("刷新积分余额");
-  expect(menu?.textContent).toContain("83.27");
+  expect(menu?.textContent).toContain("1,233.56");
   expect(menu?.textContent).not.toContain("数据可能不是最新");
 });
 it("retries a live redemption with the same request ID and displays its actual result", async () => {
