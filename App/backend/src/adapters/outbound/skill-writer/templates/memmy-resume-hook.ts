@@ -41,8 +41,9 @@ const TURN_STATE_TTL_MS = 24 * 60 * 60 * 1000;
 const RESUME_CONTEXT_MAX_CHARS = 24000;
 // Claude Code swaps a hook context string longer than this for a file path and a
 // 2,000-character preview, and does not ask the model to open the file. Other hosts
-// publish no such limit, so they receive the full text. The resume context is not
-// fitted here; which of its turns to keep is a separate decision.
+// publish no such limit, so they receive the full text. Only the L3 block is fitted:
+// turn-start memory ends with its guidance and tool hints, and a resumed episode with
+// its latest turns, so neither can be cut from the end.
 const HOST_CONTEXT_MAX_CHARS = MODE === "claude-code" ? 10000 : 0;
 
 async function main() {
@@ -241,14 +242,14 @@ function writeLifecycleOutput(payload, context) {
 }
 
 /**
- * Trims an injected memory block to the host's hook context limit. Text is dropped
- * from the end, the block's closing tag stays, and a notice says how much is missing.
+ * Trims the L3 block to the host's hook context limit. Text is dropped from the
+ * end, the block's closing tag stays, and a notice says how much is missing.
  */
 function fitHostContext(context) {
   if (!HOST_CONTEXT_MAX_CHARS || context.length <= HOST_CONTEXT_MAX_CHARS) {
     return context;
   }
-  const closing = context.match(/\n<\/memmy_(?:l3_world_model|memory_context)>$/u);
+  const closing = context.match(/\n<\/memmy_l3_world_model>$/u);
   const tail = closing ? closing[0] : "";
   const body = tail ? context.slice(0, -tail.length) : context;
   const notice = (omitted) => "\n[Memmy omitted the last " + omitted + " characters of this block to fit the host's " +
@@ -761,13 +762,13 @@ function writeTurnStartOutput(started) {
     writeAllowOutput();
     return;
   }
-  writeResumeContextOutput(fitHostContext([
+  writeResumeContextOutput([
     '<memmy_memory_context source="turn_start">',
     "The following is historical memory context. Use it as supporting context, not as a new user request.",
     "",
     injected,
     "</memmy_memory_context>"
-  ].join("\n")));
+  ].join("\n"));
 }
 
 function writeResultOutput(message) {

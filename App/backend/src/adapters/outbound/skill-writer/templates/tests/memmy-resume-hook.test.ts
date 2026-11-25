@@ -558,10 +558,15 @@ describe("memmy resume hook stop capture", () => {
   it.each([
     ["desktop", renderMemmyResumeHookScript],
     ["memory CLI", renderCliHook],
-  ])("%s Claude hook fits oversized turn-start memory and keeps its closing tag", async (_label, render) => {
-    // The closing tag is what later strips this block out of captured prompts, so it has to survive the cut.
-    tempDir = mkdtempSync(join(tmpdir(), "memmy-claude-turn-start-context-limit-"));
-    const markdown = contextLines(400);
+  ])("%s Claude hook returns oversized turn-start memory whole", async (_label, render) => {
+    // The retrieval layer renders its guidance and the memory tool hints after the recalled records,
+    // so a cut from the end would keep the records and drop what tells the model how to use them.
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-claude-turn-start-context-whole-"));
+    const markdown = [
+      contextLines(400),
+      "## Decision guidance (distilled from past similar situations)\n\n**Prefer**\n  1. 先查记忆再回答。",
+      "## Follow-up memory tools\n\nUse `memmy_memory_search(query)` only when the recalled memory is insufficient or ambiguous.",
+    ].join("\n\n");
     const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
       const body = await requestBody(request);
       response.setHeader("content-type", "application/json");
@@ -590,14 +595,9 @@ describe("memmy resume hook stop capture", () => {
 
       expect(result.status).toBe(0);
       const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext as string;
-      expect(context.length).toBeLessThanOrEqual(CLAUDE_CODE_HOOK_CONTEXT_LIMIT);
+      expect(context.length).toBeGreaterThan(CLAUDE_CODE_HOOK_CONTEXT_LIMIT);
       expect(context.startsWith('<memmy_memory_context source="turn_start">\n')).toBe(true);
-      const notice = context.match(new RegExp(`\\n${OMISSION_NOTICE}\\n</memmy_memory_context>$`, "u"));
-      expect(notice).not.toBeNull();
-      // After the block's three header lines, what is left is the start of the recalled text, cut between lines.
-      const keptMarkdown = context.slice(0, notice?.index).split("\n").slice(3).join("\n");
-      expect(keptMarkdown.length).toBeGreaterThan(9_000);
-      expect(markdown.startsWith(`${keptMarkdown}\n`)).toBe(true);
+      expect(context.endsWith(`\n${markdown}\n</memmy_memory_context>`)).toBe(true);
     } finally {
       await close(server);
     }
