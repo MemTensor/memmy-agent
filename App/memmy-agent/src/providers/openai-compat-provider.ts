@@ -8,7 +8,6 @@ import {
   isProviderAbortError,
   LLMProvider,
   LLMResponse,
-  GenerationSettings,
   providerAbortOptions,
   ToolCallRequest,
 } from "./base.js";
@@ -20,6 +19,7 @@ import {
 } from "./openai-responses/index.js";
 import { customModelUsesMaxCompletionTokens } from "./custom-provider.js";
 import { memmyAccountNoneThinkingStyle } from "./memmy-account.js";
+import { getModelInputModalities } from "./model-input-capabilities.js";
 import { OPENROUTER_ATTRIBUTION_HEADERS } from "./openrouter-attribution.js";
 import {
   classifyQuotaExhaustion,
@@ -221,14 +221,11 @@ export class OpenAICompatProvider extends LLMProvider {
       OpenAICompatProvider.maybeMapping(data?.base_resp) ??
       OpenAICompatProvider.maybeMapping(error.base_resp) ??
       {};
-    const canonicalMemmyCode = provider?.trim().toLowerCase() === "memmy_account"
-      ? error.memmy_code ?? data?.memmy_code
-      : null;
     return {
       provider,
       httpStatus,
       errorType: LLMProvider.normalizeErrorToken(error.type ?? data?.type),
-      errorCode: LLMProvider.normalizeErrorToken(canonicalMemmyCode ?? error.code ?? data?.code),
+      errorCode: LLMProvider.normalizeErrorToken(error.code ?? data?.code),
       metadataErrorType: LLMProvider.normalizeErrorToken(metadata.error_type),
       baseRespStatusCode: LLMProvider.normalizeErrorToken(baseResp.status_code),
     };
@@ -486,14 +483,13 @@ export class OpenAICompatProvider extends LLMProvider {
 
   sanitizeMessages(
     messages: Record<string, any>[],
-    _model = this.getDefaultModel(),
-    inputModalities?: readonly string[] | null,
+    model = this.getDefaultModel(),
   ): Record<string, any>[] {
     const sanitized = LLMProvider.sanitizeRequestMessages(messages, ALLOWED_MSG_KEYS);
     const idMap = new Map<string, string>();
     const pendingToolIds = new Map<string, string[]>();
     const forceStringContent = specName(this.spec) === "deepseek"
-      && inputModalities != null && !inputModalities.includes("image");
+      && !getModelInputModalities(model).includes("image");
     const normalizeToolIds = this.shouldNormalizeToolCallIds();
 
     const mapId = (value: any): any => {
@@ -612,7 +608,7 @@ export class OpenAICompatProvider extends LLMProvider {
     }
     if (this.spec?.stripModelPrefix) modelName = modelName.split("/").at(-1) ?? modelName;
 
-    const reasoningEffort = args.modelCapabilities ? args.modelCapabilities.reasoningEffort ?? null : args.reasoningEffort ?? null;
+    const reasoningEffort = args.reasoningEffort ?? null;
     const semanticEffort =
       typeof reasoningEffort === "string"
         ? reasoningEffort.toLowerCase() === "minimum"
@@ -621,21 +617,19 @@ export class OpenAICompatProvider extends LLMProvider {
         : null;
     let wireEffort = reasoningEffort;
     if (specName(this.spec) === "dashscope" && semanticEffort === "minimal") wireEffort = "minimum";
-    const maxTokens = LLMProvider.requestMaxTokens(args, this.generation);
+    const maxTokens = Math.max(1, args.maxTokens ?? this.generation.maxTokens);
     const temperature = args.temperature ?? this.generation.temperature;
     const kwargs: Record<string, any> = {
       model: modelName,
-      messages: this.sanitizeMessages(messages, modelName, args.modelCapabilities ? args.modelCapabilities.inputModalities ?? null : undefined),
+      messages: this.sanitizeMessages(messages, modelName),
     };
 
     if (OpenAICompatProvider.supportsTemperature(modelName, reasoningEffort))
       kwargs.temperature = temperature;
     const useMaxCompletionTokens = Boolean(this.spec?.supportsMaxCompletionTokens)
       || (specName(this.spec) === "custom" && customModelUsesMaxCompletionTokens(modelName));
-    if (maxTokens !== undefined) {
-      if (useMaxCompletionTokens) kwargs.max_completion_tokens = Math.max(1, maxTokens);
-      else kwargs.max_tokens = Math.max(1, maxTokens);
-    }
+    if (useMaxCompletionTokens) kwargs.max_completion_tokens = maxTokens;
+    else kwargs.max_tokens = maxTokens;
 
     for (const [pattern, overrides] of this.spec?.modelOverrides ?? []) {
       if (modelName.toLowerCase().includes(String(pattern).toLowerCase())) {
@@ -644,22 +638,9 @@ export class OpenAICompatProvider extends LLMProvider {
       }
     }
 
-    if (args.modelCapabilities) {
-      delete kwargs.max_tokens;
-      delete kwargs.max_completion_tokens;
-      if (maxTokens !== undefined) kwargs[useMaxCompletionTokens ? "max_completion_tokens" : "max_tokens"] = Math.max(1, maxTokens);
-    }
-    const forceCatalogToolCompatibility = Boolean(
-      args.modelCapabilities
-      && this.apiType === "chatCompletions"
-      && tools?.length
-      && specName(this.spec) === "openai"
-      && (/gpt-/i.test(modelName) || /(?:^|\/)o[134](?:-|$)/i.test(modelName)),
-    );
-    if (forceCatalogToolCompatibility) kwargs.reasoning_effort = "none";
-    else if (wireEffort && (semanticEffort !== "none" || this.apiType === "chatCompletions")) kwargs.reasoning_effort = wireEffort;
-    if (reasoningEffort !== null || args.modelCapabilities?.thinkingEnabled !== undefined) {
-      const thinkingEnabled = args.modelCapabilities?.thinkingEnabled ?? (semanticEffort !== "none" && semanticEffort !== "minimal");
+    if (wireEffort && (semanticEffort !== "none" || this.apiType === "chatCompletions")) kwargs.reasoning_effort = wireEffort;
+    if (reasoningEffort !== null) {
+      const thinkingEnabled = semanticEffort !== "none" && semanticEffort !== "minimal";
       const styles = thinkingStylesFor(this.spec, modelName);
       const memmyStyle = memmyAccountNoneThinkingStyle(
         specName(this.spec),
@@ -748,8 +729,7 @@ export class OpenAICompatProvider extends LLMProvider {
     const key = protocolPreferenceKey(scope, { ...flattenChatExtraBody(this.buildKwargs(args)), stream: streaming });
     const chatOnlyParameters = CHAT_ONLY_PARAMETERS.some(key => this.extraBody[key] != null)
       || (this.extraBody.n != null && this.extraBody.n !== 1);
-    const reasoningEffort = args.modelCapabilities ? args.modelCapabilities.reasoningEffort ?? null : args.reasoningEffort ?? null;
-    let useResponses = pinned || (this.shouldUseResponsesApi(args.model, reasoningEffort)
+    let useResponses = pinned || (this.shouldUseResponsesApi(args.model, args.reasoningEffort)
       && !(automatic && chatOnlyParameters)
       && !(automatic && chatExceptions.has(key)));
     for (let index = 0; index < 2; index++) {
@@ -784,22 +764,16 @@ export class OpenAICompatProvider extends LLMProvider {
   buildResponsesBody(args: ChatArgs): Record<string, any> {
     let modelName = String(args.model ?? this.defaultModel);
     if (this.spec?.stripModelPrefix) modelName = modelName.split("/").at(-1) ?? modelName;
-    const sanitizedMessages = this.sanitizeMessages(
-      LLMProvider.sanitizeEmptyContent(args.messages),
-      modelName,
-      args.modelCapabilities ? args.modelCapabilities.inputModalities ?? null : undefined,
-    );
-    const [instructions, input] = convertMessages(sanitizedMessages, this.responsesScope(args));
-    const reasoningEffort = args.modelCapabilities ? args.modelCapabilities.reasoningEffort ?? null : args.reasoningEffort ?? null;
+    const [instructions, input] = convertMessages(args.messages, this.responsesScope(args));
+    const reasoningEffort = args.reasoningEffort ?? null;
     let body: Record<string, any> = {
       model: modelName,
       instructions: instructions || null,
       input,
+      max_output_tokens: Math.max(1, args.maxTokens ?? this.generation.maxTokens),
       store: false,
       stream: false,
     };
-    const maxTokens = LLMProvider.requestMaxTokens(args, this.generation);
-    if (maxTokens !== undefined) body.max_output_tokens = Math.max(1, maxTokens);
     if (OpenAICompatProvider.supportsTemperature(modelName, reasoningEffort))
       body.temperature = args.temperature ?? this.generation.temperature;
     body.include = ["reasoning.encrypted_content"];
@@ -1084,18 +1058,6 @@ export class OpenAICompatProvider extends LLMProvider {
     return this.client;
   }
 
-  withExtraBody(extraBody: Record<string, any>): OpenAICompatProvider {
-    const scoped = new OpenAICompatProvider({
-      apiKey: this.apiKey, apiBase: this.apiBase, defaultModel: this.defaultModel,
-      spec: this.spec, extraHeaders: this.extraHeaders, extraBody,
-      apiType: this.apiType, inheritProviderDefaults: !this.independent,
-    });
-    scoped.client = this.client;
-    scoped.defaultHeaders = { ...this.defaultHeaders };
-    scoped.generation = new GenerationSettings(this.generation);
-    return scoped;
-  }
-
   getDefaultModel(): string {
     return this.defaultModel;
   }
@@ -1126,11 +1088,11 @@ export class OpenAICompatProvider extends LLMProvider {
   }
 
   private imageInputUnsupportedResponse(args: ChatArgs): LLMResponse | null {
+    const model = args.model ?? this.getDefaultModel();
     if (
       specName(this.spec) !== "deepseek"
       || !LLMProvider.containsImageInput(args.messages)
-      || args.modelCapabilities?.inputModalities == null
-      || args.modelCapabilities?.inputModalities?.includes("image")
+      || getModelInputModalities(model).includes("image")
     ) {
       return null;
     }

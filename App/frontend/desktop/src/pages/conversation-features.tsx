@@ -1,7 +1,6 @@
 import { buildPluginCapabilityLabels } from "./plugin-tool-activity.js";
-import { resolveContributionIcon } from "./agent-command-palette.js";
 import { SHARED_ROW_MIN_PANE_WIDTH, SHARED_ROW_PRIMARY_RESERVE } from "./sidebar-resize.js";
-import type { RecordingPanelSession } from "./interview-recording-panel.js";
+import type { RecordingPanelSession } from "./recording-transcript.js";
 import { buildAgentRoutedPluginPrompt, buildLegalDiagnosisContinuation, collectPluginScenarios, pressPinnedPluginCommand, pluginInteractionSignature, reconcileHiddenPluginCalls, PinnedPluginCommandBar, selectConversationPinnedCommands, selectPinnedCommandsForLegalWorkflow, selectOpenPinnedCapabilities } from "./plugin-conversation-controls.js";
 import "./conversation-features.css";
 import { cloneElement, useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ComponentProps } from "react";
@@ -11,9 +10,11 @@ import { normalizePluginConversationId, useOptionalPluginUi, type PluginRecordin
 import { useAppState } from "../state/app-state.js";
 import { appActions } from "../state/app-actions.js";
 import { useTranslation } from "../i18n/use-translation.js";
+import { PLUGIN_CHANGE_EVENT } from "../lib/plugin-change-event.js";
 import { answeredUnresolvedPluginInteraction, pendingPluginInteraction, pluginInteractionCompletedLabel, pluginInteractionWaitingLabel } from "../app/plugin-interaction-waiting-label.js";
 import { pendingAgentQuestion } from "./agent-question-card.js";
 import { PluginCapabilityHost, RecordingBarPortalContext, selectVisiblePluginCalls, isActiveLegalWorkflowCard } from "./plugin-capability-host.js";
+import { PluginConversationRecording } from "./plugin-conversation-recording.js";
 import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { canUseAccountRecording, useRecordingEntry, RecordingEntryCard, type RecordingArchiveEntry } from "./recording-entry.js";
 import { localizeSlashCommands, type SlashCommandPaletteItem } from "./agent-command-palette.js";
@@ -65,7 +66,7 @@ export function useConversationFeatures(options: {
   /** Stages files that already have a gateway/workspace path without uploading them again. */
   onStageExistingFiles?(files: UploadedAgentMedia[]): Promise<unknown>;
   onOpenArtifact?(artifact: PluginArtifactRef): boolean;
-  onSend(text: string): Promise<boolean>;
+  onSend(text: string, files?: UploadedAgentMedia[]): Promise<boolean>;
   onOpenRecording(): void;
   onEnsureConversation?(title: string): Promise<string | null>;
 }) {
@@ -126,19 +127,31 @@ export function useConversationFeatures(options: {
   const recordingAuthenticated = canUseAccountRecording(state.bootstrap?.app.userMode, state.account.userId);
   const latest = useRef(options);
   latest.current = options;
+  const recordingSummaryFlights = useRef(new Set<string>());
 
   useEffect(() => {
     let active = true;
+    let latestRead = 0;
     const refresh = () => {
       if (!clients?.plugins) return;
-      void clients.plugins.list().then((value) => { if (active) { setPlugins(value); setError(null); } })
-        .catch((cause) => { if (active) setError({ conversationId, message: String(cause instanceof Error ? cause.message : cause) }); });
+      const read = ++latestRead;
+      void clients.plugins.list().then((value) => {
+        if (active && read === latestRead) { setPlugins(value); setError(null); }
+      }).catch((cause) => {
+        if (active && read === latestRead) {
+          setPlugins([]);
+          setError({ conversationId, message: String(cause instanceof Error ? cause.message : cause) });
+        }
+      });
     };
     refresh();
     window.addEventListener("focus", refresh);
-    window.addEventListener("memmy:plugins-changed", refresh);
-    const timer = setInterval(refresh, 5_000);
-    return () => { active = false; clearInterval(timer); window.removeEventListener("focus", refresh); window.removeEventListener("memmy:plugins-changed", refresh); };
+    window.addEventListener(PLUGIN_CHANGE_EVENT, refresh);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener(PLUGIN_CHANGE_EVENT, refresh);
+    };
   }, [clients?.plugins, state.account.userId]);
 
   const archiveRecording = useCallback((entry: RecordingArchiveEntry) => {
@@ -148,15 +161,37 @@ export function useConversationFeatures(options: {
   }, [ui?.addRecordingMaterials]);
   const recording = useRecordingEntry(clients?.asr,
     clients ? (files) => clients.memmyAgent.uploadAgentMedia(files) : undefined,
-    (file, mode, persistedTranscript) => {
-      if (persistedTranscript && latest.current.onStageExistingFiles) {
-        void latest.current.onStageExistingFiles([persistedTranscript]);
-      } else {
-        void latest.current.onStageFiles([file]);
+    async (file, mode, persistedTranscript) => {
+      // Capture the destination before uploading so a navigation during the
+      // upload cannot send this recording into a different conversation.
+      const destination = latest.current;
+      if (mode === "attach") {
+        if (persistedTranscript && destination.onStageExistingFiles) {
+          await destination.onStageExistingFiles([persistedTranscript]);
+        } else {
+          await destination.onStageFiles([file]);
+        }
+        return;
       }
-      if (mode === "summarize") latest.current.onDraft(t("recording.summaryPrompt"));
+      const key = `${conversationId}:${persistedTranscript?.path ?? file.name}`;
+      if (recordingSummaryFlights.current.has(key)) return;
+      recordingSummaryFlights.current.add(key);
+      setError(null);
+      try {
+        const transcript = persistedTranscript ?? (await clients?.memmyAgent.uploadAgentMedia([{
+          blob: file, name: file.name, kind: "file", mime: "text/plain", target: "recordings"
+        }]))?.[0];
+        if (!transcript || !await destination.onSend(t("recording.summaryPrompt"), [transcript])) {
+          throw new Error(t("home.media.error.sendFailed"));
+        }
+      } catch (cause) {
+        setError({ conversationId, message: cause instanceof Error ? cause.message : String(cause) });
+      } finally {
+        recordingSummaryFlights.current.delete(key);
+      }
     }, {
       scope: String(state.account.userId ?? "local"),
+      conversationKey: normalizePluginConversationId(conversationId) ?? options.scopeKey,
       ...(state.agent.currentChatId ? { sessionKey: conversationId } : {}),
       onArchived: archiveRecording,
       ...(clients ? { deleteFiles: (paths: string[]) => clients.memmyAgent.deleteRecordingFiles(paths) } : {}),
@@ -171,7 +206,7 @@ export function useConversationFeatures(options: {
       }
     }, recordingAuthenticated);
 
-  const capabilityLabels = useMemo(() => buildPluginCapabilityLabels(plugins), [plugins]);
+  const capabilityLabels = useMemo(() => buildPluginCapabilityLabels(plugins, language), [plugins, language]);
   const targets = useMemo(() => plugins.filter((plugin) => plugin.state === "active" && plugin.eligibility?.canUse !== false)
     .flatMap((plugin) => (plugin.manifest.commands ?? [])
       // Older installed packages still map this shortcut to session-start.
@@ -212,8 +247,7 @@ export function useConversationFeatures(options: {
     if (plugin.id === "legal-labor" && command.command === "/legal-record") { toggleCompactRecording(); return; }
     if (legalQuestionOwnsComposer && plugin.id === "legal-labor") return;
     if (!clients?.plugins) return;
-    if (command.agentSkillId) { latest.current.onDraft(plugin.manifest.conversation
-      ? `$${command.agentSkillId}${args ? ` ${args}` : ""}` : `${command.command} ${args}`); return; }
+    if (command.agentSkillId) { latest.current.onDraft(`${command.command} ${args}`); return; }
     const invocationConversationId = state.agent.currentChatId ?? state.agent.currentSessionKey
       ?? await latest.current.onEnsureConversation?.(command.name);
     if (!invocationConversationId) return;
@@ -275,9 +309,12 @@ export function useConversationFeatures(options: {
         if (!await latest.current.onSend(buildLegalDiagnosisContinuation(call))) throw new Error(t("home.media.error.sendFailed"));
       }} /> : null;
   const cards = <><div ref={setRecordingBar} />{host(presented, "flow")}{host(presented, "pinned")}
-    {recording.compactOpen && !legalQuestionOwnsComposer ? <RecordingEntryCard session={recording.session}
-      disabled={!clients?.asr} onClose={recording.closeCompact} onOpenList={() => openRecording()} /> : null}
-    {error?.conversationId === conversationId ? <div role="alert" className="text-sm text-red-600">{error.message}</div> : null}</>;
+    {recording.compactOpen && !legalQuestionOwnsComposer ? <RecordingEntryCard session={recording.compactSession}
+      onStart={() => { openRecording(); recording.session.start(); }}
+      disabled={!clients?.asr || recording.compactBlocked} onClose={recording.closeCompact} /> : null}
+    {error?.conversationId === conversationId ? <div role="alert" className="text-sm text-red-600">{error.message}</div> : null}
+    <PluginConversationRecording client={clients?.plugins} agentClient={clients?.memmyAgent} plugins={plugins}
+      conversationId={conversationId} onPrompt={(text) => void options.onSend(text)} /></>;
   // Microphone owners stay mounted while navigation only moves/hides their control bar.
   const recorderGroups = new Map<string, PluginUiCall[]>();
   for (const call of ui?.calls ?? []) {
@@ -292,6 +329,7 @@ export function useConversationFeatures(options: {
   const recordingOwner = normalizePluginConversationId(conversationId)!;
   const pluginRecording = pluginRecordings.get(recordingOwner);
   const openRecording = () => {
+    setPreview(null);
     setHiddenRecordings((current) => new Set(current).add(recordingOwner));
     options.onOpenRecording();
   };
@@ -304,13 +342,6 @@ export function useConversationFeatures(options: {
     recordingOpen={recordingShortcutOpen(recording.compactOpen)}
     active={selectOpenPinnedCapabilities(prepared, ui?.dismissedCallIds, pinnedCapabilities, ui?.hiddenCallIds)}
     onRecordingPress={toggleCompactRecording} onPress={({ plugin, command }) => void invoke(plugin, command)} />;
-  const conversationCommand = targets.find(({ plugin, command }) => plugin.manifest.conversation && command.topbar);
-  const ConversationIcon = resolveContributionIcon(conversationCommand?.command.icon);
-  const conversationShortcut = conversationCommand ? <button type="button" className="thread-toolbar__button"
-    aria-label={conversationCommand.command.name} title={conversationCommand.command.name} data-plugin-conversation-toggle
-    onClick={() => void invoke(conversationCommand.plugin, conversationCommand.command)}>
-    <ConversationIcon size={15} aria-hidden="true" />
-  </button> : null;
   const artifactPanel = preview && clients?.plugins ? <PluginArtifactPreviewPanel artifact={preview}
     readArtifact={clients.plugins.readArtifact} onWidthChange={setFeaturePanelWidth}
     sharedRowWidth={options.sharedRowWidth} sharedRowReservedWidth={SHARED_ROW_PRIMARY_RESERVE}
@@ -342,8 +373,10 @@ export function useConversationFeatures(options: {
       }
     };
   };
-  return { plugins, conversationShortcut, cards, recorders, shortcuts, scenarios, recording, openRecording, closeSidePanel, closePluginRecording,
-    pluginRecordingSession: pluginRecording && !hiddenRecordings.has(recordingOwner) ? pluginRecording : null, capabilityLabels,
+  return { cards, recorders, shortcuts, scenarios, recording, openRecording, closeSidePanel, closePluginRecording,
+    // Keep the pending recorder in the composer until the user starts it.
+    pluginRecordingSession: pluginRecording && pluginRecording.status !== "idle" && !hiddenRecordings.has(recordingOwner)
+      ? pluginRecording : null, capabilityLabels,
     hasConversationActivity: Boolean(state.agent.currentChatId && calls.length),
     processInteraction,
     capturePendingInputRelease,

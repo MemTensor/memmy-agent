@@ -4,6 +4,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { browserHistoryConfiguration, BROWSER_HISTORY_CONFIG_TTL_MS } from "../../../tools/computer-history/browser-history-bridge.js";
 import type { BrowserHistoryCaptureIntent, BrowserHistoryTrustedContext } from "../../../tools/computer-history/browser-semantic-history.js";
 import { redactSensitive } from "../../../tools/computer-history/core/redaction.js";
+import { DEFAULT_OBSERVATION_SETTINGS } from "../../../tools/computer-history/core/observation-settings.js";
 
 // Derived from the public key in the packaged MV3 manifest. The private key is
 // not needed to load an unpacked extension and is deliberately not distributed.
@@ -130,6 +131,8 @@ export class ExternalBrowserBridge {
   private readonly playwrightListeners = new Map<string, Set<(event: ExternalBrowserPlaywrightEvent) => void>>();
   private browserHistoryIntentProvider: (() => BrowserHistoryCaptureIntent) | null = null;
   private readonly browserHistoryListeners = new Set<(payload: unknown, context: BrowserHistoryTrustedContext) => void>();
+  private readonly teachingBrowserHistoryListeners = new Set<(payload: unknown, context: BrowserHistoryTrustedContext) => void>();
+  private teachingBrowserGeneration: string | null = null;
   private readonly browserHistoryInputs = new Map<string, { connectionId: string; tabId: number; sentAt: number }>();
   private readonly teachingListeners = new Map<string, Set<(message: Record<string, unknown>) => void>>();
   private nextId = 1;
@@ -382,11 +385,41 @@ export class ExternalBrowserBridge {
     return () => { this.browserHistoryListeners.delete(listener); };
   }
 
-  private browserHistoryIntent(): BrowserHistoryCaptureIntent {
+  /** Teach Mode can observe the authenticated browser stream without changing History's policy. */
+  subscribeTeachingBrowserHistory(listener: (payload: unknown, context: BrowserHistoryTrustedContext) => void): () => void {
+    if (!this.teachingBrowserHistoryListeners.size) this.teachingBrowserGeneration = `teach:${randomBytes(16).toString("hex")}`;
+    this.teachingBrowserHistoryListeners.add(listener);
+    this.refreshBrowserHistoryIntent();
+    return () => {
+      this.teachingBrowserHistoryListeners.delete(listener);
+      if (!this.teachingBrowserHistoryListeners.size) this.teachingBrowserGeneration = null;
+      this.refreshBrowserHistoryIntent();
+    };
+  }
+
+  teachingBrowserCaptureIntent(): BrowserHistoryCaptureIntent {
+    return this.teachingBrowserHistoryListeners.size ? this.browserHistoryIntent()
+      : { enabled: false, generation: null, settings: null, captureText: false };
+  }
+
+  hasBrowserHistoryConnection(): boolean {
+    return [...this.clients.values()].some(client => client.authorized && client.browser
+      && client.capabilities.has("browserHistory") && client.socket.readyState === WebSocket.OPEN);
+  }
+
+  private historyIntent(): BrowserHistoryCaptureIntent {
     try {
       if (this.browserHistoryIntentProvider) return this.browserHistoryIntentProvider();
     } catch { /* Unavailable recording settings revoke page observation. */ }
     return { enabled: false, generation: null, settings: null, captureText: false };
+  }
+
+  private browserHistoryIntent(): BrowserHistoryCaptureIntent {
+    const history = this.historyIntent();
+    if (!this.teachingBrowserHistoryListeners.size) return history;
+    return { enabled: true, generation: history.enabled && history.generation
+      ? history.generation : this.teachingBrowserGeneration,
+      settings: DEFAULT_OBSERVATION_SETTINGS, captureText: true };
   }
 
   private sendBrowserHistoryIntent(client: Client): void {
@@ -553,6 +586,9 @@ export class ExternalBrowserBridge {
         for (const listener of this.browserHistoryListeners) {
           try { listener(message.payload, context); } catch { /* Optional recording cannot interrupt page control. */ }
         }
+        for (const listener of this.teachingBrowserHistoryListeners) {
+          try { listener(message.payload, context); } catch { /* An optional Teach channel cannot interrupt History. */ }
+        }
       } else if (message.type === "playwright_event") {
         const tabId = message.tabId;
         if (!Number.isSafeInteger(tabId) || !client.claims.has(tabId as number)
@@ -697,6 +733,8 @@ export class ExternalBrowserBridge {
     this.pending.clear();
     this.clients.clear();
     this.browserHistoryInputs.clear();
+    this.teachingBrowserHistoryListeners.clear();
+    this.teachingBrowserGeneration = null;
     this.webSockets.close();
     if (this.server.listening) await new Promise<void>(resolve => this.server.close(() => resolve()));
     this.port = 0;

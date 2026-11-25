@@ -575,6 +575,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
       let outcome: "success" | "error" | "interrupted" = "interrupted";
       let errorCode: string | null = null;
       const publishedPaths = new Map<string, string>();
+      const publicationFailures: Array<{ name: string; error: unknown }> = [];
       try {
         for await (const event of options.runtimeHost.invoke(call)) {
           if (event.type === "result") outcome = "success";
@@ -584,19 +585,32 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
           }
           if (event.type === "artifact") {
             const sourcePath = localArtifactPath(event.artifact.uri);
-            const artifact = await localArtifacts.host(plugin, event.artifact, {
-              conversationId: call.conversationId,
-              taskId: capabilityTaskId(call.input),
-              callId: call.callId
-            });
-            if (sourcePath && artifact.path) publishedPaths.set(sourcePath, artifact.path);
-            yield { ...event, artifact };
+            try {
+              const artifact = await localArtifacts.host(plugin, event.artifact, {
+                conversationId: call.conversationId,
+                taskId: capabilityTaskId(call.input),
+                callId: call.callId
+              });
+              if (sourcePath && artifact.path) publishedPaths.set(sourcePath, artifact.path);
+              yield { ...event, artifact };
+            } catch (error) {
+              // Consume the terminal result before discarding an already-completed save.
+              publicationFailures.push({ name: event.artifact.name, error });
+            }
             continue;
           }
-          yield event.type === "result" && publishedPaths.size
+          if (event.type === "result" && publicationFailures.length) {
+            const output = event.output;
+            if (!output || typeof output !== "object" || !("saved" in output) || output.saved !== true) {
+              throw publicationFailures[0]!.error;
+            }
+            yield { ...event, output: { ...replacePublishedPaths(output, publishedPaths) as Record<string, unknown>,
+              artifactPublicationErrors: publicationFailures.map(failure => ({ name: failure.name, message: errorMessage(failure.error) })) } };
+          } else yield event.type === "result" && publishedPaths.size
             ? { ...event, output: replacePublishedPaths(event.output, publishedPaths) }
             : event;
         }
+        if (publicationFailures.length && outcome !== "success") throw publicationFailures[0]!.error;
       } catch (error) {
         outcome = "error";
         errorCode = typeof (error as { code?: unknown })?.code === "string"

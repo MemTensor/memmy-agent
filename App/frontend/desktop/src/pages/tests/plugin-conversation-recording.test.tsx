@@ -4,17 +4,18 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, EventCaptureSession } from "@memmy/local-api-contracts";
 import type { PluginsClient } from "../../api/plugins-client.js";
+import { ApiRequestError } from "../../api/http.js";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { PluginConversationRecording } from "../plugin-conversation-recording.js";
 
 let node: HTMLDivElement, root: Root;
 beforeEach(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; node = document.createElement("div"); document.body.appendChild(node); root = createRoot(node); });
 afterEach(async () => { await act(async () => root.unmount()); node.remove(); vi.useRealTimers(); });
-function fixture() {
-  const plugin = { id: "fixture.capture", version: "0.2.0", state: "active", manifest: { name: "Capture Plugin",
+function fixture(pluginId = "fixture.capture") {
+  const plugin = { id: pluginId, version: "0.2.0", state: "active", manifest: { name: "Capture Plugin",
     conversation: { recordingCapabilityId: "capture", recordingSkillId: "capture-start", creatorSkillId: "next-step" },
     skills: [{ id: "capture-start" }], commands: [{ command: "/capture", agentSkillId: "capture-start", capabilityId: "capture" }] } } as InstalledPlugin;
-  let session: EventCaptureSession = { schemaVersion: 1, id: "ba1142db-f861-4dca-8bff-f602d492d8db", pluginId: "fixture.capture", conversationId: "chat-a",
+  let session: EventCaptureSession = { schemaVersion: 1, id: "ba1142db-f861-4dca-8bff-f602d492d8db", pluginId, conversationId: "chat-a",
     goal: "记录实际操作", state: "recording", startedAt: new Date(Date.now() - 65_000).toISOString(), endedAt: null, eventCount: 0,
     eventTypes: {}, applications: [], eventsSha256: null, availability: "pending", limitations: [], error: null, ranges: [] };
   const onPrompt = vi.fn(), invoke = vi.fn(async (_pluginId: string, _capability: string, input: any) => {
@@ -25,18 +26,23 @@ function fixture() {
     return { callId: "call", event: { type: "result", output: action === "status" ? { sessions: [result] } : result } };
   });
   const client = { invoke, disable: vi.fn(async () => ({ ...plugin, state: "disabled" })) } as unknown as PluginsClient;
-  const render = (conversationId = "chat-a") => act(async () => root.render(<I18nProvider language="zh-CN"><PluginConversationRecording
-    client={client} plugins={[plugin]} conversationId={conversationId} onPrompt={onPrompt} /></I18nProvider>));
+  const render = (conversationId = "chat-a", list: InstalledPlugin[] = [plugin]) => act(async () => root.render(<I18nProvider language="zh-CN"><PluginConversationRecording
+    client={client} plugins={list} conversationId={conversationId} onPrompt={onPrompt} /></I18nProvider>));
   const click = async (label: string) => act(async () => [...node.querySelectorAll("button")].find(button => button.textContent === label)!.click());
   const refresh = (patch: Partial<EventCaptureSession>) => act(async () => { session = { ...session, ...patch }; window.dispatchEvent(new Event("memmy:plugins-changed")); });
   return { plugin, client, invoke, onPrompt, render, click, refresh };
 }
 describe("conversation-owned recording", () => {
+  it("does not render Teach Mode's old conversation recording box", async () => {
+    const f = fixture('teach-mode'); await f.render();
+    expect(node.querySelector('[data-recording-session]')).toBeNull();
+    expect(node.textContent).not.toContain('录制中');
+  });
   it("shows a saved coverage gap separately from an unconfirmed end boundary", async () => {
     const f = fixture(); await f.render();
     await f.refresh({state: "ready", availability: "partial", endedAt: new Date().toISOString(),
       captureIntegrity: {protocolVersion: 2, coverageComplete: false, boundaryConfirmed: true, snapshotSaved: true, proofSha256: null, gaps: ["navigation_gap"]}});
-    expect(node.textContent).toContain("录制已结束并保存，部分网页操作未能确认完整");
+    expect(node.textContent).toContain("录制已结束并保存，部分操作未能确认完整");
     expect(node.textContent).not.toContain("结束确认未完成");
     await f.refresh({captureIntegrity: {protocolVersion: 2, coverageComplete: false, boundaryConfirmed: false, snapshotSaved: true, proofSha256: null, gaps: ["navigation_gap"]}});
     expect(node.textContent).toContain("已保留已收到的事件，结束确认未完成");
@@ -60,7 +66,7 @@ describe("conversation-owned recording", () => {
     expect(node.querySelector('[role="timer"]')?.textContent).toBe("01:05");
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(node.querySelector('[role="timer"]')?.textContent).toBe("01:07");
-    await f.click("结束录制");
+    await f.click("录制完成");
     expect(node.querySelector('[role="timer"]')).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
     expect(node.querySelector('time')?.textContent).toBe("01:07");
@@ -90,13 +96,18 @@ describe("conversation-owned recording", () => {
     const f = fixture(); await f.render(); expect(node.textContent).toContain("录制中"); expect(node.textContent).toContain("01:05");
     expect(f.invoke.mock.calls.every(([, , input]) => input.input.action === "status")).toBe(true);
     expect(node.querySelector("iframe")).toBeNull();
-    await f.click("结束录制"); expect(node.textContent).toContain("插件提供的下一步说明"); expect(node.textContent).toContain("3 条事件");
+    await f.click("录制完成"); expect(node.textContent).toContain("插件提供的下一步说明"); expect(node.textContent).toContain("3 条事件");
     expect(f.onPrompt).not.toHaveBeenCalled(); expect(f.invoke.mock.calls.some(([, capability]) => capability === "next_capability")).toBe(false);
     await f.click("继续处理"); expect(f.onPrompt).toHaveBeenCalledWith(expect.stringContaining("$next-step"));
-    await f.render(); expect(node.textContent).toContain("录制已结束");
+    await f.render(); expect(node.textContent).toContain("录制完成");
   });
   it("keeps conversations isolated and exposes cancellation without generating a skill", async () => {
-    const f = fixture(); await f.render(); await f.click("取消"); expect(node.textContent).toContain("录制已取消");
+    const f = fixture(); await f.render(); await f.click("丢弃");
+    // Discarding deletes the recording, so it needs a second confirmation first.
+    expect(document.body.textContent).toContain("确定要丢弃这段录制吗？");
+    expect(f.invoke).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ input: expect.objectContaining({ action: "cancel" }) }));
+    await act(async () => [...document.querySelectorAll("button")].find(button => button.textContent === "丢弃录制")!.click());
+    expect(node.textContent).toContain("录制已取消");
     expect(node.textContent).not.toContain("继续处理"); expect(f.onPrompt).not.toHaveBeenCalled();
     await f.render("chat-b"); expect(node.textContent).not.toContain("记录实际操作");
     expect(f.invoke).toHaveBeenLastCalledWith("fixture.capture", "capture", expect.objectContaining({ conversationId: "chat-b" }));
@@ -104,5 +115,26 @@ describe("conversation-owned recording", () => {
   it("reports an unavailable service without showing a fictitious recording", async () => {
     const f = fixture(); f.invoke.mockRejectedValueOnce(new Error("capture_permission_required")); await f.render();
     expect(node.querySelector('[role="alert"]')?.textContent).toContain("capture_permission_required"); expect(node.textContent).not.toContain("录制中");
+  });
+  it("stops polling a plugin that became unavailable instead of repeating its transport error", async () => {
+    vi.useFakeTimers();
+    const f = fixture(); await f.render();
+    expect(node.textContent).toContain("录制中");
+    const changed = vi.fn();
+    window.addEventListener("memmy:plugin-change", changed);
+    f.invoke.mockRejectedValue(new ApiRequestError("Plugin is not active: fixture.capture", 409, "plugin_unavailable"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_600); });
+    // A lifecycle rejection refreshes the Host list and never reaches the user as an error.
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(node.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_600); });
+    expect(changed).toHaveBeenCalledTimes(1);
+    const polling = f.invoke.mock.calls.length;
+    // The parent applies the refreshed list, which removes the disabled plugin from polling.
+    await f.render("chat-a", [{ ...f.plugin, state: "disabled" }]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(f.invoke.mock.calls.length).toBe(polling);
+    expect(node.querySelector('[role="alert"]')).toBeNull();
+    window.removeEventListener("memmy:plugin-change", changed);
   });
 });

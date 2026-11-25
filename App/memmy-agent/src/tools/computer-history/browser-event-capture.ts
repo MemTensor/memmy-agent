@@ -229,7 +229,16 @@ export function createBrowserCaptureProvider(transport: BrowserCaptureTransport,
           "Browser menus, OS dialogs, cross-origin frames and canvas actions are not covered by this browser source.", ...issues] });
       try {
         signal.throwIfAborted();
-        const result = await command("prepare", { protocolVersion: 2, settings: policy, bundleId: appId });
+        // A browser may never acknowledge preparation after cancellation. Do not
+        // keep the session's cleanup waiting on that abandoned command.
+        let rejectOnAbort!: () => void;
+        const interrupted = new Promise<never>((_, reject) => {
+          rejectOnAbort = () => reject(signal.reason ?? new Error("capture_start_cancelled"));
+          signal.addEventListener("abort", rejectOnAbort, { once: true });
+        });
+        let result: Record<string, unknown>;
+        try { result = await Promise.race([command("prepare", { protocolVersion: 2, settings: policy, bundleId: appId }), interrupted]); }
+        finally { signal.removeEventListener("abort", rejectOnAbort); }
         signal.throwIfAborted();
         if (result.protocolVersion !== 2 || !integer(result.windowId) || result.incognito !== false) throw new Error("browser_capture_window_binding_failed");
         windows.add(result.windowId);

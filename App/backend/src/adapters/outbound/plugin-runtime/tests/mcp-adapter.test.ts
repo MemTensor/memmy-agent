@@ -188,3 +188,14 @@ describe("native MCP Host policy and reverse calls", () => {
     await expect(reverse(request("real-call"))).rejects.toThrow("active conversation"); await adapter.deactivate!(session);
   });
 });
+
+
+it("unpacks the standard artifact/result envelope without an automatic-delivery extension", async () => {
+  const events = [{ type: "artifact", artifact: { id: "main", name: "note/SKILL.md", mediaType: "text/markdown", uri: "file:///plugin/note/SKILL.md", role: "deliverable" } },
+    { type: "result", output: { saved: true } }];
+  const client = { connect: async () => {}, close: async () => {}, listTools: async () => ({ tools: [{ name: "search_papers" }] }),
+    callTool: async () => ({ structuredContent: { schema: "memmy.capability-events/v1", events } }) };
+  const adapter = createMcpPluginAdapter({ createClient: () => client, createTransport: () => ({}) });
+  const session = await adapter.activate(context());
+  expect(await collect(adapter.invoke(session, { callId: "call", pluginId: context().plugin.id, capabilityId: "search", conversationId: "chat", input: {} }))).toEqual(events);
+});

@@ -69,3 +69,20 @@ it("recognizes the unpublished prototype numbering without losing retained plugi
     expect(db.prepare("SELECT name FROM _migrations WHERE name = '0030-plugin-host.sql'").get()).toBeTruthy();
   } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+
+it("keeps data in databases that applied the withdrawn unpublished delivery columns", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    runMigrations(db, [migrationRoot, ...otherMigrations]);
+    db.exec(`ALTER TABLE plugin_call_logs ADD COLUMN conversation_id TEXT;
+      ALTER TABLE plugin_call_logs ADD COLUMN deliveries_json TEXT NOT NULL DEFAULT '[]';
+      INSERT INTO _migrations (name, applied_at) VALUES ('0034-plugin-call-deliveries.sql', '2026-11-25');`);
+    db.prepare(`INSERT INTO plugin_call_logs (call_id, plugin_id, plugin_version, capability_id, adapter_id, duration_ms, outcome, called_at, conversation_id, deliveries_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run("retained", "teach-mode", "local", "create_skill", "mcp", 1, "success", "2026-11-25", "chat", '[{"retained":true}]');
+    expect(() => runMigrations(db, [migrationRoot, ...otherMigrations])).not.toThrow();
+    createPluginRepository(db).recordCall({ callId: "new", pluginId: "office", pluginVersion: "1", capabilityId: "deliver", adapterId: "command", durationMs: 1, outcome: "success" });
+    expect(db.prepare("SELECT deliveries_json FROM plugin_call_logs WHERE call_id = 'retained'").get()).toEqual({ deliveries_json: '[{"retained":true}]' });
+    expect(db.prepare("SELECT deliveries_json FROM plugin_call_logs WHERE call_id = 'new'").get()).toEqual({ deliveries_json: '[]' });
+  } finally { db.close(); }
+});

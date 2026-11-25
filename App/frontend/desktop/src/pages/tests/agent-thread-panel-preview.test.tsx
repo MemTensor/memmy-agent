@@ -48,6 +48,29 @@ describe("Office and source files in the merged thread preview", () => {
     return { context, fetchFn };
   }
 
+  it("opens Markdown references relative to the file for any plugin in the real thread preview", async () => {
+    const path = "/workspace/outputs/office/report/SKILL.md";
+    const references = ["source.json", "events.jsonl", "teaching-gaps.json"];
+    const onPreviewFile = vi.fn(() => true);
+    const context: ThreadPreviewContext = {
+      artifactClient: {
+        resolveArtifact: vi.fn(async requested => ({ ok: true, path: requested, name: "SKILL.md", kind: "file", media_url: "http://127.0.0.1/skill" })),
+        openArtifact: vi.fn(async () => undefined), revealArtifact: vi.fn(async () => undefined)
+      },
+      onPreviewFile, agentClient: null, sessionScope: null, environment: null, workspaceRoot: "/workspace",
+      fetchFn: vi.fn(async () => new Response(references.map(ref => `[${ref}](references/${ref})`).join("\n"))) as typeof fetch
+    };
+    await act(async () => root.render(<I18nProvider language="zh-CN">
+      <ThreadTabPreview tab={{ id: path, type: "file", name: "note/SKILL.md", path }} context={context} />
+    </I18nProvider>));
+    await vi.waitFor(() => expect(container.querySelectorAll(".file-preview__markdown-link")).toHaveLength(3));
+    for (const link of container.querySelectorAll<HTMLButtonElement>(".file-preview__markdown-link")) {
+      await act(async () => link.click());
+    }
+    for (const ref of references) expect(onPreviewFile).toHaveBeenCalledWith({ name: ref, path: `/workspace/outputs/office/report/references/${ref}` });
+    expect(context.artifactClient!.resolveArtifact).toHaveBeenCalledWith(path);
+  });
+
   it("waits through a transient live-edit replacement instead of reporting the file missing", async () => {
     const load = vi.fn()
       .mockRejectedValueOnce(new Error("ENOENT"))

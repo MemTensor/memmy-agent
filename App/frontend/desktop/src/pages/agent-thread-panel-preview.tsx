@@ -572,6 +572,28 @@ async function loadFilePreview(
   if (!mediaUrl) return { state: { status: "unavailable" }, path };
   if (kind === "image" || kind === "video") return { state: { status: "ready", kind, url: mediaUrl }, path };
 
+  // File previews resolve Markdown resources against the file's directory, not the chat.
+  if (kind === "markdown" && path) {
+    const blob = await fetchPreviewBlob(mediaUrl, THREAD_TEXT_PREVIEW_MAX_BYTES, signal, context.fetchFn);
+    if (!blob) return { state: { status: "too-large" }, path };
+    const resource: FilePreviewResource = {
+      id: path, name: tab.name, path,
+      load: async () => blob,
+      openRelativePath: context.onPreviewFile ? relativePath => context.onPreviewFile!({
+        name: relativePath.split("/").at(-1) ?? relativePath, path: relativePath
+      }) : undefined,
+      loadRelativePath: context.artifactClient ? async (relativePath, relativeSignal) => {
+        const resolved = await context.artifactClient!.resolveArtifact(relativePath);
+        if (!resolved.media_url) throw new Error("Relative Markdown resource is unavailable");
+        const bytes = await fetchPreviewBlob(resolved.media_url, THREAD_TEXT_PREVIEW_MAX_BYTES,
+          relativeSignal ?? signal, context.fetchFn);
+        if (!bytes) throw new Error("Relative Markdown resource exceeds preview limit");
+        return bytes;
+      } : undefined
+    };
+    return { state: { status: "ready", kind: "document", resource }, path };
+  }
+
   // Large raw text stays bounded in both network reads and rendering. Smaller
   // files retain the existing full-file preview/editor behavior.
   if (["code", "text", "markdown", "csv"].includes(kind)) {

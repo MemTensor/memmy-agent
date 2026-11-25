@@ -166,6 +166,13 @@ export function normalizeWeChatBatch(batch: RawBatch, databaseRoot: string): WeC
  * normalized messages before atomically saving nextCursor; retry is expected.
  */
 export class WeChatMessageBatchReader {
+  private readonly activeReads = new Set<AbortController>();
+
+  /** Abort execFile so disabling History stops the DB reader process itself. */
+  cancel(): void {
+    for (const controller of this.activeReads) controller.abort();
+  }
+
   constructor(
     private readonly options: {
       databaseRoot: string;
@@ -217,14 +224,19 @@ export class WeChatMessageBatchReader {
       args.push("--since", String(since));
     }
     let stdout: string;
+    const controller = new AbortController();
+    this.activeReads.add(controller);
     try {
       ({ stdout } = await runFile(this.options.python ?? "/usr/bin/python3", args, {
+        signal: controller.signal,
         maxBuffer: 16 * 1024 * 1024,
         timeout: this.options.sqlcipherLibrary === "builtin" ? 60_000 : 15_000,
       }));
     } catch (error) {
       // Child output can contain private messages; do not include it in logs.
       throw new WeChatReaderError(readerFailureCategory(error));
+    } finally {
+      this.activeReads.delete(controller);
     }
     if (consent.read().consentId !== consentId) throw new Error("WeChat chat access was revoked");
     const parsed = JSON.parse(stdout);

@@ -29,11 +29,18 @@ describe("identity-bound native plugin services", () => {
     const config = await f.invoke("teach-mode", "event-sessions", { action: "configuration" });
     expect(config.supported).toBe(true);
     expect(config.features).toContain("memmy.event-checkpoints/v1");
+    expect(config.features).toContain("memmy.teaching-summary/v1");
+    expect(config.features).toContain("memmy.teaching-evidence-files/v1");
     const active = await f.invoke("teach-mode", "event-sessions", { action: "start", conversationId: "mac-chat", goal: "Teach a Mac workflow", consent: true });
     fs.appendFileSync(stream, JSON.stringify({ recordType: "human_event", eventType: "mouse_click", sequence: 1,
       timestamp: new Date().toISOString(), application: { name: "Controlled Mac app", bundleId: "test.mac-app" } }) + "\n");
     const ended = await f.invoke("teach-mode", "event-sessions", { action: "stop", conversationId: "mac-chat", session_id: active.id });
     expect(ended).toMatchObject({ state: "ready", eventCount: 1 }); expect(released).toBe(true);
+    const request = { pluginId: "teach-mode", service: "event-sessions", input: { action: "evidence-files", conversationId: "mac-chat", session_id: active.id, workspace: root } };
+    await expect(f.service.invoke(request)).rejects.toThrow("capture_workspace_unavailable");
+    const snapshot = await f.service.invoke(request, { history: {} as any, toolNames: [], evidenceWorkspace: root });
+    expect(snapshot).toMatchObject({ eventsSha256: ended.eventsSha256, eventCount: 1, eventsPath: expect.any(String) });
+    expect(fs.readFileSync(snapshot.eventsPath as string, "utf8")).toContain("mouse_click");
     await expect(f.invoke("teach-mode", "collector", { action: "acquire" })).rejects.toThrow();
   });
   it("does not advertise event capture below the native macOS 14 runtime baseline", async () => {

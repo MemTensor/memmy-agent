@@ -1,0 +1,12 @@
+.teach-permission-card { max-width: 560px; margin: 12px 16px; padding: 18px 20px; border: 1px solid var(--color-border-stone); border-radius: 16px; background: var(--color-background-paper); box-shadow: 0 8px 24px #2026260a; color: var(--color-text-ink); font-size: 14px; }
+.teach-permission-card__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.teach-permission-card__header strong { font-size: 15px; font-weight: 650; }
+.teach-permission-card__header > button { display: grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; }
+.teach-permission-card__header > button:hover:not(:disabled) { background: #2026260d; }
+.teach-permission-card__description { margin: 9px 0 12px; color: color-mix(in srgb, var(--color-text-ink) 68%, transparent); line-height: 1.6; }
+.teach-permission-card__list { overflow: hidden; border: 1px solid var(--color-border-stone); border-radius: 10px; }
+.teach-permission-card__row { display: flex; align-items: center; justify-content: space-between; min-height: 49px; padding: 7px 12px; gap: 10px; }
+.teach-permission-card__row + .teach-permission-card__row { border-top: 1px solid var(--color-border-stone); }
+.teach-permission-card__granted { display: inline-flex; align-items: center; gap: 4px; color: #2e8774; }
+.teach-permission-card__error { margin: 10px 0 0; color: #bd4d4d; }
+.teach-permission-card__footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 14px; }

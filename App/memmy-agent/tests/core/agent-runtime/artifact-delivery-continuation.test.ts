@@ -59,3 +59,15 @@ describe("plugin file inventory", () => {
     ]);
   });
 });
+
+
+it("asks for model delivery of a saved skill and stops after the main file was attached", () => {
+  const paths = ["note/references/source.json", "note/references/teaching-gaps.json", "note/references/events.jsonl", "note/SKILL.md"];
+  const messages = [{ role: "user", content: "保存技能" }, { role: "tool", name: "mcp_plugins_create_skill_test", content: JSON.stringify({
+    saved: true, publishedFiles: paths.map(name => ({ name, path: `/workspace/${name}` }))
+  }) }];
+  const reminder = createArtifactDeliveryContinuation(() => [])({ messages, finalContent: "已保存" });
+  expect(reminder).toContain("message(media=[absolute paths])");
+  expect(reminder).toContain("Do not send every generated file");
+  expect(createArtifactDeliveryContinuation(() => ["/workspace/note/SKILL.md"])({ messages, finalContent: "已附上" })).toBeNull();
+});

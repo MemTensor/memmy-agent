@@ -10,6 +10,7 @@ import { browserHistorySensorScript } from "../../../../src/tools/computer-histo
 import type { BrowserSemanticHistoryEvent } from "../../../../src/tools/computer-history/browser-semantic-history.js";
 import { getPlaywrightBrowsersPath } from "../../../../src/core/agent-runtime/tools/browser-setup.js";
 import { reusableHumanActions } from "../../../../src/tools/computer-history/mac/summarize-history.js";
+import { createTeachingBrowserEnhancement } from "../../../../src/tools/plugin-host/teaching-browser-enhancement.js";
 
 const resources: Array<() => Promise<unknown> | unknown> = [];
 afterEach(async () => { for (const close of resources.splice(0).reverse()) await close(); });
@@ -141,6 +142,39 @@ async function awaitObservedBrowserInput(bridge: ExternalBrowserBridge, targetNa
 }
 
 describe("browser History bridge to canonical event stream", () => {
+  it("sends an excluded page only to the optional Teach stream while History remains filtered", async () => {
+    const h = await harness();
+    const settings = JSON.parse(fs.readFileSync(h.settingsFile, "utf8"));
+    settings.observation.rules.push({ scope: "url", urlDomain: "history-fixture.test", behavior: "do_not_observe" });
+    fs.writeFileSync(h.settingsFile, JSON.stringify(settings));
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-teach-browser-"));
+    resources.push(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const teaching = await createTeachingBrowserEnhancement(h.bridge).acquire("teach-session", directory);
+    resources.push(() => teaching.release());
+    const generation = h.bridge.teachingBrowserCaptureIntent().generation;
+    h.send({ type: "browser_history_config_request", id: "teaching-page", ...h.context });
+    await vi.waitFor(() => expect(h.messages.find(message => message.id === "teaching-page")?.enabled).toBe(true));
+    h.emit({ ...h.payload("teaching-only"), generation });
+    await vi.waitFor(async () => expect((await teaching.checkpoint()).streams[0]?.size).toBeGreaterThan(0));
+    expect(h.records()).toHaveLength(0);
+    const event = JSON.parse(fs.readFileSync(path.join(directory, "browser-enhancement.jsonl"), "utf8").trim());
+    expect(event).toMatchObject({ recordType: "human_event", eventType: "browser_action", details: { source: "browser_history" } });
+  });
+  it("keeps Teach browser enrichment available when History is paused", async () => {
+    const h = await harness();
+    await h.service.pauseObservation();
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-teach-browser-paused-"));
+    resources.push(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const teaching = await createTeachingBrowserEnhancement(h.bridge).acquire("teach-paused", directory);
+    resources.push(() => teaching.release());
+    const generation = h.bridge.teachingBrowserCaptureIntent().generation;
+    expect(generation).toMatch(/^teach:/);
+    h.send({ type: "browser_history_config_request", id: "teaching-paused", ...h.context });
+    await vi.waitFor(() => expect(h.messages.find(message => message.id === "teaching-paused")?.enabled).toBe(true));
+    h.emit({ ...h.payload("teaching-while-paused"), generation });
+    await vi.waitFor(async () => expect((await teaching.checkpoint()).streams[0]?.size).toBeGreaterThan(0));
+    expect(h.records()).toHaveLength(0);
+  });
   it.each(["chrome", "edge"] as const)("records %s semantics without an Agent claim and rejects revoked/private/protected capture", async browser => {
     const h = await harness(browser);
     expect(h.bridge.listClaims()).toEqual([]);

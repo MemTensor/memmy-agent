@@ -1,10 +1,6 @@
-import { RecordingStartSchema } from "@memmy/local-api-contracts";
-import { handleRecordingHttp } from "../../tools/computer-recordings/http-api.js";
-import { getRecordingSessionService, shutdownRecordingService } from "../../tools/computer-recordings/service.js";
-import { CollectorBusyError } from "../../tools/computer-history/core/collector-gate.js";
+import { agentTaskActivity } from "../../core/agent-runtime/task-activity.js";
 import { invokeNativePluginService, shutdownNativePlugins } from "../../tools/plugin-host/native-services.js";
 import { SkillsLoader } from "../../core/agent-runtime/skills.js";
-import { agentTaskActivity } from "../../core/agent-runtime/task-activity.js";
 import { PluginUpdateLease } from "../../core/agent-runtime/plugin-update-lease.js";
 import { historySummaryRuntime } from "../../providers/history-summary-runtime.js";
 import crypto from "node:crypto";
@@ -25,6 +21,8 @@ import {
 import { requestMcpReload } from "../../core/agent-runtime/tools/mcp.js";
 import { BaseChannel, type ChannelHandleMessageOptions } from "./base.js";
 import { CronNotificationOutbox } from "./cron-notification-outbox.js";
+import { AssistRunRecorder } from "./webui-assist-run.js";
+import { renderAssistRequestSection } from "../../assist-request/index.js";
 import {
   OUTBOUND_META_AGENT_UI,
   OutboundMessage,
@@ -137,9 +135,8 @@ import {
   ComputerHistoryApiError,
   getComputerHistoryDemoService,
   clientSnapshot,
-} from "../../tools/computer-history/computer-history-api.js";
-import type { ComputerHistoryDemoService } from "../../tools/computer-history/core/computer-history-api.js";
-import { getWindowsComputerHistoryService } from "../../tools/computer-history/win/computer-history-api.js";
+} from "../../tools/computer-history/mac/computer-history-api.js";
+import type { ComputerHistoryDemoService } from "../../tools/computer-history/mac/computer-history-api.js";
 import { isComputerHistorySupported } from "../../tools/computer-history/platform.js";
 import {
   removeSessionDagFiles,
@@ -148,7 +145,7 @@ import {
 
 type Query = Record<string, string[]>;
 type HttpRequestLike = { path: string; method?: string; headers?: http.IncomingHttpHeaders | Record<string, any>; body?: Buffer | string };
-type HttpLikeResponse = { status: number; headers: Record<string, string>; body: Buffer | string; stream?: fs.ReadStream };
+type HttpLikeResponse = { status: number; headers: Record<string, string>; body: Buffer | string };
 type WorkspaceEnvironmentContextResult =
   | { ok: true; context: WorkspaceEnvironmentContext }
   | { ok: false; response: HttpLikeResponse };
@@ -174,7 +171,6 @@ function publicModelErrorContext(value: unknown): Record<string, string> {
   const fields = ["presetId", "provider", "model", "capability"] as const;
   if (fields.some((field) => typeof context[field] !== "string" || !String(context[field]).trim())) return {};
   return {
-    ...(context.origin === "model_catalog_fallback" ? { origin: "model_catalog_fallback" } : {}),
     presetId: String(context.presetId),
     source: context.source,
     provider: String(context.provider),
@@ -279,7 +275,6 @@ export type WebuiMessageDigestInput = {
   expectedTurnId: string | null;
   thinkingEnabled?: boolean;
   thinkingLevel?: string | null;
-  taskRecording?: unknown;
   interruptPendingTurnId?: string | null;
 };
 
@@ -296,9 +291,7 @@ export function computeWebuiMessageDigest(input: WebuiMessageDigestInput): strin
     expected_turn_id: input.expectedTurnId,
     thinking_enabled: input.thinkingEnabled ?? null,
     thinking_level: input.thinkingLevel ?? null,
-    ...(input.taskRecording ? { task_recording: input.taskRecording } : {}),
     ...(input.interruptPendingTurnId ? { interrupt_pending_turn_id: input.interruptPendingTurnId } : {}),
-    ...(input.taskRecording ? { task_recording: input.taskRecording } : {}),
   })).digest("hex");
 }
 
@@ -373,7 +366,7 @@ function normalizeAgentQuestionResponse(
 
 const MAX_WEBUI_UPLOAD_BODY_BYTES = 256 * 1024 * 1024;
 // Control characters and the escaped path separators are intentional filename exclusions.
-// eslint-disable-next-line no-useless-escape
+// eslint-disable-next-line no-control-regex, no-useless-escape
 const UNSAFE_FILENAME_CHARS = /[<>:"\/\\|?*\x00-\x1F]/g;
 const IMAGE_MIME_ALLOWED = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const DOCUMENT_MIME_BY_EXTENSION: Record<string, string> = {
@@ -428,6 +421,29 @@ const MAX_TITLE_ATTACHMENT_TEXT_BYTES = 16 * 1024;
 const WEBUI_RECORDINGS_TARGET = "recordings";
 const WEBUI_RECORDINGS_DIR = "recordings";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** 成员协助里由 Memmy 执行的那一轮，派发时用这个发送方：与人在界面里发的消息区分开。 */
+const ASSIST_RUN_CLIENT_ID = "memmy-assist";
+
+/**
+ * 协助任务上记的请求信息：界面据此说明「这是谁的请求」。只留已知字段，每个都限长度，
+ * 不认识的一律丢掉，避免把任意内容写进会话。
+ */
+function assistRunMetadata(value: unknown): Record<string, string | number> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const out: Record<string, string | number> = {};
+  for (const key of ["requestId", "threadId", "cloudProjectId", "requesterName", "requesterId", "via", "title"]) {
+    const item = raw[key];
+    if (typeof item === "string" && item.trim()) out[key] = item.trim().slice(0, 200);
+  }
+  // 交给模型、不在任务里显示的要求（结果的写法）：由协助钩子放进系统提示词。
+  if (typeof raw.context === "string" && raw.context.trim()) out.context = raw.context.trim().slice(0, 4_000);
+  // 这次执行对敏感操作的策略：deny 是限时授权自动开始的（工具执行前按规则拦下），allow 是她点过允许的。
+  if (raw.approval === "deny" || raw.approval === "allow") out.approval = raw.approval;
+  if (typeof raw.attempt === "number" && Number.isSafeInteger(raw.attempt) && raw.attempt > 0) out.attempt = raw.attempt;
+  return out.requestId ? out : null;
+}
 
 export function stripTrailingSlash(value: string): string {
   if (!value) return "/";
@@ -831,6 +847,11 @@ export class WebSocketChannel extends BaseChannel {
   activeTurnIdByChatId = new Map<string, string>();
   activeTurnSourceByChatId = new Map<string, TurnSource>();
   connectionSurface = new Map<any, ClientSurface>();
+  /**
+   * 成员协助里由 Memmy 执行的几轮，按任务 id 记着：本机后端据此读取进度、停止执行。
+   * 每一轮由一个服务端连接订阅，与界面收到同一份事件。
+   */
+  private readonly assistRuns = new Map<string, { recorder: AssistRunRecorder; connection: any }>();
   mediaSecret = crypto.randomBytes(32);
   settingsRestartSections = new Set<string>();
   sessionManager: any = null;
@@ -1722,6 +1743,190 @@ export class WebSocketChannel extends BaseChannel {
     });
   }
 
+  /**
+   * 成员协助：在项目下新建一条任务，把另一位成员的请求作为第一条消息交给 Memmy 执行。
+   *
+   * <p>任务先建好再派发：项目绑定、标题（用请求标题，模型不再另起）和协助标记都写在会话上，界面据此把它
+   * 显示成一条普通的项目任务。派发走与界面完全相同的路径（{@link dispatchEnvelope} 的 `message`），由一个
+   * 服务端连接订阅这条任务，执行方在界面里打开它看到的就是同一轮。</p>
+   *
+   * <p>带 `chat_id` 时是同一次排查的后续请求：续在同一条任务里，Memmy 记得前面查到的内容。</p>
+   */
+  async handleAssistRunStart(request: any): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    if (!this.sessionManager) return httpError(503, "session manager unavailable");
+    let decoded: any;
+    try {
+      decoded = JSON.parse(requestBodyText(request));
+    } catch {
+      return httpError(400, "body must be JSON");
+    }
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return httpError(400, "body must be an object");
+    const content = typeof decoded.content === "string" ? decoded.content.trim() : "";
+    // 送回发起方的结果里带着完整回复（云端上限 64KB），请求本身也可能较长：按 80,000 字放行。
+    if (!content || content.length > 80_000) return httpError(400, "content is required");
+    const title = typeof decoded.title === "string" ? decoded.title.trim().slice(0, 120) : "";
+    const projectId = typeof decoded.project_id === "string" && UUID_RE.test(decoded.project_id)
+      ? decoded.project_id
+      : null;
+    const assist = assistRunMetadata(decoded.assist);
+    // 「deliver」：把协助结果送回发起方已有的任务，只续发，不建任务，也不改任务上的协助标记。
+    const deliver = decoded.mode === "deliver";
+
+    const continuing = typeof decoded.chat_id === "string"
+      && UUID_RE.test(decoded.chat_id)
+      && this.sessionManager.get(`websocket:${decoded.chat_id}`)
+      ? decoded.chat_id as string
+      : null;
+    if (deliver && !continuing) return httpJsonResponse({ error: "chat_not_found" }, { status: 404 });
+    const chatId = continuing ?? crypto.randomUUID();
+    const sessionKey = `websocket:${chatId}`;
+    if (continuing) {
+      if (this.assistRuns.get(chatId)?.recorder.finished === false) {
+        return httpJsonResponse({ error: "run_in_progress" }, { status: 409 });
+      }
+      if (assist && !deliver) {
+        const session = this.sessionManager.get(sessionKey) as Session;
+        session.metadata.assistRequest = assist;
+        this.sessionManager.save(session, { fsync: true });
+      }
+    } else {
+      let binding: { projectId: string | null; cwd: string };
+      try {
+        binding = this.assistRunBinding(projectId);
+      } catch (error) {
+        const status = error instanceof WebuiProjectError ? error.status : 422;
+        return httpJsonResponse({ error: this.webuiBindingErrorReason(error) }, { status });
+      }
+      const session = new Session({ key: sessionKey });
+      session.metadata.webui = true;
+      session.metadata[WEBUI_PROJECT_ID_METADATA_KEY] = binding.projectId;
+      session.metadata[WEBUI_WORKSPACE_CWD_METADATA_KEY] = binding.cwd;
+      if (title) {
+        session.metadata.title = title;
+        session.metadata.titleUserEdited = true;
+      }
+      if (assist) session.metadata.assistRequest = assist;
+      this.sessionManager.save(session, { fsync: true });
+    }
+
+    const clientRequestId = crypto.randomUUID();
+    const recorder = new AssistRunRecorder({ chatId, clientRequestId });
+    const connection = this.assistRunConnection(recorder);
+    this.rememberAssistRun(chatId, recorder, connection);
+    this.attachConnection(connection, chatId);
+    await this.dispatchEnvelope(connection, ASSIST_RUN_CLIENT_ID, {
+      type: "message",
+      chat_id: chatId,
+      content,
+      webui: true,
+      client_request_id: clientRequestId,
+      turn_admission: "queue",
+    });
+    // 新任务出现在侧栏与项目里：界面收到这条通知会重新读取任务列表。
+    this.queueGlobalSessionUpdated(chatId, "metadata");
+    const snapshot: Record<string, unknown> = { ...recorder.snapshot() };
+    // 这一轮实际交给模型、不在任务里显示的那段系统提示词：协助会话里与提示词分开显示。
+    const hidden = !deliver && assist && typeof assist.context === "string" ? renderAssistRequestSection(assist.context) : "";
+    if (hidden) snapshot.prompt_context = hidden;
+    return httpJsonResponse(snapshot, { status: recorder.status === "failed" ? 409 : 202 });
+  }
+
+  handleAssistRunRead(request: any, chatId: string): HttpLikeResponse {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    const run = this.assistRuns.get(chatId);
+    if (!run) return httpJsonResponse({ error: "run_not_found" }, { status: 404 });
+    const snapshot = run.recorder.snapshot();
+    // 回答若没有经由事件送达（例如只落进了会话），收尾后从会话里补上最后一条回答。
+    if (run.recorder.finished && !snapshot.reply) snapshot.reply = this.lastAssistantReply(`websocket:${chatId}`);
+    return httpJsonResponse(snapshot);
+  }
+
+  async handleAssistRunStop(request: any, chatId: string): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    const run = this.assistRuns.get(chatId);
+    if (!run) return httpJsonResponse({ error: "run_not_found" }, { status: 404 });
+    if (!run.recorder.finished) {
+      // 与界面里点「停止」同一条路径：停下当前这一轮，订阅方收到 stop_result。
+      await this.dispatchEnvelope(run.connection, ASSIST_RUN_CLIENT_ID, { type: "stop", chat_id: chatId });
+      // 还在排队、没有开始的那一轮不会有 stop_result，这里直接落定。
+      run.recorder.finish("stopped");
+    }
+    return httpJsonResponse(run.recorder.snapshot());
+  }
+
+  private assistRunBinding(projectId: string | null): { projectId: string | null; cwd: string } {
+    if (!projectId) return { projectId: null, cwd: this.createStandaloneTaskCwd() };
+    const store = this.requireProjectStore();
+    if (store.snapshot().state === "corrupt") throw new WebuiProjectError("project_registry_corrupt", 503);
+    if (store.isDeleting(projectId)) throw new WebuiProjectError("project_removed", 409);
+    const project = store.getActive(projectId);
+    if (!project) throw new WebuiProjectError("project_not_found", 404);
+    let cwd: string;
+    try {
+      cwd = assertWebuiWorkspaceAvailable(project.rootPath);
+    } catch {
+      throw new WebuiProjectError("project_unavailable", 422);
+    }
+    return { projectId: project.id, cwd };
+  }
+
+  /** 订阅协助任务的服务端连接：收到的每个事件交给记录器，这一轮结束后退订。 */
+  private assistRunConnection(recorder: AssistRunRecorder): any {
+    const connection = {
+      remoteAddress: null,
+      send: (raw: string) => {
+        try {
+          recorder.consume(JSON.parse(raw));
+        } catch {
+          // 不是 JSON 的推送与这一轮无关。
+        }
+      },
+      close: () => undefined,
+    };
+    const unsubscribe = recorder.onChange(() => {
+      if (!recorder.finished) return;
+      unsubscribe();
+      this.safeCleanupConnection(connection);
+      // 界面没有订阅这条任务时收不到这一轮的结束事件：广播一次，让侧栏与项目里的「进行中」状态及时消失。
+      this.queueGlobalSessionUpdated(recorder.chatId, "metadata");
+    });
+    return connection;
+  }
+
+  /** 记住这一轮；结束超过一小时的不再保留，总数也有上限。 */
+  private rememberAssistRun(chatId: string, recorder: AssistRunRecorder, connection: any): void {
+    const previous = this.assistRuns.get(chatId);
+    if (previous && previous.connection !== connection) this.safeCleanupConnection(previous.connection);
+    this.assistRuns.set(chatId, { recorder, connection });
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const [key, run] of this.assistRuns) {
+      if (run.recorder.finished && (run.recorder.finishedAt ?? 0) < cutoff) this.assistRuns.delete(key);
+    }
+    while (this.assistRuns.size > 50) {
+      const oldest = this.assistRuns.keys().next().value;
+      if (oldest === undefined) break;
+      const run = this.assistRuns.get(oldest);
+      if (run && !run.recorder.finished) break;
+      this.assistRuns.delete(oldest);
+    }
+  }
+
+  private lastAssistantReply(sessionKey: string): string {
+    const session = this.sessionManager?.get?.(sessionKey) as Session | null;
+    const messages = Array.isArray(session?.messages) ? session!.messages : [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message?.role === "user") break;
+      if (message?.role === "assistant" && typeof message.content === "string" && message.content.trim()) {
+        return message.content.trim();
+      }
+    }
+    return "";
+  }
+
   handleWebuiSidebarStateUpdate(request: any): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     let decoded: any;
@@ -1806,10 +2011,11 @@ export class WebSocketChannel extends BaseChannel {
       const body = this.parseProjectBody(request);
       const keys = Object.keys(body);
       if (
-        keys.some((key) => !["mode", "path", "name"].includes(key))
+        keys.some((key) => !["mode", "path", "name", "allowShared"].includes(key))
         || typeof body.path !== "string"
         || (body.mode !== "blank" && body.mode !== "existing")
         || (body.name != null && typeof body.name !== "string")
+        || (body.allowShared != null && typeof body.allowShared !== "boolean")
       ) {
         throw new WebuiProjectError("project_request_invalid", 400);
       }
@@ -1822,7 +2028,9 @@ export class WebSocketChannel extends BaseChannel {
           return false;
         }
       });
-      const project = this.requireProjectStore().add(body.path, body.mode, body.name);
+      const project = this.requireProjectStore().add(body.path, body.mode, body.name, {
+        allowShared: body.allowShared === true
+      });
       return httpJsonResponse(
         { project, snapshot: this.webuiSessionSnapshot() },
         { status: existing ? 200 : 201 },
@@ -2509,16 +2717,39 @@ export class WebSocketChannel extends BaseChannel {
     return httpJsonResponse(this.lastCompactionPayload(resolved.guiSessionKey, data.metadata?.lastSummary));
   }
 
+  /**
+   * The authorization root of an artifact request always comes from the server, never from the request
+   * body: a session key resolves to that session's bound workspace, a project id to the project's
+   * registered root. A draft task has no session yet, so the side panel previews its project files by id.
+   */
+  artifactRequestWorkspace(
+    request: HttpRequestLike,
+  ): { path: string; workspace: string } | HttpLikeResponse {
+    const artifactRequest = artifactRequestFromRequest(request);
+    if (!artifactRequest) return httpError(400, "missing path or one of sessionKey/projectId");
+    if ("sessionKey" in artifactRequest) {
+      const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
+      if (!workspace) return httpError(404, "session not found");
+      return { path: artifactRequest.path, workspace };
+    }
+    try {
+      const project = this.activeProject(artifactRequest.projectId);
+      const workspace = assertWebuiWorkspaceAvailable(project.rootPath);
+      if (workspace !== project.rootPath) throw new WebuiProjectError("project_directory_unavailable", 422);
+      return { path: artifactRequest.path, workspace };
+    } catch (error) {
+      return this.projectErrorResponse(error);
+    }
+  }
+
   handleArtifactResolve(request: HttpRequestLike): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
-    const artifactRequest = artifactRequestFromRequest(request);
-    if (!artifactRequest) return httpError(400, "missing path or sessionKey");
-    const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
-    if (!workspace) return httpError(404, "session not found");
-    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
+    const artifactRequest = this.artifactRequestWorkspace(request);
+    if ("status" in artifactRequest) return artifactRequest;
+    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, artifactRequest.workspace);
     if (!resolved) return httpError(404, "artifact not found");
-    const workspaceRoot = realpathIfExists(workspace);
+    const workspaceRoot = realpathIfExists(artifactRequest.workspace);
     const relativePath = resolved.kind !== "directory" && isPathInside(resolved.path, workspaceRoot)
       ? path.relative(workspaceRoot, resolved.path).split(path.sep).join("/")
       : null;
@@ -2551,11 +2782,9 @@ export class WebSocketChannel extends BaseChannel {
   handleArtifactReveal(request: HttpRequestLike): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
-    const artifactRequest = artifactRequestFromRequest(request);
-    if (!artifactRequest) return httpError(400, "missing path or sessionKey");
-    const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
-    if (!workspace) return httpError(404, "session not found");
-    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
+    const artifactRequest = this.artifactRequestWorkspace(request);
+    if ("status" in artifactRequest) return artifactRequest;
+    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, artifactRequest.workspace);
     if (!resolved) return httpError(404, "artifact not found");
     try {
       revealFileInSystemManager(resolved.path);
@@ -2568,11 +2797,9 @@ export class WebSocketChannel extends BaseChannel {
   handleArtifactOpen(request: HttpRequestLike): HttpLikeResponse {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
     if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
-    const artifactRequest = artifactRequestFromRequest(request);
-    if (!artifactRequest) return httpError(400, "missing path or sessionKey");
-    const workspace = this.artifactSessionWorkspace(artifactRequest.sessionKey);
-    if (!workspace) return httpError(404, "session not found");
-    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, workspace);
+    const artifactRequest = this.artifactRequestWorkspace(request);
+    if ("status" in artifactRequest) return artifactRequest;
+    const resolved = this.resolveOrStageArtifactPath(artifactRequest.path, artifactRequest.workspace);
     if (!resolved) return httpError(404, "artifact not found");
     const result = openPathWithSystemDefault(resolved.path);
     if (!result.ok) return httpError(500, result.message);
@@ -2628,7 +2855,13 @@ export class WebSocketChannel extends BaseChannel {
         const bytes = Buffer.from(await file.arrayBuffer());
         const originalName = typeof file.name === "string" && file.name.trim() ? file.name : "attachment";
         const classification = classifyWebuiUploadAttachment(originalName, declaredMime, bytes);
-        if (!classification) return failUpload(httpError(415, "unsupported attachment mime"));
+        if (!classification) {
+          const extension = path.extname(originalName).toLowerCase();
+          const message = TEXT_MIME_BY_EXTENSION[extension] && !looksLikeText(bytes)
+            ? "invalid_text_content: file is binary or uses an unsupported text encoding"
+            : "unsupported attachment mime";
+          return failUpload(httpError(415, message));
+        }
         const safeOriginalName = safeFilename(originalName).replace(/\.[^.]*$/, "") + classification.extension;
         const inWorkspace = targets[index] === WEBUI_RECORDINGS_TARGET;
         let target: string;
@@ -2816,6 +3049,51 @@ export class WebSocketChannel extends BaseChannel {
         }
       })
       .sort();
+  }
+
+  /**
+   * Moves every session of one project to another project that runs in the same folder. Used when a shared
+   * project is deleted: its sessions become ordinary local tasks of the local project already using that folder.
+   */
+  async handleSessionReassignProject(request: HttpRequestLike): Promise<HttpLikeResponse> {
+    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+    if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
+    try {
+      const body = this.parseProjectBody(request);
+      const keys = Object.keys(body);
+      if (
+        keys.some((key) => !["fromProjectId", "toProjectId"].includes(key))
+        || typeof body.fromProjectId !== "string"
+        || typeof body.toProjectId !== "string"
+        || body.fromProjectId === body.toProjectId
+      ) {
+        throw new WebuiProjectError("project_request_invalid", 400);
+      }
+      const store = this.requireProjectStore();
+      const from = store.getActive(body.fromProjectId);
+      const to = store.getActive(body.toProjectId);
+      if (!from || !to) throw new WebuiProjectError("project_not_found", 404);
+      // A session records the folder it ran in, so it can only move to a project on the same folder.
+      if (from.rootPath !== to.rootPath) throw new WebuiProjectError("project_request_invalid", 400);
+      if (!this.sessionManager) return httpError(503, "session services unavailable");
+
+      const moved: string[] = [];
+      for (const key of this.projectSessionKeys(from.id)) {
+        const session = this.sessionManager.get(key) as Session | null;
+        if (!session) continue;
+        session.metadata = { ...session.metadata, webuiProjectId: to.id, webuiWorkspaceCwd: to.rootPath };
+        this.sessionManager.save(session, { fsync: true });
+        try {
+          this.queueGlobalSessionUpdated(toGuiChatId(key), "metadata");
+        } catch {
+          // A key the GUI cannot project is still moved on disk.
+        }
+        moved.push(key);
+      }
+      return httpJsonResponse({ moved: moved.length, project: to });
+    } catch (error) {
+      return this.projectErrorResponse(error);
+    }
   }
 
   private async removeProjectSessions(projectId: string): Promise<string[]> {
@@ -3336,30 +3614,35 @@ export class WebSocketChannel extends BaseChannel {
       return httpJsonResponse({ acquired: await this.pluginUpdateLease.acquire(body.token, body.ownerPid) });
     }
     if (got === "/api/sessions") return this.handleSessionsList(request);
+    if (got === "/api/sessions/reassign-project") return this.handleSessionReassignProject(request);
     if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
-    if (got === "/api/computer-history") return this.handleComputerHistory(request, "snapshot");
-    if (got === "/api/computer-recordings" || got.startsWith("/api/computer-recordings/")) {
-      if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-      return handleRecordingHttp(getRecordingSessionService(), request, true);
-    }
-    if (got === "/api/computer-history/windows/settings") return this.handleWindowsHistorySettings(request);
     if (got === "/api/plugin-host/services") {
       if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
       if (String(request?.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "Method not allowed");
       try {
         const raw = JSON.parse(String(request.body ?? "{}"));
         let skills: Array<{ name: string; path: string }> | undefined;
+        let evidenceWorkspace: string | undefined;
+        if (raw.service === "event-sessions" && raw.input?.action === "evidence-files") {
+          // Backend Host services strip websocket: before forwarding conversationId.
+          const key = typeof raw.input.conversationId === "string"
+            ? `websocket:${raw.input.conversationId.replace(/^websocket:/, "")}` : null;
+          const selected = key ? this.workspaceEnvironmentSession(key) : null;
+          if (!selected?.ok || !selected.context.cwd) throw new Error("capture_workspace_unavailable");
+          evidenceWorkspace = selected.context.cwd;
+        }
         if (raw.service === "event-sessions" && raw.input?.action === "configuration") {
           const selected = typeof raw.input.conversationId === "string" ? this.workspaceEnvironmentSession(raw.input.conversationId) : null;
           const workspace = selected?.ok && selected.context.cwd ? selected.context.cwd : this.workspacePath;
           skills = new SkillsLoader(workspace).listSkills(false).map(({ name, path }) => ({ name, path }));
         }
         return httpJsonResponse(await invokeNativePluginService(raw,
-          { history: this.computerHistory, toolNames: this.runtimeToolNames?.() ?? [], skills }));
+          { history: this.computerHistory, toolNames: this.runtimeToolNames?.() ?? [], skills, evidenceWorkspace }));
       } catch (error) { return httpError(409, error instanceof Error ? error.message : "Plugin host service failed"); }
     }
+    if (got === "/api/computer-history") return this.handleComputerHistory(request, "snapshot");
     if (got === "/api/computer-history/observation/status") return this.handleComputerHistory(request, "observation-status");
     if (got === "/api/computer-history/settings") return this.handleComputerHistory(request, "settings");
     if (got === "/api/computer-history/apps") return this.handleComputerHistory(request, "apps");
@@ -3382,6 +3665,14 @@ export class WebSocketChannel extends BaseChannel {
     if (got === "/api/webui/sidebar-state") return this.handleWebuiSidebarState(request);
     if (got === "/api/webui/sidebar-state/update") return this.handleWebuiSidebarStateUpdate(request);
     if (got === "/api/webui/seed-chat") return this.handleWebuiSeedChat(request);
+    if (got === "/api/webui/assist/runs") return this.handleAssistRunStart(request);
+    const assistRunMatch = got.match(/^\/api\/webui\/assist\/runs\/([^/]+)(\/stop)?$/);
+    if (assistRunMatch) {
+      const assistChatId = decodeURIComponent(assistRunMatch[1]!);
+      return assistRunMatch[2]
+        ? this.handleAssistRunStop(request, assistChatId)
+        : this.handleAssistRunRead(request, assistChatId);
+    }
     if (got === "/api/webui/artifacts/resolve") return this.handleArtifactResolve(request);
     if (got === "/api/webui/recordings/resolve") return this.handleWebuiRecordingResolve(request);
     if (got === "/api/webui/artifacts/reveal") return this.handleArtifactReveal(request);
@@ -3463,7 +3754,6 @@ export class WebSocketChannel extends BaseChannel {
 
   override async start(): Promise<void> {
     this.running = true;
-    if (process.platform === "win32" || process.platform === "darwin") void getRecordingSessionService().list().catch(() => {});
     this.startComputerHistoryModelSync();
     await nativeExcelControl.start();
     if (process.env.MEMMY_DESKTOP_MANAGED_GATEWAY === "1") {
@@ -3531,7 +3821,6 @@ export class WebSocketChannel extends BaseChannel {
     // rather than leaving a recorder running behind the user's back.
     await shutdownNativePlugins();
     await this.computerHistory.shutdown();
-    await shutdownRecordingService();
     if (typeof this.server?.close === "function") {
       await new Promise<void>((resolve) => this.server.close(() => resolve()));
     }
@@ -3562,7 +3851,7 @@ export class WebSocketChannel extends BaseChannel {
    */
   async handleComputerHistoryAppIcon(request: any): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available on macOS and Windows");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History requires macOS or Windows 11");
     if ((request.method ?? "GET").toUpperCase() !== "GET") return httpError(405, "method not allowed");
     // The router carries the path, query and all, on `request.path`; there is
     // no `request.url` here, and reading one silently loses every parameter.
@@ -3571,7 +3860,7 @@ export class WebSocketChannel extends BaseChannel {
     try {
       return httpJsonResponse({ icon: await this.computerHistory.applicationIcon(bundleId) });
     } catch (error) {
-      if (error instanceof ComputerHistoryApiError || error instanceof CollectorBusyError) return httpError(error.status, error.message);
+      if (error instanceof ComputerHistoryApiError) return httpError(error.status, error.message);
       return httpError(500, error instanceof Error ? error.message : String(error));
     }
   }
@@ -3581,7 +3870,7 @@ export class WebSocketChannel extends BaseChannel {
     action: "snapshot" | "observation-status" | "settings" | "apps" | "model-select" | "permissions-check" | "permissions-open" | "wechat-consent" | "wechat-connect" | "wechat-prepare" | "history-delete" | "history-clear" | "history-pin" | "import" | "observation-start" | "observation-pause" | "observation-resume" | "observation-stop" | "workflow-create",
   ): Promise<HttpLikeResponse> {
     if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if (!isComputerHistorySupported()) return httpError(400, "Computer History is available on macOS and Windows");
+    if (!isComputerHistorySupported()) return httpError(400, "Computer History requires macOS or Windows 11");
     const method = (request.method ?? "GET").toUpperCase();
     if (action === "snapshot") {
       return method === "GET"
@@ -3634,7 +3923,7 @@ export class WebSocketChannel extends BaseChannel {
           snapshot = this.computerHistory.connectWeChat();
           break;
         case "settings":
-          return httpJsonResponse(await this.computerHistory.updateObservationSettings(body.settings) as unknown as Record<string, any>);
+          return httpJsonResponse(this.computerHistory.updateObservationSettings(body.settings) as unknown as Record<string, any>);
         case "model-select": {
           if (body.model_preset !== undefined && body.model_preset !== null
             && (typeof body.model_preset !== "string" || !body.model_preset.trim())) {
@@ -3696,26 +3985,8 @@ export class WebSocketChannel extends BaseChannel {
       }
       return httpJsonResponse(clientSnapshot(snapshot!) as unknown as Record<string, any>);
     } catch (error) {
-      if (error instanceof ComputerHistoryApiError || error instanceof CollectorBusyError) return httpError(error.status, error.message);
+      if (error instanceof ComputerHistoryApiError) return httpError(error.status, error.message);
       return httpError(500, error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async handleWindowsHistorySettings(request: any): Promise<HttpLikeResponse> {
-    if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
-    if (process.platform !== "win32") return httpError(400, "Windows Computer History settings require Windows");
-    const service = getWindowsComputerHistoryService();
-    try {
-      if ((request.method ?? "GET").toUpperCase() === "GET") return httpJsonResponse(await service.getWindowsConfiguration());
-      if ((request.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "method not allowed");
-      const raw = requestBodyText(request);
-      if (Buffer.byteLength(raw, "utf8") > 256 * 1024) return httpError(413, "settings are too large");
-      let body;
-      try { body = JSON.parse(raw); } catch { return httpError(400, "body must be JSON"); }
-      return httpJsonResponse(await service.updateWindowsSettings(body?.settings));
-    } catch (error) {
-      return httpError(error instanceof ComputerHistoryApiError ? error.status : 503,
-        error instanceof ComputerHistoryApiError ? error.message : "Windows Computer History configuration is unavailable");
     }
   }
 
@@ -4094,11 +4365,6 @@ export class WebSocketChannel extends BaseChannel {
       });
       return;
     }
-    const recording = envelope.task_recording == null ? null : RecordingStartSchema.safeParse(envelope.task_recording);
-    if (recording && !recording.success) {
-      await this.sendWebuiRequestError(connection, { chatId, clientRequestId, detail: "message_request_rejected", reason: "task_recording_consent_invalid" });
-      return;
-    }
     const digest = clientRequestId
       ? this.webuiMessageDigest({
           chatId,
@@ -4110,7 +4376,6 @@ export class WebSocketChannel extends BaseChannel {
           queueSurface,
           turnAdmission,
           expectedTurnId,
-          taskRecording: recording?.success ? recording.data : null,
           thinkingEnabled: typeof envelope.thinking_enabled === "boolean" ? envelope.thinking_enabled : undefined,
           thinkingLevel: typeof envelope.thinking_level === "string" ? envelope.thinking_level : undefined,
           interruptPendingTurnId,
@@ -4216,7 +4481,6 @@ export class WebSocketChannel extends BaseChannel {
     }
     const metadata: Record<string, any> = {
       remote: connection?.remoteAddress ?? null,
-      ...(recording?.success ? { task_recording: recording.data } : {}),
       message_id: clientRequestId ?? crypto.randomUUID(),
       webui: envelope.webui === true,
       model_preset: modelSelection.preset,
@@ -5357,10 +5621,6 @@ export class WebSocketChannel extends BaseChannel {
       });
       return;
     }
-    if (message.metadata?.taskRecordingStatus) {
-      await this.broadcast(message.chatId, { event: "task_recording", chat_id: message.chatId, ...message.metadata.taskRecordingStatus });
-      return;
-    }
     if (message.metadata?.turnEnd) {
       await this.sendTurnEnd(message.chatId, {
         latencyMs: numberOrNull(message.metadata.latencyMs),
@@ -5857,9 +6117,14 @@ function requestBodyText(request: HttpRequestLike): string {
   return typeof request.body === "string" ? request.body : "";
 }
 
+/**
+ * An artifact request names exactly one authorization scope: the session it belongs to, or (for a task
+ * that has no session yet) the project whose files its side panel shows. Anything else is rejected, so
+ * the root used for the path check is never taken from the request body.
+ */
 function artifactRequestFromRequest(
   request: HttpRequestLike,
-): { path: string; sessionKey: string } | null {
+): ({ path: string } & ({ sessionKey: string } | { projectId: string })) | null {
   const body = requestBodyText(request).trim();
   if (!body) return null;
   let parsed: unknown;
@@ -5872,15 +6137,17 @@ function artifactRequestFromRequest(
   const raw = parsed as Record<string, unknown>;
   const rawPath = raw.path;
   const sessionKey = raw.sessionKey;
-  if (
-    typeof rawPath !== "string"
-    || !rawPath.trim()
-    || typeof sessionKey !== "string"
-    || decodeGuiSessionApiKey(sessionKey) == null
-  ) {
-    return null;
+  const projectId = raw.projectId;
+  if (typeof rawPath !== "string" || !rawPath.trim()) return null;
+  const hasSessionKey = sessionKey != null;
+  const hasProjectId = projectId != null;
+  if (hasSessionKey === hasProjectId) return null;
+  if (hasSessionKey) {
+    if (typeof sessionKey !== "string" || decodeGuiSessionApiKey(sessionKey) == null) return null;
+    return { path: rawPath.trim(), sessionKey };
   }
-  return { path: rawPath.trim(), sessionKey };
+  if (typeof projectId !== "string" || !projectId.trim()) return null;
+  return { path: rawPath.trim(), projectId: projectId.trim() };
 }
 
 function expandHomePath(value: string): string {
@@ -6005,15 +6272,8 @@ function httpConnectionFromRequest(req: http.IncomingMessage): any {
 }
 
 function writeNodeResponse(res: http.ServerResponse, response: HttpLikeResponse): void {
-  if (response.stream) {
-    res.writeHead(response.status, response.headers);
-    response.stream.on("error", () => res.destroy());
-    res.on("close", () => response.stream?.destroy());
-    response.stream.pipe(res);
-    return;
-  }
   const body = typeof response.body === "string" ? Buffer.from(response.body, "utf8") : response.body;
-  const headers = { "content-length": String(body.length), ...response.headers };
+  const headers = { ...response.headers, "content-length": String(body.length) };
   res.writeHead(response.status, headers);
   res.end(body);
 }
@@ -6338,6 +6598,16 @@ function looksLikeZip(bytes: Buffer): boolean {
 
 function looksLikeText(bytes: Buffer): boolean {
   const sample = bytes.subarray(0, Math.min(bytes.length, 64 * 1024));
+  // UTF-16 text legitimately contains zero bytes; validate BOM-marked text
+  // after decoding rather than treating it as a binary payload.
+  const encoding = sample[0] === 0xff && sample[1] === 0xfe ? "utf-16le"
+    : sample[0] === 0xfe && sample[1] === 0xff ? "utf-16be" : null;
+  if (encoding) {
+    try {
+      const text = new TextDecoder(encoding, { fatal: true }).decode(bytes);
+      return !/[\u0000-\u0008\u000e-\u001f]/u.test(text);
+    } catch { return false; }
+  }
   return !sample.includes(0);
 }
 

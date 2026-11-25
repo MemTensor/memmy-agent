@@ -1,0 +1,33 @@
+.teach-recording-control {
+  position: fixed;
+  z-index: 100000;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  width: 148px;
+  height: 40px;
+  border: 1px solid #3b3b3b;
+  border-radius: 20px;
+  color: #fff;
+  background: #505050;
+  box-shadow: 0 2px 4px #0003;
+  font-size: 12px;
+  font-weight: 600;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.teach-recording-control button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 100%; flex: none; border: 0; padding: 0 3px; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.teach-recording-control button:first-child { flex: 1; min-width: 0; color: #ff5959; font-variant-numeric: tabular-nums; }
+.teach-recording-control button:nth-child(2) { width: 36px; border-left: .5px solid #ffffff26; }
+.teach-recording-control button svg { width: 18px; height: 18px; stroke: #fff; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.teach-recording-control button:hover:not(:disabled) { background: #ffffff19; }
+.teach-recording-control button:disabled { opacity: .45; cursor: default; }
+.teach-recording-control__stop { width: 18px; height: 18px; display: grid; place-items: center; flex: none; border: 1.5px solid #ff5959; border-radius: 50%; }
+.teach-recording-control__stop::after { content: ''; width: 6px; height: 6px; border-radius: 1px; background: #ff5959; }
+.teach-recording-control__warning { animation: teach-recording-pulse 1s infinite alternate; }
+@keyframes teach-recording-pulse { to { opacity: .55; } }
+.teach-recording-control__handle { display: grid; place-items: center; width: 24px; height: 100%; border-left: .5px solid #ffffff26; cursor: grab; touch-action: none; }
+.teach-recording-control__handle svg { width: 10px; height: 14px; stroke: #a0a0a0; fill: none; stroke-width: 1.2; stroke-linecap: round; }
+.teach-recording-control__error { position: absolute; bottom: 50px; left: 0; right: 0; padding: 6px 10px; border-radius: 8px; background: #202426; color: #ffb061; }

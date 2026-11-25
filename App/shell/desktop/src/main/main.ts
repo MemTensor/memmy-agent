@@ -1,6 +1,7 @@
 import { createMacDmgUpdateInstallScript, createMacDmgUpdateStageScript, type MacUpdateValidationOptions } from './mac-update-scripts.js';
 import { createDesktopScreenCapture } from './desktop-screen-capture.js';
 import { createRecordingMediaProxy } from "./recording-media-proxy.js";
+import { registerTeachingRecordingControls } from "./teaching-recording-controls.js";
 import { compareVersionSegments, parseUpdatePackageVersion } from './version-compare.js';
 import { captureMemmyScreen, computerUseApp, memmyPermissionSnapshot, resolveComputerUseBinary, runHelperCommand } from './memmy-screen-permission.js';
 import { desktopSaveFileName } from './save-file-name.js';
@@ -179,6 +180,7 @@ import { composeRecordingMenuBarBitmap } from "./menu-bar-recording-indicator.js
 import { runApprovedEmbeddedUpload } from './browser-embedded-upload-access.js';
 import { createPIPTrayRecovery } from './computer-use-pip-tray.js';
 import { attachRendererRecovery, rendererRecoveryUrl, type RendererRecoveryDiagnostic } from './renderer-recovery.js';
+import { findInviteLink, INVITE_LINK_CHANNEL, INVITE_LINK_SCHEME, parseInviteLink, TAKE_INVITE_LINKS_CHANNEL } from './invite-link.js';
 
 protocol.registerSchemesAsPrivileged([{ scheme: "memmy-recording", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
 
@@ -996,12 +998,21 @@ function configureAppIdentity(): void {
       throw error;
     }
   }
-  const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
+  const devProfile = app.isPackaged ? null : process.env.MEMMY_DEV_PROFILE_DIR?.trim() || null;
+  const userDataPath = devProfile
+    ? join(devProfile, "userData")
+    : windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
   const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
   app.setPath("userData", userDataPath);
+  if (devProfile) {
+    app.setPath("sessionData", join(devProfile, "sessionData"));
+    app.setPath("logs", join(devProfile, "logs"));
+    app.setPath("temp", join(devProfile, "temp"));
+    app.setPath("crashDumps", join(devProfile, "crashDumps"));
+  }
   if (localTestProfile) {
     if (resolve(userDataPath) !== localTestProfile.userData || resolve(memmyHome) !== localTestProfile.runtimeHome) {
       throw new Error('Isolated test profile path validation failed');
@@ -1496,6 +1507,7 @@ async function guideMemmySystemPermission(permission: "accessibility" | "inputMo
 }
 
 function registerIpcHandlers(): void {
+  registerTeachingRecordingControls(() => mainWindow, () => runtimeConfig);
   if (areIpcHandlersRegistered) {
     return;
   }
@@ -1509,6 +1521,11 @@ function registerIpcHandlers(): void {
     rendererReadyWebContentsIds.add(senderId);
     rendererReadyWaiters.get(senderId)?.(true);
     rendererRecoveries.get(senderId)?.markReady();
+    flushPendingInviteCodes(event.sender);
+  });
+  ipcMain.handle(TAKE_INVITE_LINKS_CHANNEL, (event) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return [];
+    return pendingInviteCodes.splice(0);
   });
   ipcMain.on('memmy:browser:select-tab', (event, tabId: unknown) => {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents
@@ -5363,6 +5380,44 @@ function activateMainWindow(): void {
   triggerAgentSourceAutoInject("activate_main_window");
 }
 
+const pendingInviteCodes: string[] = [];
+
+function queueInviteCode(code: string): void {
+  if (!pendingInviteCodes.includes(code)) pendingInviteCodes.push(code);
+}
+
+function deliverInviteCode(code: string): void {
+  if (isQuitting) return;
+  if (!isBootReady) { queueInviteCode(code); return; }
+  activateMainWindow();
+  const target = mainWindow;
+  if (!target || target.isDestroyed() || !rendererReadyWebContentsIds.has(target.webContents.id)) {
+    queueInviteCode(code);
+    return;
+  }
+  target.webContents.send(INVITE_LINK_CHANNEL, code);
+}
+
+function acceptInviteLink(raw: unknown): void {
+  const code = parseInviteLink(raw);
+  if (code) deliverInviteCode(code);
+}
+
+function flushPendingInviteCodes(target: WebContents): void {
+  if (!pendingInviteCodes.length) return;
+  for (const code of pendingInviteCodes.splice(0)) target.send(INVITE_LINK_CHANNEL, code);
+}
+
+function registerInviteProtocolClient(): void {
+  try {
+    if (app.isPackaged) { app.setAsDefaultProtocolClient(INVITE_LINK_SCHEME); return; }
+    const entry = process.argv[1] ? resolve(process.argv[1]) : undefined;
+    app.setAsDefaultProtocolClient(INVITE_LINK_SCHEME, process.execPath, entry ? [entry] : []);
+  } catch (error) {
+    console.warn("[invite] could not register the memmy protocol:", error);
+  }
+}
+
 function triggerAgentSourceAutoInject(reason: string): void {
   const config = runtimeConfig;
   if (!config || agentSourceAutoInjectInFlight) {
@@ -5757,6 +5812,12 @@ const MACOS_PERMISSION_RELAUNCH_ARG = '--memmy-permission-relaunch';
 const wasMacPermissionRelaunch = process.platform === 'darwin' && process.argv.includes(MACOS_PERMISSION_RELAUNCH_ARG);
 const appProcessStartedAt = Date.now();
 
+registerInviteProtocolClient();
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  acceptInviteLink(url);
+});
+
 /**
  * Waits for the single-instance lock while a previous instance finishes exiting.
  *
@@ -5803,11 +5864,14 @@ function shouldIgnoreStaleReopenQuit(context: MacPermissionQuitContext | null): 
     && context.quitReason === "rlgo" && wasMacPermissionRelaunch);
 }
 
-app.on("second-instance", () => {
+app.on("second-instance", (_event, argv) => {
   if (isQuitting || isQuitCleanupInProgress) {
     // The other instance is a replacement waiting for this instance's lock; let it take over.
     return;
   }
+
+  const inviteCode = findInviteLink(argv);
+  if (inviteCode) deliverInviteCode(inviteCode);
 
   // A waiting replacement instance retries the lock every few hundred milliseconds and each retry
   // fires second-instance; debounce so a healthy primary does not keep re-stealing focus.
@@ -5896,6 +5960,9 @@ app.whenReady().then(async () => {
     app.quit();
     return;
   }
+
+  const launchInviteCode = findInviteLink(process.argv);
+  if (launchInviteCode) queueInviteCode(launchInviteCode);
 
   const windowsUpgradeLockPath = resolveWindowsUpgradeRelayLockPath();
   if (windowsUpgradeLockPath && existsSync(windowsUpgradeLockPath)) {
@@ -6173,7 +6240,7 @@ function forceQuitCleanup(quit: QuitCleanupContext): void {
   console.warn("quit cleanup timed out; forcing app exit");
   try {
     // Keep ownership even after the normal path detaches the global reference.
-    quit.services?.terminateSync({ stopMemory: quit.stopMemory, timeoutMs: 2_000 });
+    quit.services?.terminateSync({ stopMemory: quit.stopMemory });
     recordQuitDiagnostic(quit, "force-complete");
   } catch {
     recordQuitDiagnostic(quit, "force-failed");
@@ -6200,7 +6267,7 @@ async function closeRuntimeForQuit(quit: QuitCleanupContext): Promise<void> {
   if (!services) return;
   if (quit.outcome !== "pending") {
     // Startup may materialize a service after shutdown has already settled.
-    services.terminateSync({ stopMemory: quit.stopMemory, timeoutMs: 2_000 });
+    services.terminateSync({ stopMemory: quit.stopMemory });
     return;
   }
   if (!quit.servicesClose) {

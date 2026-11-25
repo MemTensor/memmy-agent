@@ -1,7 +1,6 @@
 /** Memmy local API contract. */
 import { z } from "zod";
 import { ModelThinkingConfigSchema } from "./model-thinking-levels.js";
-import { ModelCapabilityCatalogSchema } from "./model-capability-catalog.js";
 import { PluginCapabilityEventPayloadSchema } from "./plugin.js";
 export * from "@memmy/agent-source-core/scan-state";
 
@@ -13,9 +12,7 @@ import { normalizeOutputLanguage } from "./output-language.js";
 export { normalizeOutputLanguage } from "./output-language.js";
 
 export * from "./model-catalog-resolver.js";
-export * from "./model-capability-catalog.js";
 export * from "./model-thinking-levels.js";
-export { anthropicRequestModelId } from "./anthropic-model-id.js";
 
 export * from "./memory-runtime.js";
 export * from "./memory-canonical-json.js";
@@ -25,6 +22,8 @@ export * from "./endpoints.js";
 export * from "./cloud-service.js";
 export * from "./desktop-runtime-manifest.js";
 export * from "./plugin.js";
+export * from "./event-capture.js";
+export * from "./computer-recordings.js";
 export * from "./computer-use-surface.js";
 export * from "./browser-profile-control.js";
 export * from "./embedded-browser-control.js";
@@ -38,6 +37,8 @@ export * from "./browser-task-site-permission.js";
 export * from "./browser-use-site-policy.js";
 export * from "./browser-cdp-readonly.js";
 export * from "./browser-cdp-write.js";
+export * from "./project-instructions.js";
+export * from "./collab-instructions.js";
 
 export const MANAGED_AGENT_DISCOVERY_PENDING_DATA_PATH = "memmy-agent://history-discovery-pending";
 
@@ -1225,7 +1226,6 @@ export type MemoryRuntimeModelSettings = z.infer<typeof MemoryRuntimeModelSettin
 
 /** Schema for model config view. */
 export const ModelConfigViewSchema = z.object({
-    capabilityCatalog: ModelCapabilityCatalogSchema.optional(),
     /** Write-response-only aliases, resolved by the server using real credentials. */
     endpointAliases: z.record(z.string(), z.record(z.string(), z.string())).optional(),
     configRevision: z.string().min(1),
@@ -1815,15 +1815,7 @@ export const PluginCapabilitySnapshotSseEventSchema = z.object({
     })
 });
 
-export const ModelCapabilityCatalogUpdatedSseEventSchema = z.object({
-    id: z.string(),
-    type: z.literal("model_catalog.updated"),
-    timestamp: z.string().datetime(),
-    payload: z.object({ catalogVersion: z.number().int().positive().safe() })
-});
-
 export const SseEventSchema = z.discriminatedUnion("type", [
-    ModelCapabilityCatalogUpdatedSseEventSchema,
     ConnectedSseEventSchema,
     HeartbeatSseEventSchema,
     ScanProgressSseEventSchema,
@@ -1873,9 +1865,6 @@ export type TokenQuotaEligibility = z.infer<typeof TokenQuotaEligibilitySchema>;
 export * from './desktop-screen-capture.js';
 export * from './computer-use-onboarding.js';
 
-export * from "./computer-recordings.js";
-
-export * from "./event-capture.js";
 /** Memory owns scan execution; desktop translates this state into its existing events. */
 export const MemoryAgentSourceScanStateSchema = z.object({
     version: ScanVersionSchema.optional(),

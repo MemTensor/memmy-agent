@@ -99,7 +99,8 @@ function createContext(
       isAuthenticated,
       catalogPluginIds,
       isEntitlementGranted,
-      hasActiveAgentTasks
+      hasActiveAgentTasks,
+      tryAcquireAgentUpdateLease: async () => async () => undefined
     })
   };
 }
@@ -410,12 +411,12 @@ describe("PluginService", () => {
     expect((await updated).version).toBe("2.0.0");
     expect((await duplicate).version).toBe("2.0.0");
     expect(artifactManager.install).toHaveBeenCalledTimes(1);
-    expect(resolveSpy).toHaveBeenCalledWith(release.manifest.id, "2.0.0");
+    expect(resolveSpy).toHaveBeenCalledWith(release.manifest.id, "2.0.0", expect.any(AbortSignal));
     expect(service.get(release.manifest.id)).toMatchObject({ state: "active", activeCallCount: 0 });
     expect(service.get(release.manifest.id).update).toBeUndefined();
   });
 
-  it("blocks new calls during installation and preserves the old active version on download failure", async () => {
+  it("keeps the old active version callable and preserves it on update download failure", async () => {
     const next = { manifest: { ...release.manifest, version: "2.0.0" } };
     const { service, artifactManager } = createContext([release, next]);
     await service.install(release.manifest.id, "1.0.0");
@@ -429,7 +430,7 @@ describe("PluginService", () => {
     await vi.waitFor(() => expect(rejectDownload).toBeDefined());
     await expect(service.invoke({
       callId: "new", pluginId: release.manifest.id, capabilityId: "run", conversationId: "chat", input: {}
-    })[Symbol.asyncIterator]().next()).rejects.toThrow(/being installed/);
+    })[Symbol.asyncIterator]().next()).resolves.toMatchObject({ value: { type: "result", output: { ok: true } } });
     rejectDownload(new Error("download failed"));
     await failed;
     expect(service.get(release.manifest.id)).toMatchObject({ version: "1.0.0", state: "active" });
@@ -496,7 +497,7 @@ describe("PluginService", () => {
       agentBusy = false;
       await vi.advanceTimersByTimeAsync(1_000);
       expect((await update).version).toBe("2.0.0");
-      expect(resolve).toHaveBeenCalledExactlyOnceWith(release.manifest.id, "2.0.0");
+      expect(resolve).toHaveBeenCalledExactlyOnceWith(release.manifest.id, "2.0.0", expect.any(AbortSignal));
       expect(artifactManager.install).toHaveBeenCalledOnce();
     } finally { vi.useRealTimers(); }
   });
@@ -680,14 +681,14 @@ describe("PluginService", () => {
       finish = resolve; fail = reject;
     }));
     const a = service.enable(release.manifest.id), b = service.enable(release.manifest.id);
-    await Promise.resolve();
-    expect(service.get(release.manifest.id).state).toBe("enabling");
+    await vi.waitFor(() => expect(service.get(release.manifest.id).state).toBe("enabling"));
     expect(runtimeHost.activate).toHaveBeenCalledTimes(1);
     const results = Promise.allSettled([a, b]);
     if (outcome === "success") finish(); else fail(new Error("runtime unavailable"));
     expect((await results).map(result => result.status)).toEqual(outcome === "success"
       ? ["fulfilled", "fulfilled"] : ["rejected", "rejected"]);
-    expect(skillManager.activate).toHaveBeenCalledTimes(outcome === "success" ? 1 : 0);
+    expect(skillManager.activate).toHaveBeenCalledOnce();
+    if (outcome === "failure") expect(skillManager.deactivate).toHaveBeenCalledWith(release.manifest.id);
     expect(service.get(release.manifest.id).state).toBe(outcome === "success" ? "active" : "failed");
     await service.enable(release.manifest.id);
     expect(service.get(release.manifest.id).state).toBe("active");
@@ -702,6 +703,7 @@ describe("PluginService", () => {
       secrets: { "api-key": "secret" }
     });
     await service.approvePermissions(release.manifest.id, release.manifest.permissions);
+    store!.repositories.plugins.setDesiredEnabled(release.manifest.id, true);
     store!.repositories.plugins.setState(release.manifest.id, "enabling");
 
     // A fresh service has no in-memory activation promise, only persisted state.

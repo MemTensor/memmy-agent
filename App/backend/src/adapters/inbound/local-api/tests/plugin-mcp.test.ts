@@ -383,3 +383,15 @@ it.each(["plugin_skill_access_denied", "plugin_skill_unavailable", "plugin_skill
   expect(result._meta?.["memmy.dev/private-skill-error"]).toEqual({ code, retryable: code === "plugin_skill_unavailable" });
   expect(JSON.stringify(result)).not.toContain("PRIVATE-CONTENT-OR-CREDENTIAL-SENTINEL");
 });
+
+
+it("returns main and supporting skill files in the normal model file inventory", async () => {
+  const files = ["note/references/source.json", "note/references/teaching-gaps.json", "note/references/events.jsonl", "note/SKILL.md"];
+  const service: PluginMcpService = { list: () => [plugin], cancel: vi.fn(), async *invoke() {
+    for (const name of files) yield { type: "artifact", artifact: { id: name, name, mediaType: "text/plain", uri: "/preview", path: `/workspace/${name}`, role: "deliverable" } };
+    yield { type: "result", output: { saved: true, skillFile: "/workspace/note/SKILL.md" } };
+  } };
+  const client = await connect(service);
+  const result = await client.callTool({ name: capabilityToolName(plugin.id, "run"), arguments: {} });
+  expect(result.structuredContent).toMatchObject({ saved: true, publishedFiles: files.map(name => ({ name, path: `/workspace/${name}`, mediaType: "text/plain" })) });
+});

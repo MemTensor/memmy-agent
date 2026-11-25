@@ -11,6 +11,7 @@ import { isMacNativeRuntimeSupported } from "../computer-use/mac-native-runtime-
 import { createBrowserCaptureProvider, type BrowserCaptureProvider } from "../computer-history/browser-event-capture.js";
 import { externalBrowserBridge } from "../../core/agent-runtime/tools/external-browser-bridge.js";
 import { launchTeachingBrowser } from "../computer-history/browser-capture-launch.js";
+import { createTeachingBrowserEnhancement } from "./teaching-browser-enhancement.js";
 
 const Request = z.object({ pluginId: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/),
   service: z.enum(["event-sessions", "release"]), input: z.record(z.string(), z.unknown()).default({}) });
@@ -32,7 +33,7 @@ export function createNativePluginServices(options: {
     }
   })().finally(() => { reconciling = undefined; });
   const leaseTimer = setInterval(() => { void reconcile().catch(() => undefined); }, 5_000); leaseTimer.unref();
-  async function invoke(raw: unknown, context?: { history: EventCaptureSource; toolNames: string[]; skills?: Array<{ name: string; path: string }> }): Promise<Record<string, unknown>> {
+  async function invoke(raw: unknown, context?: { history: EventCaptureSource; evidenceWorkspace?: string; toolNames: string[]; skills?: Array<{ name: string; path: string }> }): Promise<Record<string, unknown>> {
     const { pluginId, service, input } = Request.parse(raw);
     seen.set(pluginId, options.now?.() ?? Date.now());
     if (service === "release") { await release(pluginId); return { ok: true }; }
@@ -53,7 +54,13 @@ export function createNativePluginServices(options: {
       if (!events) {
         events = new PluginEventSessions({ dataRoot: options.dataRoot ?? path.join(os.homedir(), ".memmy", "plugin-data"), source,
           browser: options.browser ?? createBrowserCaptureProvider(externalBrowserBridge, { platform: options.platform,
-            launch: browser => launchTeachingBrowser(browser, options.platform) }) });
+            launch: browser => launchTeachingBrowser(browser, options.platform) }),
+          browserEnhancement: createTeachingBrowserEnhancement(externalBrowserBridge) });
+      }
+      if (input.action === "evidence-files") {
+        // Never accept a workspace from plugin input; only the authenticated Host binding.
+        if (!context?.evidenceWorkspace) throw new Error("capture_workspace_unavailable");
+        return events.publishEvidence(pluginId, conversationId, String(input.session_id), context.evidenceWorkspace);
       }
       return events.invoke(pluginId, conversationId, input);
     }
