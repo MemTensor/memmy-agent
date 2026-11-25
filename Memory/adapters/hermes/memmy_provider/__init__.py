@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -108,7 +109,7 @@ class MemmyProvider(MemoryProvider):
             elif tool_name in ("memos_get", "memos_skill_get"):
                 value = self._request(f"/memory/{args.get('id', '')}", method="GET")
             elif tool_name == "memos_timeline":
-                value = self._request(f"/episodes/{args.get('episodeId', '')}", method="GET")
+                value = self._request(f"/memory/{urllib.parse.quote(str(args.get('episodeId', '')), safe='')}", method="GET")
             elif tool_name == "memos_environment":
                 value = self._request("/memory/search", {"query": args.get("query") or "environment constraints", "layers": ["L3"], "verbose": True})
             elif tool_name == "memos_skill_list":
