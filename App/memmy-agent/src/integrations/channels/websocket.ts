@@ -952,6 +952,15 @@ export class WebSocketChannel extends BaseChannel {
   /** Re-read the global summary assignment; task model selections are irrelevant. */
   refreshComputerHistorySummaryModel(): boolean {
     if (!isComputerHistorySupported()) return false;
+    if (process.env.MEMMY_COMPUTER_HISTORY === "0") {
+      if (this.computerHistoryModelTimer) clearInterval(this.computerHistoryModelTimer);
+      this.computerHistoryModelTimer = null;
+      if (this.computerHistoryModelSignature !== "disabled") {
+        this.computerHistory.setLlmRuntime(null);
+        this.computerHistoryModelSignature = "disabled";
+      }
+      return false;
+    }
     try {
       const selection = this.modelSelectionResolver?.({ capability: "memory_summary" });
       if (!selection) throw new Error("summary_model_selection_unavailable");
@@ -961,7 +970,7 @@ export class WebSocketChannel extends BaseChannel {
         selection.presetId, selection.source, selection.ownerAccountId, selection.snapshot.signature,
       ])).digest("hex");
       if (signature !== this.computerHistoryModelSignature) {
-        this.computerHistory.setLlmRuntime(historySummaryRuntime(selection), selection.source);
+        this.computerHistory.setLlmRuntime(historySummaryRuntime(selection), selection.source, null, signature);
         this.computerHistoryModelSignature = signature;
       }
       return true;
@@ -978,6 +987,7 @@ export class WebSocketChannel extends BaseChannel {
   private startComputerHistoryModelSync(): void {
     if (!isComputerHistorySupported()) return;
     this.refreshComputerHistorySummaryModel();
+    if (process.env.MEMMY_COMPUTER_HISTORY === "0") return;
     if (this.computerHistoryModelTimer) return;
     this.computerHistoryModelTimer = setInterval(() => this.refreshComputerHistorySummaryModel(), 30_000);
     this.computerHistoryModelTimer.unref();
