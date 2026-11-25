@@ -68,17 +68,268 @@ function deferred() {
   return { promise, resolve };
 }
 
-beforeEach(() => vi.spyOn(console, "warn").mockImplementation(() => {}));
+beforeEach(() => {
+  vi.stubEnv("TZ", "UTC");
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+});
 afterEach(async () => {
   for (const instance of instances.splice(0)) {
     internal(instance).segment = null;
     await instance.shutdown();
   }
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe("summary retries and atomic replacement", () => {
+  function pending(root: string, minute: number) {
+    const id = `2026-09-13T02-${String(minute).padStart(2, "0")}-00Z-10min-summary`;
+    const file = path.join(root, "histories", `${id}.md`);
+    fs.writeFileSync(file, `---\ntitle: Pending\nsource_type: captured\nsummary_state: pending\nstatus: completed\n---\n\n## Memory summary\n\nEVIDENCE_${minute}\n`);
+    return file;
+  }
+
+  it.each(["", "malformed JSON"])("defers only the failed record (%j) and retries it before newly arriving work", async (content) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T03:30:00Z"));
+    const { root, service } = serviceAt();
+    const a = pending(root, 0);
+    pending(root, 10);
+    const order: string[] = [];
+    const chat = vi.fn(async (...args: any[]) => {
+      const user = args[0].messages[1].content;
+      order.push(user.split("BEGIN UNTRUSTED OBSERVED ACTIVITY\n")[1].split("\nEND UNTRUSTED")[0]);
+      return order.length === 1 ? { content } : response("Recovered");
+    });
+    service.setLlmRuntime(runtime(chat));
+    expect(await service.backfillUnwrittenSummaries()).toBe(1);
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(order[0]).toContain("EVIDENCE_0");
+    expect(order[1]).toContain("EVIDENCE_10");
+    expect(fs.readFileSync(a, "utf8")).toContain("summary_state: pending");
+    pending(root, 20);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(order[2]).toContain("EVIDENCE_0");
+    expect(order[3]).toContain("EVIDENCE_20");
+    expect(chat).toHaveBeenCalledTimes(4);
+  });
+
+  it("counts failures against the five-attempt batch limit", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T03:30:00Z"));
+    const { root, service } = serviceAt();
+    for (const minute of [0, 5, 10, 15, 20, 25, 30]) pending(root, minute);
+    const chat = vi.fn(async () => ({ content: "invalid request", finishReason: "error", errorStatusCode: 400 }));
+    service.setLlmRuntime(runtime(chat));
+    expect(await service.backfillUnwrittenSummaries()).toBe(0);
+    expect(chat).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(chat).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not send model requests when attempts cannot be persisted", async () => {
+    vi.useFakeTimers();
+    const { root, service } = serviceAt();
+    pending(root, 0);
+    const rename = fs.renameSync.bind(fs);
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (String(to).endsWith(".summary-retries.json")) throw new Error("synthetic disk failure");
+      return rename(from, to);
+    });
+    try {
+      const chat = vi.fn(async () => response("Must not run"));
+      service.setLlmRuntime(runtime(chat));
+      expect(await service.backfillUnwrittenSummaries()).toBe(0);
+      expect(chat).not.toHaveBeenCalled();
+      expect(service.snapshot().observation.narrationError).toContain("synthetic disk failure");
+    } finally { spy.mockRestore(); }
+  });
+
+  it("uses a global cooldown after three different records fail the same uncertain way", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T03:30:00Z"));
+    const { root, service } = serviceAt();
+    for (const minute of [0, 10, 20, 30]) pending(root, minute);
+    const chat = vi.fn(async () => ({ content: "" }));
+    service.setLlmRuntime(runtime(chat));
+    await service.backfillUnwrittenSummaries();
+    expect(chat).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(chat).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(chat).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(chat).toHaveBeenCalledTimes(4);
+  });
+
+  it("preserves shared cooldown on restart and allows only one recovery probe across live and backfill", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T03:30:00Z"));
+    const { root, service } = serviceAt();
+    pending(root, 0);
+    const b = pending(root, 10);
+    service.setLlmRuntime(runtime(async () => ({ content: "rate limited", finishReason: "error", errorStatusCode: 429 })), "byok", null, "stable-model");
+    await service.backfillUnwrittenSummaries();
+    await service.shutdown();
+    const restarted = serviceAt(root).service;
+    const probe = deferred();
+    const chat = vi.fn().mockImplementationOnce(() => probe.promise).mockResolvedValue(response("Recovered"));
+    restarted.setLlmRuntime(runtime(chat), "byok", null, "stable-model");
+    expect(await restarted.backfillUnwrittenSummaries()).toBe(0);
+    expect(chat).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(chat).toHaveBeenCalledOnce();
+    expect(await internal(restarted).writeSummaryWith(b, "10min", null)).toBe(false);
+    expect(chat).toHaveBeenCalledOnce();
+    probe.resolve(response("Probe recovered"));
+    expect(await restarted.backfillUnwrittenSummaries()).toBe(2);
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a stopped record stopped after restart and still processes newly arriving records", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T03:30:00Z"));
+    const { root, service } = serviceAt();
+    const a = pending(root, 0);
+    const chat = vi.fn(async () => ({ content: "bad input", finishReason: "error", errorStatusCode: 400 }));
+    service.setLlmRuntime(runtime(chat), "byok", null, "stable-model");
+    await service.backfillUnwrittenSummaries();
+    for (const wait of [60_000, 120_000, 240_000, 300_000]) await vi.advanceTimersByTimeAsync(wait);
+    expect(chat).toHaveBeenCalledTimes(5);
+    await service.shutdown();
+    const restarted = serviceAt(root).service;
+    pending(root, 10);
+    const recovered = vi.fn(async () => response("New record"));
+    restarted.setLlmRuntime(runtime(recovered), "byok", null, "stable-model");
+    expect(await restarted.backfillUnwrittenSummaries()).toBe(1);
+    expect(recovered).toHaveBeenCalledOnce();
+    expect(restarted.snapshot().observation.narrationError).toContain("stopped after 5");
+    fs.appendFileSync(a, "\nCorrected evidence.\n");
+    expect(await restarted.backfillUnwrittenSummaries()).toBe(1);
+    expect(recovered).toHaveBeenCalledTimes(2);
+    expect(restarted.snapshot().observation.narrationError).toBeNull();
+  });
+
+  it("limits each background batch and resumes the remaining backlog on the next tick", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T03:30:00Z"));
+    const { root, service } = serviceAt();
+    for (let minute = 0; minute < 60; minute += 10) {
+      seed(root, `2026-09-13T02-${String(minute).padStart(2, "0")}-00Z`, false);
+    }
+    const chat = vi.fn(async () => response("Recovered"));
+    service.setLlmRuntime(runtime(chat));
+    expect(await service.backfillUnwrittenSummaries()).toBe(5);
+    expect(chat).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(chat).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(chat).toHaveBeenCalledTimes(6);
+    expect(service.snapshot().histories.filter((entry) => entry.summaryStatus === "pending")).toHaveLength(0);
+  });
+
+  it.each([
+    { content: "429 rate limit", finishReason: "error", errorStatusCode: 429 },
+    { content: "history_summary_budget_unavailable", finishReason: "error", errorKind: "history_summary_budget" },
+  ])("pauses the whole backlog and live summaries after %j", async (failure) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T03:30:00Z"));
+    const { root, service } = serviceAt();
+    seed(root, segmentId, false);
+    const next = seed(root, "2026-09-13T02-20-00Z", false);
+    const chat = vi.fn().mockResolvedValueOnce(failure).mockResolvedValue(response("Recovered"));
+    service.setLlmRuntime(runtime(chat));
+    expect(await service.backfillUnwrittenSummaries()).toBe(0);
+    expect(chat).toHaveBeenCalledOnce();
+    expect(await service.backfillUnwrittenSummaries()).toBe(0);
+    expect(await internal(service).writeSummaryWith(next.historyFile, "10min", next.eventsFile)).toBe(false);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(chat).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(chat).toHaveBeenCalledTimes(3);
+    expect(service.snapshot().observation.narrationError).toBeNull();
+  });
+
+  it("shares the batch limit between ten-minute summaries and six-hour rollups", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-14T03:30:00Z"));
+    const { root, service } = serviceAt();
+    for (const hour of ["02", "08"]) {
+      for (const minute of ["10", "20"]) seed(root, `2026-09-13T${hour}-${minute}-00Z`, false);
+    }
+    const chat = vi.fn(async () => response("Recovered"));
+    service.setLlmRuntime(runtime(chat));
+    expect(await service.backfillUnwrittenSummaries()).toBe(5);
+    expect(chat).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(chat).toHaveBeenCalledTimes(6);
+    expect(service.snapshot().histories.filter((entry) => entry.summaryWindow === "6h")).toHaveLength(2);
+  });
+
+  it("resumes after a failed window so one malformed response cannot starve later work", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T03:30:00Z"));
+    const { root, service } = serviceAt();
+    seed(root, segmentId, false);
+    const nextId = "2026-09-13T02-20-00Z";
+    seed(root, nextId, false);
+    const chat = vi.fn().mockResolvedValueOnce({ content: "malformed JSON" })
+      .mockResolvedValueOnce(response("Later window"))
+      .mockResolvedValue({ content: "malformed JSON" });
+    service.setLlmRuntime(runtime(chat));
+    await service.backfillUnwrittenSummaries();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(service.snapshot().histories.find((entry) => entry.id === `${nextId}-10min-summary`)?.title).toBe("Later window");
+    expect(service.snapshot().histories.find((entry) => entry.id === historyId)?.summaryStatus).toBe("pending");
+    expect(chat).toHaveBeenCalledTimes(3);
+  });
+
+  it("backs off one record, stops after five attempts, and resumes after an explicit model change", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T03:30:00Z"));
+    const { root, service } = serviceAt();
+    seed(root, segmentId, false);
+    const chat = vi.fn<() => Promise<{ content: string }>>(async () => { throw new Error("offline"); });
+    service.setLlmRuntime(runtime(chat));
+    await service.backfillUnwrittenSummaries();
+    let calls = 1;
+    for (const delay of [60_000, 120_000, 240_000, 300_000]) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(chat).toHaveBeenCalledTimes(calls);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(chat).toHaveBeenCalledTimes(++calls);
+    }
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(chat).toHaveBeenCalledTimes(5);
+    expect(service.snapshot().observation.narrationError).toContain("stopped after 5");
+    chat.mockImplementation(async () => response("Recovered"));
+    service.setLlmRuntime(runtime(chat));
+    await service.backfillUnwrittenSummaries();
+    expect(service.snapshot().observation.narrationError).toBeNull();
+    seed(root, "2026-09-13T02-20-00Z", false);
+    chat.mockImplementation(async () => { throw new Error("offline again"); });
+    await vi.advanceTimersByTimeAsync(60_000);
+    const failedCalls = chat.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(chat).toHaveBeenCalledTimes(failedCalls);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(chat).toHaveBeenCalledTimes(failedCalls + 1);
+  });
+
+  it("cancels background retries when the summary runtime is removed", async () => {
+    vi.useFakeTimers();
+    const { root, service } = serviceAt();
+    seed(root, segmentId, false);
+    const chat = vi.fn(async () => { throw new Error("offline"); });
+    service.setLlmRuntime(runtime(chat));
+    await service.backfillUnwrittenSummaries();
+    service.setLlmRuntime(null);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(chat).toHaveBeenCalledOnce();
+    expect(await service.backfillUnwrittenSummaries()).toBe(0);
+  });
+
   it("keeps a clear unavailable-model error and rejects an old in-flight result", async () => {
     const { root, service } = serviceAt();
     const segment = seed(root, segmentId, false);
@@ -135,6 +386,7 @@ describe("summary retries and atomic replacement", () => {
   });
 
   it("exposes BYOK quota exhaustion and clears it when the same provider recovers", async () => {
+    vi.useFakeTimers();
     const { root, service } = serviceAt();
     const segment = seed(root);
     let exhausted = true;
@@ -145,6 +397,7 @@ describe("summary retries and atomic replacement", () => {
     expect(service.snapshot().observation).toMatchObject({ narrationErrorCategory: "quota_exhausted" });
     expect(service.snapshot().histories[0].title).toBe("Standing summary");
     exhausted = false;
+    await vi.advanceTimersByTimeAsync(60_000);
     await service.backfillUnwrittenSummaries();
     expect(service.snapshot().observation).toMatchObject({ narrationError: null, narrationErrorCategory: null });
     expect(service.snapshot().histories.some((entry) => entry.title === "Recovered summary")).toBe(true);
@@ -190,6 +443,7 @@ describe("summary retries and atomic replacement", () => {
   });
 
   it("keeps a failed replacement and recovers it after a service restart", async () => {
+    vi.useFakeTimers();
     const { root, service } = serviceAt();
     const segment = seed(root);
     internal(service).llmRuntime = runtime(async () => { throw new Error("offline"); });
@@ -199,7 +453,8 @@ describe("summary retries and atomic replacement", () => {
     await service.shutdown();
     const restarted = serviceAt(root).service;
     restarted.setLlmRuntime(runtime(async () => response("Full final account")));
-    await restarted.backfillUnwrittenSummaries();
+    expect(await restarted.backfillUnwrittenSummaries()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(restarted.snapshot().histories.find((entry) => entry.id === historyId)?.title).toBe("Full final account");
     expect(fs.existsSync(`${segment.historyFile}.staging`)).toBe(false);
   });
@@ -228,7 +483,7 @@ describe("summary retries and atomic replacement", () => {
     internal(service).llmRuntime = runtime(async () => { throw new Error("offline"); });
     internal(service).writeLiveSummary(segment);
     await vi.waitFor(() => expect(service.snapshot().observation.narrationError).toBe("offline"));
-    internal(service).llmRuntime = runtime(async () => response("Live recovery"));
+    service.setLlmRuntime(runtime(async () => response("Live recovery")));
     internal(service).writeLiveSummary(segment);
     await vi.waitFor(() => expect(service.snapshot().histories.find((entry) => entry.id === historyId)?.title).toBe("Live recovery"));
   });

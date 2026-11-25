@@ -296,6 +296,44 @@ describe("Computer History permissions HTTP boundary", () => {
 
 
 describe("Computer History summary assignment", () => {
+  it.each(["darwin", "win32"] as const)("disables capture, summary refresh and polling on %s", async (platform) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+    vi.spyOn(os, "release").mockReturnValue("10.0.22631");
+    vi.stubEnv("MEMMY_COMPUTER_HISTORY", "0");
+    vi.useFakeTimers();
+    const instance = channel();
+    instance.modelSelectionResolver = vi.fn();
+    (instance as any).startComputerHistoryModelSync();
+    expect(instance.refreshComputerHistorySummaryModel()).toBe(false);
+    await instance.dispatchHttp({}, request({ path: "/api/computer-history/model", body: "{}" }));
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(history.restoreObservationOnLaunch).not.toHaveBeenCalled();
+    expect(instance.modelSelectionResolver).not.toHaveBeenCalled();
+    expect(history.setLlmRuntime).toHaveBeenCalledExactlyOnceWith(null);
+    expect((instance as any).computerHistoryModelTimer).toBeNull();
+    await instance.stop();
+  });
+
+  it("clears an installed runtime and polling timer when disabled", async () => {
+    vi.useFakeTimers();
+    const instance = channel();
+    instance.modelSelectionResolver = vi.fn(() => ({ presetId: "summary", source: "byok",
+      capability: "memory_summary", provider: "openai", ownerAccountId: null,
+      providerConfig: { apiBase: "https://summary.example/v1" },
+      snapshot: { provider: {}, model: "summary", signature: ["stable"] } }) as any);
+    (instance as any).startComputerHistoryModelSync();
+    vi.stubEnv("MEMMY_COMPUTER_HISTORY", "0");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(history.setLlmRuntime).toHaveBeenLastCalledWith(null);
+    expect((instance as any).computerHistoryModelTimer).toBeNull();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(instance.modelSelectionResolver).toHaveBeenCalledOnce();
+    vi.stubEnv("MEMMY_COMPUTER_HISTORY", "1");
+    expect(instance.refreshComputerHistorySummaryModel()).toBe(true);
+    expect(history.setLlmRuntime).toHaveBeenCalledTimes(3);
+    await instance.stop();
+  });
+
   it("resolves the configured BYOK summary and ignores legacy Agent selections", async () => {
     const instance = channel();
     const provider = { chatWithRetry: vi.fn() };

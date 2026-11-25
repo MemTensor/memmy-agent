@@ -109,7 +109,35 @@ describe("chatWithRetry", () => {
       },
     });
     expect(response.content).toBe("503 final server error");
-    expect(progress.at(-1)).toBe("Model request failed after 4 retries, giving up.");
+    expect(progress.at(-1)).toBe("Model request failed after 4 attempts, giving up.");
+  });
+
+  it.each([
+    { retryAfter: 0.25 },
+    { errorRetryAfterS: 0.25 },
+    { content: "429 rate limit, retry after 0.25s" },
+  ])("caps standard retries even with retry hints %j", async (hint) => {
+    const failure = new LLMResponse({ content: "429 rate limit", finishReason: "error", ...hint });
+    const provider = new ScriptedProvider(Array(8).fill(failure));
+    expect(await provider.chatWithRetry({ messages: userMessages(), retryMode: "standard" })).toBe(failure);
+    expect(provider.calls).toBe(4);
+    expect(provider.delays).toEqual([0.25, 0.25, 0.25]);
+  });
+
+  it("preserves persistent retries beyond the standard limit with retry hints", async () => {
+    const provider = new ScriptedProvider(Array.from({ length: 5 }, (_, index) =>
+      new LLMResponse({ content: `429 rate limit ${index}`, finishReason: "error", retryAfter: 0.25 })));
+    expect((await provider.chatWithRetry({ messages: userMessages(), retryMode: "persistent" })).content).toBe("ok");
+    expect(provider.calls).toBe(6);
+    expect(provider.delays).toEqual(Array(5).fill(0.25));
+  });
+
+  it("also caps streaming retries with a Retry-After hint", async () => {
+    const failure = new LLMResponse({ content: "429 rate limit", finishReason: "error", retryAfter: 0.25 });
+    const provider = new ScriptedProvider(Array(8).fill(failure));
+    expect(await provider.chatStreamWithRetry({ messages: userMessages() })).toBe(failure);
+    expect(provider.calls).toBe(4);
+    expect(provider.delays).toEqual([0.25, 0.25, 0.25]);
   });
 
   it("preserves CancelledError exceptions", async () => {

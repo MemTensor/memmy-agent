@@ -141,6 +141,7 @@ describe("repairing historical six-hour aggregation", () => {
   });
 
   it("repairs stale membership while retaining the ready legacy account until a retry succeeds", async () => {
+    vi.useFakeTimers();
     const first = seed(10);
     const original = legacy(rollupId, [first]);
     const second = seed(20, "A later review not cited by the old rollup.");
@@ -154,7 +155,9 @@ describe("repairing historical six-hour aggregation", () => {
     const model = vi.fn(async () => response("Full account"));
     const restarted = serviceAt();
     restarted.setLlmRuntime(runtime(model));
-    expect(await restarted.backfillUnwrittenSummaries()).toBe(1);
+    expect(await restarted.backfillUnwrittenSummaries()).toBe(0);
+    expect(model).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(restarted.snapshot().histories.find((entry) => entry.id === rollupId)).toMatchObject({
       title: "Full account", coveredHistoryIds: [first, second],
     });
