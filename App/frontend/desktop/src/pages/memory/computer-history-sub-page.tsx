@@ -356,7 +356,10 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
   // needs an actionable message, not command output or local file paths.
   const recordingError = observationState === "failed" ? t("computerHistory.recordingFailedUnknown")
     : snapshot?.observation.error ? t("computerHistory.recordingProcessingError") : null;
-  const narrationError = snapshot?.observation.narrationError;
+  const reportedNarrationError = snapshot?.observation.narrationError;
+  const isByokBudgetError = reportedNarrationError === "history_summary_budget_unavailable"
+    || reportedNarrationError === "history_summary_budget_paused";
+  const narrationError = isByokBudgetError && snapshot?.observation.modelSource !== "byok" ? null : reportedNarrationError;
   const narrationErrorMessage = narrationError === "history_summary_accounting_unavailable"
     ? t("computerHistory.narrationAccountingUnavailable")
     : narrationError === "history_summary_budget_unavailable"

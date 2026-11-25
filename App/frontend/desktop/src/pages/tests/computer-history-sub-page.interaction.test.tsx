@@ -844,6 +844,20 @@ describe("ComputerHistorySubPage", () => {
     expect(client.clearComputerHistories).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["account", "history_summary_budget_unavailable"], ["account", "history_summary_budget_paused"],
+    [null, "history_summary_budget_unavailable"], [undefined, "history_summary_budget_paused"],
+  ] as const)("hides custom-key budget notices for source %s and error %s", async (modelSource, narrationError) => {
+    const client = await renderWith(snapshot({ observation: { ...snapshot().observation, state: "running", modelSource, narrationError } }));
+    expect(container.querySelector(".ch__recording-status")?.textContent).toBe("采集中");
+    expect(container.querySelector(".ch__notices")).toBeNull();
+    await act(async () => root.render(page(client, true)));
+    expect(container.querySelector(".ch__recording-status")?.textContent).toBe("Token 已用完");
+    expect(container.querySelector(".ch__notices")).toBeNull();
+    expect(container.textContent).not.toContain("自定义 API Key");
+    expect(container.textContent).toContain("My recording");
+  });
+
   it.each(["429 Too many requests", "Network unavailable", "Invalid API key"])("does not show quota exhaustion for %s", async (narrationError) => {
     await renderWith(snapshot({ observation: { ...snapshot().observation, state: "running", narrationError } }));
     expect(container.querySelector(".ch__recording-status")?.textContent).toBe("采集中");
