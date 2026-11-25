@@ -39,6 +39,12 @@ const DISPLAY_LIMIT = 5;
 const STATE_TTL_MS = 10 * 60 * 1000;
 const TURN_STATE_TTL_MS = 24 * 60 * 60 * 1000;
 const RESUME_CONTEXT_MAX_CHARS = 24000;
+// Claude Code swaps a hook context string longer than this for a file path and a
+// 2,000-character preview, and does not ask the model to open the file. Other hosts
+// publish no such limit, so they receive the full text. Only the L3 block is fitted:
+// turn-start memory ends with its guidance and tool hints, and a resumed episode with
+// its latest turns, so neither can be cut from the end.
+const HOST_CONTEXT_MAX_CHARS = MODE === "claude-code" ? 10000 : 0;
 
 async function main() {
   const input = await readStdin();
@@ -230,9 +236,35 @@ function writeLifecycleOutput(payload, context) {
   process.stdout.write(context ? JSON.stringify({
     hookSpecificOutput: {
       hookEventName: event,
-      additionalContext: context
+      additionalContext: fitHostContext(context)
     }
   }) : JSON.stringify({ continue: true, suppressOutput: true }));
+}
+
+/**
+ * Trims the L3 block to the host's hook context limit. Text is dropped from the
+ * end, the block's closing tag stays, and a notice says how much is missing.
+ */
+function fitHostContext(context) {
+  if (!HOST_CONTEXT_MAX_CHARS || context.length <= HOST_CONTEXT_MAX_CHARS) {
+    return context;
+  }
+  const closing = context.match(/\n<\/memmy_l3_world_model>$/u);
+  const tail = closing ? closing[0] : "";
+  const body = tail ? context.slice(0, -tail.length) : context;
+  const notice = (omitted) => "\n[Memmy omitted the last " + omitted + " characters of this block to fit the host's " +
+    HOST_CONTEXT_MAX_CHARS + "-character hook context limit.]";
+  // Reserve room for the longest notice this block can need, so the result never exceeds the limit.
+  let end = HOST_CONTEXT_MAX_CHARS - notice(body.length).length - tail.length;
+  const lineEnd = body.lastIndexOf("\n", end);
+  if (end - lineEnd <= HOST_CONTEXT_MAX_CHARS / 10) {
+    // Stop at a line boundary when that gives up no more than a tenth of the limit.
+    end = lineEnd;
+  } else if (body.charCodeAt(end - 1) >= 0xd800 && body.charCodeAt(end - 1) <= 0xdbff) {
+    // Otherwise cut inside the line, but not between the two halves of a surrogate pair.
+    end -= 1;
+  }
+  return body.slice(0, end) + notice(body.length - end) + tail;
 }
 
 function isStopEvent(payload) {
