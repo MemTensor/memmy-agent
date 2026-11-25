@@ -308,6 +308,13 @@ describe("Draft sync ID workflow wiring", () => {
     expect(signal.run).not.toContain("release delete");
     expect(draftSteps.find((step) => step.name === "Publish CodingAgent synchronization request")?.if)
       .toBe("${{ steps.sync-source.outputs.sync_ready == 'true' }}");
+    const direct = draftSteps.find((step) => step.name === "Create or reuse main synchronization PRs");
+    expect(direct?.if).toBe("${{ steps.sync-source.outputs.sync_ready == 'true' }}");
+    expect(direct?.run).toContain("scripts/main-sync/create-prs.mjs");
+    expect(direct?.env).toMatchObject({
+      GH_TOKEN: "${{ github.token }}",
+      MAIN_SYNC_REQUEST_PATH: "${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json",
+    });
   });
 
   it("keeps read-only contract CI triggered by changes to the ID producer and consumer", () => {
@@ -754,7 +761,7 @@ describe("GitHub Draft Release v2 workflow", () => {
   it("uses the release environment, minimal permissions, and global non-cancelling concurrency", () => {
     expect(draftWorkflow.permissions).toEqual({
       contents: "write",
-      "pull-requests": "read",
+      "pull-requests": "write",
     });
     expect(draftJob.environment).toBe("release");
     expect(draftWorkflow.concurrency).toBeUndefined();

@@ -49,14 +49,21 @@ describe('Draft recovery job permission boundary',()=>{
   expect(job.steps.find(step=>step.uses?.startsWith('actions/checkout@')).with)
    .toMatchObject({ref:'${{ github.workflow_sha }}','persist-credentials':false});
   const commands=job.steps.filter(step=>typeof step.run==='string');
-  expect(commands).toHaveLength(1);
-  expect(commands[0].run.trim()).toBe('node scripts/main-sync/cli.mjs recover');
-  expect(commands[0].env).toMatchObject({
+  expect(commands).toHaveLength(2);
+  const requestCommand=commands.find(command=>command.run.trim()==='node scripts/main-sync/cli.mjs recover');
+  const prCommand=commands.find(command=>command.run.trim()==='node scripts/main-sync/create-prs.mjs');
+  expect(requestCommand).toBeDefined();
+  expect(prCommand).toBeDefined();
+  expect(requestCommand.env).toMatchObject({
    GH_TOKEN:'${{ github.token }}',SYNC_RELEASE_ID:'${{ inputs.release_id }}',
    SYNC_SOURCE_SHA:'${{ inputs.source_sha }}',
    MAIN_SYNC_REQUEST_PATH:'${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json',
   });
-  expect(Object.keys(commands[0].env).filter(key=>/(?:^|_)(?:TOKEN|PAT)(?:_|$)/i.test(key)))
+  expect(prCommand.env).toMatchObject({
+   GH_TOKEN:'${{ github.token }}',
+   MAIN_SYNC_REQUEST_PATH:'${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json',
+  });
+  expect(Object.keys(requestCommand.env).filter(key=>/(?:^|_)(?:TOKEN|PAT)(?:_|$)/i.test(key)))
    .toEqual(['GH_TOKEN']);
   expect(source).not.toMatch(/\bsecrets\./);
   const artifact=job.steps.find(step=>step.uses?.startsWith('actions/upload-artifact@'));
@@ -64,7 +71,7 @@ describe('Draft recovery job permission boundary',()=>{
    path:'${{ runner.temp }}/memmy-main-sync-request/main-sync-request.json','if-no-files-found':'error',
   });
   // Keep the added permission confined to this guarded recovery job.
-  expect(job.permissions).toEqual({contents:'write',actions:'read'});
+  expect(job.permissions).toEqual({contents:'write','pull-requests':'write',actions:'read'});
  });
 });
 
