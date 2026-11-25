@@ -532,6 +532,74 @@ describe("computer use settings", () => {
     expect(container.textContent).not.toContain("打开自动化设置");
   });
 
+  it.each(["darwin", "win32"])("shows install guidance without a retry button when Excel is missing on %s", async platform => {
+    vi.useFakeTimers();
+    try {
+      const idle = applicationExcelStatus();
+      const getExcelAddinStatus = vi.fn().mockResolvedValue(idle);
+      const setExcelAddinEnabled = vi.fn().mockRejectedValueOnce(new Error("Microsoft Excel is not installed"));
+      const client = {
+        getComputerUseSetting: vi.fn().mockResolvedValue({ enabled: true, available: true, binaryAvailable: true }),
+        getExcelAddinStatus, setExcelAddinEnabled,
+        getExternalBrowserStatus: vi.fn().mockResolvedValue({ connected: [], claims: [] }),
+      } as unknown as MemmyAgentClient;
+      await act(async () => {
+        root.render(<I18nProvider language="zh-CN"><ComputerUseSettings client={client} platform={platform} /></I18nProvider>);
+      });
+      const toggle = container.querySelector<HTMLInputElement>('input[role="switch"][aria-label="Microsoft Excel"]')!;
+      const retry = () => [...container.querySelectorAll("button")].find(button => button.textContent === "重试连接");
+      await act(async () => { toggle.click(); });
+      expect(toggle.checked).toBe(false);
+      expect(excelRowText()).toContain("请确认已安装 Microsoft Excel");
+      expect(retry()).toBeUndefined();
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+      expect(getExcelAddinStatus).toHaveBeenCalledTimes(4);
+      expect(setExcelAddinEnabled).toHaveBeenCalledTimes(1);
+      expect(retry()).toBeUndefined();
+      expect(excelRowText()).toContain("请确认已安装 Microsoft Excel");
+
+      getExcelAddinStatus.mockResolvedValue(applicationExcelStatus({ error: "Microsoft Excel did not start" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(retry()).toBeDefined();
+      expect(excelRowText()).not.toContain("请确认已安装 Microsoft Excel");
+
+      const connected = applicationExcelStatus({ enabled: true, configured: true, connected: true, setupCompleted: true });
+      getExcelAddinStatus.mockResolvedValue(connected);
+      setExcelAddinEnabled.mockResolvedValueOnce(connected);
+      await act(async () => { toggle.click(); });
+      expect(toggle.checked).toBe(true);
+      expect(excelRowText()).toContain("已连接");
+      expect(excelRowText()).not.toContain("请确认已安装 Microsoft Excel");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps confirmed absence distinct from a retryable failure on repeated Excel status polls", async () => {
+    vi.useFakeTimers();
+    try {
+      const getExcelAddinStatus = vi.fn().mockResolvedValue(applicationExcelStatus({ enabled: true, configured: true,
+        error: "Microsoft Excel is not installed" }));
+      const client = {
+        getComputerUseSetting: vi.fn().mockResolvedValue({ enabled: true, available: true, binaryAvailable: true }),
+        getExcelAddinStatus,
+        getExternalBrowserStatus: vi.fn().mockResolvedValue({ connected: [], claims: [] }),
+      } as unknown as MemmyAgentClient;
+      await act(async () => {
+        root.render(<I18nProvider language="en-US"><ComputerUseSettings client={client} platform="win32" /></I18nProvider>);
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+      expect(excelRowText()).toContain("Make sure Microsoft Excel is installed");
+      expect(excelRowText()).not.toContain("Retry connection");
+      getExcelAddinStatus.mockResolvedValue(applicationExcelStatus({ enabled: true, configured: true,
+        error: "Microsoft Excel is not installed or is unavailable" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(excelRowText()).toContain("Retry connection");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows a native Excel enable failure and lets the user retry", async () => {
     const setExcelAddinEnabled = vi.fn().mockRejectedValueOnce(new Error("Excel native control failed: Permission was denied."))
       .mockResolvedValueOnce(applicationExcelStatus({ enabled: true, configured: true, setupCompleted: true }));

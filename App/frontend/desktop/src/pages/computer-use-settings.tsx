@@ -36,6 +36,9 @@ const EXCEL_FAILURE_MESSAGES: ReadonlyArray<readonly [RegExp, MessageKey]> = [
   [/Excel returned an? (?:invalid|inconsistent)|Excel response is too large/i, "settings.computerUse.excelUnexpectedResponse"],
 ];
 const WINDOWS_EXCEL_ATTACH_UNAVAILABLE = /running Excel application is not available for control/i;
+// Both native adapters report this exact result when Excel is absent. The
+// older "not installed or is unavailable" response can also mean a transient failure.
+const EXCEL_NOT_INSTALLED = /^(?:Excel (?:native )?control failed:\s*)?Microsoft Excel is not installed\.?$/i;
 
 export function ComputerUseSettings(props: { client?: MemmyAgentClient; platform?: string; browserExtensionFocusNonce?: number; excelConnectionFocusNonce?: number }) {
   const { t } = useTranslation();
@@ -187,6 +190,10 @@ export function ComputerUseSettings(props: { client?: MemmyAgentClient; platform
           setExcelStatus(value);
           setExcelStatusError(false);
           setExcelStatusFailures(count => value.error ? Math.min(count + 1, 3) : 0);
+          if (value.scope === "application" && value.error) {
+            // A fresh native error supersedes a missing-installation result from an earlier enable attempt.
+            setExcelError(previous => previous && EXCEL_NOT_INSTALLED.test(previous.message.trim()) ? null : previous);
+          }
           if (!value.error && failedExcelAction.current !== null
             && (value.enabled ?? value.configured) === failedExcelAction.current) {
             failedExcelAction.current = null;
@@ -240,6 +247,7 @@ export function ComputerUseSettings(props: { client?: MemmyAgentClient; platform
   const excelEnabled = excelApplicationScope ? excelStatus.enabled ?? excelStatus.configured : excelStatus?.configured === true;
   const excelInitialChecking = props.platform === "win32" && excelStatus === null;
   const excelFailureDetail = excelError?.message ?? (excelStatusError ? "" : excelStatus?.error ?? "");
+  const excelNotInstalled = !excelLegacyScope && EXCEL_NOT_INSTALLED.test(excelFailureDetail.trim());
   const excelAutomationError = props.platform === "darwin" && !excelLegacyScope
     ? excelAutomationFailure(excelFailureDetail) : null;
   const excelAttachUnavailable = props.platform === "win32" && WINDOWS_EXCEL_ATTACH_UNAVAILABLE.test(excelFailureDetail);
@@ -404,7 +412,7 @@ export function ComputerUseSettings(props: { client?: MemmyAgentClient; platform
             {excelAutomationError === "denied" && <button type="button" className={styles.setupButton} disabled={excelBusy}
               onClick={() => void openExternalUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")}>
               {t("settings.computerUse.excelOpenAutomation")}</button>}
-            {((excelError && !excelAttachChecking) || (!excelLegacyScope && excelStatusFailures >= 3) || (excelApplicationScope
+            {!excelNotInstalled && ((excelError && !excelAttachChecking) || (!excelLegacyScope && excelStatusFailures >= 3) || (excelApplicationScope
               && (excelStatus.permissionRequired || excelHardFailure))) &&
               <button type="button" className={styles.setupButton} disabled={excelBusy}
                 onClick={() => void setExcelEnabled(excelError ? excelRetryEnabled : true)}>{t("settings.computerUse.excelControlRetry")}</button>}
