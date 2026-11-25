@@ -155,6 +155,15 @@ it("downloads signed CSV only from the authenticated cloud route", async () => {
   expect(await client.getCredits({ uuid: "test-credential", resource: "usage/download", query: { token: "signed+token" } })).toEqual({ csv: "RequestID,积分消耗\r\nlocal-test,1.01" });
   expect(fetchImpl).toHaveBeenCalledWith("https://cloud.test/api/credits/v1/usage/download?token=signed%2Btoken", expect.objectContaining({ headers: { authorization: "Bearer test-credential" }, redirect: "error" }));
 });
+it("requests the streaming export limit and passes through file-size errors", async () => {
+  const fetchImpl = vi.fn(async () => Response.json({ code: "EXPORT_TOO_LARGE", message: "File too large" }, { status: 413 }));
+  const client = createHttpCloudClient({ baseUrl: "https://cloud.test", fetchImpl: fetchImpl as typeof fetch });
+  await expect(client.streamCreditsDownload({ uuid: "test-credential", query: { token: "signed" }, signal: new AbortController().signal }))
+    .rejects.toMatchObject({ code: "EXPORT_TOO_LARGE" });
+  expect(fetchImpl).toHaveBeenCalledWith("https://cloud.test/api/credits/v1/usage/download?token=signed", expect.objectContaining({
+    headers: { authorization: "Bearer test-credential", "X-Memmy-Credits-Export-Mode": "stream" }, redirect: "error"
+  }));
+});
 it.each([5_000, 300_000])("allows bounded CSV preflight/streaming without changing ordinary request timeouts (%i ms)", async timeoutMs => {
   const timeout = vi.spyOn(AbortSignal, "timeout");
   try {

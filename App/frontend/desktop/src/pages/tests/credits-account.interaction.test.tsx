@@ -2,6 +2,7 @@
 import { act, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { DesktopCreditsExportResult } from "@memmy/desktop-interface";
 import type { CreditsGrant } from "@memmy/local-api-contracts";
 import type { AppClients } from "../../api/client-types.js";
 import type { CreditsClient } from "../../api/credits-client.js";
@@ -10,6 +11,7 @@ import { readCreditGrants, useCreditAccount } from "../../app/use-credit-account
 import { useCreditsExhaustedPrompt, requestCreditsExhaustedPrompt } from "../../app/credits-exhausted-prompt.js";
 import { creditDisplayBuckets, creditUsagePercent, formatCreditAmount } from "../../app/credit-display.js";
 import { ApiRequestError } from "../../api/http.js";
+import { NotificationCenterProvider } from "../../components/notification-center.js";
 import { useAppState } from "../../state/app-state.js";
 import { appActions } from "../../state/app-actions.js";
 import { CreditsSettingsPanel, CreditsSourceDetailPage, HomeCheckinCard } from "../credits-in-app.js";
@@ -341,6 +343,29 @@ it("uses server CSV export and rejects a late download after switching accounts"
   await act(async () => switchAccount("100002")); await act(async () => resolve({ csv: "test-data" }));
   expect(create).not.toHaveBeenCalled(); create.mockRestore();
 });
+it("disables native CSV export while saving and shows a specific size error toast", async () => {
+  const client = fixture();
+  client.usage.mockResolvedValue({ items: [usageRow], hasMore: false, nextCursor: null } as never);
+  let finishExport!: (result: DesktopCreditsExportResult) => void;
+  const saveCreditsExport = vi.fn(() => new Promise<DesktopCreditsExportResult>(resolve => { finishExport = resolve; }));
+  vi.stubGlobal("memmy", { saveCreditsExport, cancelCreditsExport: vi.fn() });
+  try {
+    await act(async () => root.render(<AppProviders><NotificationCenterProvider><Harness client={client} /></NotificationCenterProvider></AppProviders>));
+    const exportButton = [...host.querySelectorAll("button")].find(button => button.textContent === "导出")!;
+    await click("导出");
+    expect(exportButton.disabled).toBe(true);
+    expect(exportButton.textContent).toBe("正在导出...");
+    expect(host.querySelector('[role="status"]')?.textContent).toBe("");
+    expect(saveCreditsExport).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ domain: "agent" }));
+    expect(client.usageDownload).not.toHaveBeenCalled();
+    await act(async () => finishExport({ status: "failed", code: "EXPORT_TOO_LARGE" }));
+    expect(document.querySelector(".memmy-notification--warning")?.textContent).toContain("导出文件过大，请缩小日期范围后重试。");
+    expect(exportButton.disabled).toBe(false);
+    expect(exportButton.textContent).toBe("导出");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 it("uses ledger-derived consumed amounts for expired grants", () => {
   const bucket = creditDisplayBuckets([], [{ ...reward, used: "15.44", remaining: "0.00", reserved: "0.00", status: "EXPIRED" }])[0]!;
   expect(bucket.usageKnown).toBe(true); expect(bucket.used).toBe(1544n);
@@ -418,7 +443,6 @@ it("dismissal is per account and never claims a live check-in", async () => {
   expect(host.querySelector(".home-checkin")).not.toBeNull();
 });
 it("home check-in reminder collapses after a successful claim and confirms with a toast", async () => {
-  const { NotificationCenterProvider } = await import("../../components/notification-center.js");
   const client = fixture();
   client.checkin.mockImplementationOnce(async () => {
     client.summary.mockResolvedValue({ ...summary, account: { ...summary.account, version: 3 }, checkin: { ...summary.checkin, claimedToday: true } });
@@ -435,7 +459,6 @@ it("home check-in reminder collapses after a successful claim and confirms with 
   expect(document.body.textContent).toContain("+100 积分已到账");
 });
 it("shows the compact check-in confirmation for three seconds before sliding out", async () => {
-  const { NotificationCenterProvider } = await import("../../components/notification-center.js");
   const client = fixture();
   client.checkin.mockResolvedValue({ claimed: true, alreadyClaimed: false, grant: { amount: "100.00" }, accountVersion: 3 });
   await act(async () => root.render(<AppProviders><NotificationCenterProvider><Harness client={client} home="compact" /></NotificationCenterProvider></AppProviders>));
@@ -471,7 +494,6 @@ it("check-in retries reuse the request ID and refresh the authoritative status",
   expect(host.querySelector(".home-checkin")).toBeNull();
 });
 it("an already claimed check-in refreshes the status without showing a new reward toast", async () => {
-  const { NotificationCenterProvider } = await import("../../components/notification-center.js");
   window.localStorage.removeItem("memmy.home.checkinDismissedOn:100001");
   const client = fixture();
   client.checkin.mockImplementationOnce(async () => {

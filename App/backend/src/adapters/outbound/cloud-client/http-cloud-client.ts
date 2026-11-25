@@ -101,6 +101,28 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const deviceId = options.deviceId;
 
+  async function downloadCredits(path: string, uuid: string, streamSignal?: AbortSignal): Promise<Response> {
+    const timeout = AbortSignal.timeout(Math.max(timeoutMs, CLOUD_CREDITS_EXPORT_TIMEOUT_MS));
+    const response = await fetchImpl(`${baseUrl}${path}`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${uuid}`, ...(streamSignal && { "X-Memmy-Credits-Export-Mode": "stream" }) },
+      signal: streamSignal ? AbortSignal.any([timeout, streamSignal]) : timeout,
+      redirect: "error"
+    });
+    if (!response.ok) {
+      const envelope = await readCloudEnvelope(response);
+      throw Object.assign(new Error(envelope.message || "Credits export download failed"), {
+        code: envelope.businessCode === "EXPORT_FAILED" || envelope.businessCode === "EXPORT_TOO_LARGE" || envelope.businessCode === "EXPORT_RANGE_TOO_LARGE" || envelope.businessCode === "USAGE_DATE_RANGE_TOO_LARGE"
+          ? envelope.businessCode : response.status === 401 ? "unauthorized" : response.status === 400 ? "invalid_argument" : "internal"
+      });
+    }
+    if (!response.headers.get("content-type")?.startsWith("text/csv") || !response.body) {
+      await response.body?.cancel();
+      throw Object.assign(new Error("Invalid credits export content type"), { code: "EXPORT_FAILED" });
+    }
+    return response;
+  }
+
   return {
     async postCredits(input) {
       return requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, `/api/credits/v1/${input.resource}`, {
@@ -110,23 +132,15 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
         })
       });
     },
+    async streamCreditsDownload({ uuid, query, signal }) {
+      return downloadCredits(`/api/credits/v1/usage/download?${new URLSearchParams(query)}`, uuid, signal);
+    },
     async getCredits(input) {
       const query = new URLSearchParams(Object.entries(input.query ?? {}).map(([key, value]) => [key, String(value)]));
       const path = `/api/credits/v1/${input.resource}${query.size ? `?${query}` : ""}`;
       if (input.resource === "usage/download") {
-        const response = await fetchImpl(`${baseUrl}${path}`, {
-          method: "GET", headers: { authorization: `Bearer ${input.uuid}` },
-          signal: AbortSignal.timeout(Math.max(timeoutMs, CLOUD_CREDITS_EXPORT_TIMEOUT_MS)), redirect: "error"
-        });
-        if (!response.ok) {
-          const envelope = await readCloudEnvelope(response);
-          throw Object.assign(new Error(envelope.message || "Credits export download failed"), {
-            code: envelope.businessCode === "EXPORT_FAILED" ? "EXPORT_FAILED"
-              : response.status === 401 ? "unauthorized" : response.status === 400 ? "invalid_argument" : "internal"
-          });
-        }
+        const response = await downloadCredits(path, input.uuid);
         try {
-          if (!response.headers.get("content-type")?.startsWith("text/csv")) throw new Error("Invalid credits export content type");
           return { csv: await response.text() };
         } catch {
           throw Object.assign(new Error("消费记录下载未完成，请重新导出"), { code: "EXPORT_FAILED" });
@@ -135,7 +149,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
       return requestCloudData<unknown>(fetchImpl, baseUrl, timeoutMs, path, {
           method: "GET", lang: "zh", bearerCredential: input.uuid,
           toError: (status, envelope) => Object.assign(new Error(envelope.message || (status === 401 ? "Account session expired" : "Credits request failed")), {
-            code: envelope.businessCode === "USAGE_FORBIDDEN" || envelope.businessCode === "USAGE_NOT_FOUND" || envelope.businessCode === "EXPORT_FAILED" ? envelope.businessCode
+            code: envelope.businessCode === "USAGE_FORBIDDEN" || envelope.businessCode === "USAGE_NOT_FOUND" || envelope.businessCode === "EXPORT_FAILED" || envelope.businessCode === "EXPORT_RANGE_TOO_LARGE" || envelope.businessCode === "USAGE_DATE_RANGE_TOO_LARGE" ? envelope.businessCode
               : status === 401 ? "unauthorized" : status === 403 ? "forbidden" : status === 400 ? "invalid_argument" : status === 404 ? "not_found" : "internal"
           })
         });

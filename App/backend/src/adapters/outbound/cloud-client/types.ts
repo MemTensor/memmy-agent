@@ -215,6 +215,7 @@ export interface CloudAsrTranscriptionResult {
 export interface CloudClient {
   postCredits(input: { uuid: string; resource: "check-ins" | "redemptions" | "plan-applications"; body: { requestId: string; code?: string } | CreditsApplicationRequest }): Promise<unknown>;
   getCredits(input: { uuid: string; resource: "summary" | "grants" | "ledger" | "invitations/summary" | "invitations" | "plans" | "plan-applications/latest" | "usage" | `usage/${string}`; query?: Record<string, string | number> }): Promise<unknown>;
+  streamCreditsDownload(input: { uuid: string; query: Record<string, string>; signal: AbortSignal }): Promise<Response>;
   health(): Promise<CloudHealth>;
   sendEmailCode(input: SendEmailCodeInput): Promise<void>;
   sendPhoneCode(input: SendPhoneCodeInput): Promise<void>;

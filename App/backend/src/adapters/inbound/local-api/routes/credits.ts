@@ -24,8 +24,15 @@ export function registerCreditsRoutes(app: FastifyInstance, options: {
     options.credits.usage(CreditsUsageQuerySchema.parse(request.query))));
   app.get("/api/credits/usage/export", auth, withErrorEnvelope(async request =>
     options.credits.usageExport(CreditsUsageExportQuerySchema.parse(request.query))));
-  app.get("/api/credits/usage/download", auth, withErrorEnvelope(async request =>
-    options.credits.usageDownload(CreditsUsageExportQuerySchema.extend({ token: z.string().max(4096) }).parse(request.query))));
+  app.get("/api/credits/usage/download", auth, withErrorEnvelope(async (request, reply) => {
+    const query = CreditsUsageExportQuerySchema.extend({ token: z.string().max(4096) }).parse(request.query);
+    if (request.headers.accept !== "text/csv") return options.credits.usageDownload(query);
+    const controller = new AbortController();
+    reply.raw.once("close", () => controller.abort());
+    const { bytes, body } = await options.credits.streamUsageDownload(query, controller.signal);
+    if (bytes !== null) reply.header("X-Memmy-Credits-Export-Bytes", bytes);
+    return reply.type("text/csv;charset=UTF-8").send(body);
+  }));
   app.get("/api/credits/usage/:callId", auth, withErrorEnvelope(async request => {
     z.object({}).strict().parse(request.query);
     const { callId } = z.object({ callId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/) }).parse(request.params);

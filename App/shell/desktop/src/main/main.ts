@@ -3,6 +3,7 @@ import { createDesktopScreenCapture } from './desktop-screen-capture.js';
 import { compareVersionSegments, parseUpdatePackageVersion } from './version-compare.js';
 import { captureMemmyScreen, computerUseApp, memmyPermissionSnapshot, resolveComputerUseBinary, runHelperCommand } from './memmy-screen-permission.js';
 import { desktopSaveFileName } from './save-file-name.js';
+import { saveCreditsCsv } from './credits-export.js';
 import { createComputerUseOnboarding } from './computer-use-onboarding.js';
 import { createComputerUsePIPScreenPermissionGuide } from './computer-use-pip-screen-permission.js';
 import { stopComputerUseAgentForPermissionRestart, stopComputerUseAgentsOnExitSync } from './computer-use-agent-restart.js';
@@ -37,11 +38,12 @@ import { isMacPermissionSystemQuit, isMacSystemSessionQuit, MacPermissionRestart
 import { NativeAppAllowAll, nativeAppAccessDecision } from './native-app-allow-all.js';
 import { isComputerUsePermissionPanelFocused, showComputerUsePermissionPanel } from './computer-use-permission-panel.js';
 import { createHttpMemmyAgentAdminClient, createLocalBackend, loadCloudServiceEnv, syncRuntimeConfigForStartup, trackAnalyticsEvent, type BootstrapScenario, type LocalBackend } from "@memmy/backend";
-import { BROWSER_NATIVE_ALLOW_ALL_FILE_ENV, browserUsePatternMatches, parseBrowserTaskSitePermission, resolveCloudServiceBaseUrl,
+import { BROWSER_NATIVE_ALLOW_ALL_FILE_ENV, CreditsUsageExportQuerySchema, browserUsePatternMatches, parseBrowserTaskSitePermission, resolveCloudServiceBaseUrl,
   type BrowserAllowAllState, type BrowserUseCapability, type BrowserUseSiteRule,
   type AccountChannel, type ComputerUsePermissions } from "@memmy/local-api-contracts";
 import type {
   DesktopAppInfo,
+  DesktopCreditsExportResult,
   DesktopImageActionRequest,
   DesktopImageSaveResult,
   DesktopMemoryServiceRestartResult,
@@ -1682,6 +1684,43 @@ function registerIpcHandlers(): void {
   ipcMain.handle("memmy:save-file", async (event, request: DesktopImageActionRequest) => (
     saveDesktopFile(request, event.sender.getURL(), BrowserWindow.fromWebContents(event.sender))
   ));
+
+  let activeCreditsExport: { id: string; controller: AbortController } | undefined;
+  ipcMain.handle("memmy:save-credits-export", async (event, id: unknown, input: unknown): Promise<DesktopCreditsExportResult> => {
+    const owner = mainWindow;
+    const runtime = runtimeConfig;
+    const query = CreditsUsageExportQuerySchema.safeParse(input);
+    if (!owner || owner.isDestroyed() || event.sender !== owner.webContents || event.senderFrame !== event.sender.mainFrame
+      || !runtime || typeof id !== "string" || !/^[a-f\d-]{36}$/i.test(id) || !query.success
+      || (query.data.domain !== "agent" && query.data.domain !== "memory") || !query.data.from || !query.data.to) {
+      return { status: "failed", code: "EXPORT_FAILED" };
+    }
+    activeCreditsExport?.controller.abort();
+    const controller = new AbortController();
+    activeCreditsExport = { id, controller };
+    const abort = () => controller.abort();
+    event.sender.once("destroyed", abort);
+    event.sender.once("did-start-navigation", abort);
+    event.sender.once("render-process-gone", abort);
+    try {
+      const selected = await dialog.showSaveDialog(owner, {
+        defaultPath: `memmy-usage-${query.data.domain}.csv`,
+        filters: [{ name: "CSV", extensions: ["csv"] }]
+      });
+      if (selected.canceled || !selected.filePath || controller.signal.aborted) return { status: "cancelled" };
+      return await saveCreditsCsv(runtime, query.data, selected.filePath, controller.signal);
+    } finally {
+      event.sender.removeListener("destroyed", abort);
+      event.sender.removeListener("did-start-navigation", abort);
+      event.sender.removeListener("render-process-gone", abort);
+      if (activeCreditsExport?.controller === controller) activeCreditsExport = undefined;
+    }
+  });
+  ipcMain.on("memmy:cancel-credits-export", (event, id: unknown) => {
+    if (mainWindow?.webContents === event.sender && event.senderFrame === event.sender.mainFrame && activeCreditsExport?.id === id) {
+      activeCreditsExport?.controller.abort();
+    }
+  });
 
   ipcMain.handle("memmy:notify-task-done", (_event, payload: { title: string; body: string; silent: boolean; deliveryId?: string }) => {
     showTaskDoneNotification(payload);
