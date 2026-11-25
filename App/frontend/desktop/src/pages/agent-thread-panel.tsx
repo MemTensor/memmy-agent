@@ -13,10 +13,11 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
-import { AudioLines, LockKeyhole, Globe2, Maximize2, Minimize2, PanelRight, Pin, PinOff, Plus, X } from "lucide-react";
+import { AudioLines, Check, Copy, LockKeyhole, Globe2, Maximize2, Minimize2, PanelRight, Pin, PinOff, Plus, X } from "lucide-react";
 import type { AgentChatMessage } from "../state/agent-chat-slice.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { ThreadFileIcon } from "./agent-thread-file-icon.js";
+import { writeClipboardText } from "./agent-message-content.js";
 import {
   clampThreadListWidth,
   clampThreadPanelWidth,
@@ -892,6 +893,34 @@ function browserTabLabel(tab: BrowserStripTab, fallback: string): string {
   return fallback;
 }
 
+function BrowserTabUrlCopyButton({ url, active }: { url: string; active: boolean }) {
+  const { t } = useTranslation();
+  const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const feedback = status === "copied" ? t("agent.attachment.copiedLink")
+    : status === "failed" ? t("agent.image.copyFailed") : "";
+  return (
+    <button
+      type="button"
+      className="thread-tab__action thread-tab__copy"
+      aria-label={t("browser.copyTabUrl")}
+      title={feedback || t("browser.copyTabUrl")}
+      tabIndex={active ? 0 : -1}
+      onAuxClick={event => event.stopPropagation()}
+      onClick={async event => {
+        event.stopPropagation();
+        try {
+          setStatus(await writeClipboardText(url) ? "copied" : "failed");
+        } catch {
+          setStatus("failed");
+        }
+      }}
+    >
+      {status === "copied" ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
+      <span className="sr-only" role="status">{feedback}</span>
+    </button>
+  );
+}
+
 function ThreadTabs(props: {
   tabs: ThreadPanelTab[];
   activeId: string | null;
@@ -932,6 +961,7 @@ function ThreadTabs(props: {
   }
 
   function handleKeyDown(event: ReactKeyboardEvent<HTMLDivElement>, index: number) {
+    if (event.target !== event.currentTarget) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       activateAt(index);
@@ -977,7 +1007,7 @@ function ThreadTabs(props: {
               <span className="thread-tab__title">{tab.name}</span>
               <button
                 type="button"
-                className="thread-tab__close"
+                className="thread-tab__action thread-tab__close"
                 aria-label={t("home.threadPanel.closeTab", { name: tab.name })}
                 tabIndex={-1}
                 onClick={(event) => {
@@ -1016,9 +1046,12 @@ function ThreadTabs(props: {
               <Globe2 size={16} aria-hidden="true" />
             </span>
             <span className="thread-tab__title">{label}</span>
+            {tab.url && !isBlankBrowserUrl(tab.url) ? (
+              <BrowserTabUrlCopyButton key={tab.url} url={tab.url} active={active} />
+            ) : null}
             <button
               type="button"
-              className="thread-tab__close"
+              className="thread-tab__action thread-tab__close"
               aria-label={t("browser.closeTab", { name: label })}
               tabIndex={-1}
               onClick={(event) => {

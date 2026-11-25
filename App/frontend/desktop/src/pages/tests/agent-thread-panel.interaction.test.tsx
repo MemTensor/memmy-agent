@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -218,7 +220,40 @@ describe("AgentThreadPanel", () => {
     const tab = document.querySelector("[data-browser-tab]");
     expect(tab?.querySelector(".thread-tab__title")?.textContent).toBe("新标签页");
     expect(tab?.getAttribute("title")).toBe("新标签页");
+    expect(tab?.querySelector(".thread-tab__copy")).toBeNull();
     expect((document.querySelector('[aria-label="网页地址"]') as HTMLInputElement).value).toBe("");
+  });
+
+  it("copies the current URL of an inactive tab without activating or closing it", async () => {
+    const write = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    const firstUrl = "https://example.com/first?q=1#anchor";
+    const secondUrl = "https://example.com/second";
+    render({ messages: [], context: emptyContext() });
+    act(() => requestBrowserNewTab(firstUrl));
+    act(() => requestBrowserNewTab(secondUrl));
+    const tabs = document.querySelectorAll<HTMLElement>("[data-browser-tab]");
+    expect(tabs).toHaveLength(2);
+    const copy = tabs[0]!.querySelector<HTMLButtonElement>('[aria-label="复制网页地址"]')!;
+    expect(copy.tabIndex).toBe(-1);
+    for (const key of ["Enter", " ", "Delete", "ArrowRight"]) {
+      const press = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      act(() => { copy.dispatchEvent(press); });
+      expect(press.defaultPrevented).toBe(false);
+    }
+    act(() => { copy.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true })); });
+    await act(async () => copy.click());
+    expect(write).toHaveBeenCalledExactlyOnceWith(firstUrl);
+    expect(copy.title).toBe("已复制链接");
+    expect(tabs[1]!.getAttribute("aria-selected")).toBe("true");
+    expect(document.querySelectorAll("[data-browser-tab]")).toHaveLength(2);
+
+    act(() => tabs[0]!.click());
+    expect(copy.tabIndex).toBe(0);
+    write.mockRejectedValueOnce(new Error("Clipboard unavailable"));
+    await act(async () => copy.click());
+    expect(copy.title).toBe("复制失败");
+    await act(async () => copy.click());
+    expect(copy.title).toBe("已复制链接");
   });
 
   it('keeps a browser tab beside the file tab in the same strip', async () => {
@@ -242,6 +277,34 @@ describe("AgentThreadPanel", () => {
     expect(document.querySelector('.thread-preview__document')?.textContent).toContain('Release notes');
     expect(strip?.querySelector('[data-browser-tab]')?.getAttribute('aria-selected')).toBe('false');
     expect(strip?.querySelector('[data-thread-tab-id^="file:"]')?.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it("reserves a visible title and one track per tab action before scrolling the strip", () => {
+    const style = document.createElement("style");
+    style.textContent = readFileSync(resolve(__dirname, "../../styles.css"), "utf8").replace(/^@import[^;]+;/gm, "");
+    document.head.append(style);
+    try {
+      let panel!: AgentThreadPanelController;
+      render({ messages: [], context: emptyContext(), onController: value => { panel = value; } });
+      act(() => panel.openTab({ id: "file:/long-name.md", type: "file", name: "long-name.md", path: "/long-name.md" }));
+      act(() => requestBrowserNewTab("https://example.com/long-title"));
+      const strip = document.querySelector<HTMLElement>(".thread-tabs")!;
+      expect(getComputedStyle(strip).overflowX).toBe("auto");
+      const tabs = [...strip.querySelectorAll<HTMLElement>("[role=tab]")];
+      expect(tabs.map(tab => tab.querySelectorAll(".thread-tab__action").length)).toEqual([1, 2]);
+      for (const tab of tabs) {
+        const layout = getComputedStyle(tab);
+        expect(layout.display).toBe("grid");
+        expect(layout.minWidth).toBe("min-content");
+        expect(layout.getPropertyValue("grid-template-columns")).toMatch(/minmax\([1-9][\d.]*em,\s*1fr\)/);
+        expect(layout.getPropertyValue("grid-auto-flow")).toBe("column");
+        const action = tab.querySelector<HTMLElement>(".thread-tab__close")!;
+        expect(parseFloat(layout.getPropertyValue("grid-auto-columns"))).toBeGreaterThanOrEqual(parseFloat(getComputedStyle(action).width));
+        expect(getComputedStyle(tab.querySelector(".thread-tab__title")!).textOverflow).toBe("ellipsis");
+      }
+    } finally {
+      style.remove();
+    }
   });
 
   it('reports recording visibility when its tab opens, loses focus, and closes', () => {

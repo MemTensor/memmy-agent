@@ -2934,9 +2934,13 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
 }
 
 .thread-tab {
-  display: flex;
+  display: grid;
+  /* Additional actions get their own track; long titles shrink to a visible ellipsis. */
+  grid-template-columns: 16px minmax(1.75em, 1fr);
+  grid-auto-flow: column;
+  grid-auto-columns: 14px;
   height: 32px;
-  min-width: 50px;
+  min-width: min-content;
   max-width: 180px;
   flex: 0 1 156px;
   align-items: center;
@@ -2963,22 +2967,19 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
 
 .thread-tab__icon {
   display: inline-flex;
-  flex: 0 0 auto;
 }
 
 .thread-tab__title {
   min-width: 0;
-  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.thread-tab__close {
+.thread-tab__action {
   display: inline-flex;
   width: 14px;
   height: 14px;
-  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -2990,13 +2991,13 @@ body.memmy-thread-panel-fullscreen .app-frame-main {
   opacity: 0;
 }
 
-.thread-tab:hover .thread-tab__close,
-.thread-tab:focus-visible .thread-tab__close,
-.thread-tab--active .thread-tab__close {
+.thread-tab:hover .thread-tab__action,
+.thread-tab:focus-within .thread-tab__action,
+.thread-tab--active .thread-tab__action {
   opacity: 1;
 }
 
-.thread-tab__close:hover {
+.thread-tab__action:hover {
   background: color-mix(in srgb, var(--color-text-ink) 10%, transparent);
   color: var(--color-text-ink);
 }
