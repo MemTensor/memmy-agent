@@ -17,6 +17,7 @@ export async function probeDuringLongWrite(databasePath: string, base: string) {
       await fetch(base + "/health");
       const deadline = Date.now() + 15000;
       let heldSince;
+      let open;
       for (;;) {
         if (Date.now() > deadline) throw Error("no sustained migration transaction");
         if (!locked()) {
@@ -25,6 +26,12 @@ export async function probeDuringLongWrite(databasePath: string, base: string) {
           // Opening the worker connection may also take a brief write lock.
           // Only a sustained lock spans the intentionally slow migration.
           heldSince ??= Date.now();
+          if (!open && Date.now() - heldSince > 60) {
+            open = fetch(base + "/sessions/open", { method: "POST", headers: {
+              authorization: "Bearer test", "content-type": "application/json"
+            }, body: JSON.stringify({requestId: "locked-open", adapterId: "test"}), signal: AbortSignal.timeout(15000) });
+            await wait(25);
+          }
           for (const path of ["/health", "/auth/check"]) {
             const r = await fetch(base + path, { headers: { authorization: "Bearer test" }, signal: AbortSignal.timeout(1000) });
             if (r.status !== 200) throw Error(path + " " + r.status);
@@ -33,6 +40,10 @@ export async function probeDuringLongWrite(databasePath: string, base: string) {
         }
         await wait(20);
       }
+      const wrong = await fetch(base + "/auth/check", { headers: { authorization: "Bearer wrong" }, signal: AbortSignal.timeout(1000) });
+      if (wrong.status !== 401) throw Error("wrong token " + wrong.status);
+      const r = await open;
+      if (r?.status !== 200 || !(await r.json()).sessionId) throw Error("session open failed");
       db.close();
     })().catch(e => { console.error(e); process.exitCode = 1; });
   `, databasePath, base]);

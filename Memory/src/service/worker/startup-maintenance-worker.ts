@@ -9,29 +9,30 @@ import { enqueueJob } from "./job-handlers.js";
 import type { MaintenanceCommand, MaintenanceReply, MaintenanceTask } from "./startup-maintenance-thread.js";
 
 const port = parentPort!;
-const { path, task } = workerData as { path: string; task: MaintenanceTask };
+const { path, task, writeEnabled } = workerData as { path: string; task: MaintenanceTask; writeEnabled: Int32Array };
 const database = new MemoryDb({ path, skipMigrations: true });
 const repos = new Repositories(database.db);
-let enableMemoryAdd = false;
+const enableMemoryAdd = () => Atomics.load(writeEnabled, 0) !== 0;
 let embedAfterCapture = false;
 let algorithm: PolicyMaintenanceAlgorithm;
 function* maintenanceSteps() {
   if (task.type === "policies") {
     const policies = new PolicyEvidenceMaintenance(repos, () => algorithm);
-    return yield* policies.steps(task.at, task.limit, () => enableMemoryAdd);
+    return yield* policies.steps(task.at, task.limit, enableMemoryAdd);
   }
   const skills = new AgentSkillLibrary<SkillMaintenanceDeps>({
     repos, nowIso, namespaceIdFromMemory,
     embedAfterCapture: () => embedAfterCapture,
     enqueueJob: input => enqueueJob({ repos, nowIso }, input)
   });
-  yield* skills.startupMaintenance(task.pageSize, () => enableMemoryAdd);
+  if (task.type === "retrieval") yield* skills.upgradeRetrievalRepresentation(task.pageSize, enableMemoryAdd);
+  else yield* skills.startupMaintenance(task.pageSize, enableMemoryAdd);
 }
 const steps = maintenanceSteps();
 port.on("message", (command: MaintenanceCommand) => {
   try {
     if (command.type === "step") {
-      ({ enableMemoryAdd, embedAfterCapture } = command.settings);
+      embedAfterCapture = command.settings.embedAfterCapture;
       if (command.settings.algorithm) algorithm = command.settings.algorithm;
       const step = steps.next();
       if (!step.done) {

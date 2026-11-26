@@ -1,4 +1,5 @@
 import { probeDuringLongWrite } from "../../fixtures/startup-http-probe.js";
+import { Worker } from "node:worker_threads";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { MemoryDb } from "../../../src/storage/db.js";
@@ -9,7 +10,7 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { configWithMemoryGates, createFailingLlm, createMemoryServiceFixture, LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import { withLegacyImportedSkillWriter } from "../../fixtures/legacy-imported-skill-writer.js";
-import { IMPORTED_SKILL_STATE_VERSION } from "../../../src/storage/imported-skill.js";
+import { IMPORTED_SKILL_RETRIEVAL_VERSION, IMPORTED_SKILL_STATE_VERSION } from "../../../src/storage/imported-skill.js";
 
 const { cleanup, createTestService, createTestMemoryService } = createMemoryServiceFixture();
 
@@ -120,6 +121,44 @@ describe("imported skill migration at startup", () => {
     } finally {
       await closeMemoryHttpServer(server);
     }
+  }, 30_000);
+
+  it.each(["on", "off", "disable-after-first"])("checks the write setting before each retrieval group (%s)", async mode => {
+    let config = configWithMemoryGates({ enableMemoryAdd: true });
+    const { db, service: seed } = createTestService({ config });
+    const ids = Array.from({ length: 8 }, (_, i) => legacyImport(seed, `gate-${i}`, `Body ${i}`));
+    seed.reconcileWorkerStartup();
+    db.db.exec(`UPDATE memories SET properties_json=json_set(properties_json,'$.internal_info.retrieval_representation_version',1)
+      WHERE memory_layer='Skill'`);
+    const service = createTestMemoryService({ backend: new SqliteStorageBackend(db), config,
+      configLoader: () => ({ config }) });
+    const versions = () => ids.map(id => db.db.prepare(
+      "SELECT json_extract(properties_json,'$.internal_info.retrieval_representation_version') FROM memories WHERE id=?"
+    ).pluck().get(id));
+    const toggle = (enabled: boolean) => {
+      config = configWithMemoryGates({ enableMemoryAdd: enabled });
+      service.reloadConfig({ restartFailedProcessing: false });
+    };
+    let switched = false;
+    const post = Worker.prototype.postMessage;
+    const spy = vi.spyOn(Worker.prototype, "postMessage").mockImplementation(function(this: Worker, ...args) {
+      if (mode === "disable-after-first" && !switched && args[0]?.type === "step"
+          && versions().filter(v => v === IMPORTED_SKILL_RETRIEVAL_VERSION).length === 1) {
+        switched = true;
+        toggle(false);
+      }
+      return post.apply(this, args);
+    });
+    try {
+      if (mode === "off") toggle(false);
+      await service.reconcileWorkerStartupInBackground(new AbortController().signal);
+      const expected = mode === "on" ? 8 : mode === "off" ? 0 : 1;
+      expect(versions()).toEqual(ids.map((_, i) => i < expected ? IMPORTED_SKILL_RETRIEVAL_VERSION : 1));
+      if (mode !== "on") {
+        toggle(true);
+        await vi.waitFor(() => expect(versions()).toEqual(ids.map(() => IMPORTED_SKILL_RETRIEVAL_VERSION)), { timeout: 10_000 });
+      }
+    } finally { spy.mockRestore(); }
   }, 30_000);
 
   it("commits every version in a group before shutdown and resumes remaining groups after reopening", async () => {

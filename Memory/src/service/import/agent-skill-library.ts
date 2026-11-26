@@ -344,7 +344,7 @@ export class AgentSkillLibrary<Deps extends SkillMaintenanceDeps = AgentSkillLib
     yield;
     yield* this.deps.repos.runtime.repairImportedSkillResponseCopies(pageSize);
     if (enableMemoryAdd()) {
-      const upgraded = yield* this.upgradeRetrievalRepresentation(pageSize, failedGroups);
+      const upgraded = yield* this.upgradeRetrievalRepresentation(pageSize, enableMemoryAdd, failedGroups);
       if (upgraded) migrationLogger.info("agent_skill.retrieval_text_upgraded", { upgraded });
     }
   }
@@ -448,11 +448,14 @@ export class AgentSkillLibrary<Deps extends SkillMaintenanceDeps = AgentSkillLib
    * restoreRetrievalRepresentation can put them back. Startup's retrieval
    * index repair re-embeds the records whose retrieval text changed.
    */
-  private *upgradeRetrievalRepresentation(limit: number, failed: ReadonlySet<string>) {
+  *upgradeRetrievalRepresentation(limit: number, enableMemoryAdd: () => boolean, failed: ReadonlySet<string> = new Set()) {
     let upgraded = 0;
     for (const group of this.startupGroups("retrieval", limit, new Set(failed))) {
+      if (!enableMemoryAdd()) break;
       if (group) {
         const count = yield* this.updateStartupGroup("retrieval", group, () => {
+          // A retry is a new transaction and must observe a configuration reload.
+          if (!enableMemoryAdd()) return 0;
           const versions = this.deps.repos.memories.listImportedSkillsForSource(group.sourceAgentId, { sourceSkillId: group.sourceSkillId });
           if (versions.some(v => Number(v.properties.internal_info.import_state_version ?? 0) < IMPORTED_SKILL_STATE_VERSION)) return 0;
           let updated = 0;

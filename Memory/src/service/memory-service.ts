@@ -1,5 +1,5 @@
 import { rawTurnIdFromMemory, traceMetaWithSource } from "./evolution/trace-meta-with-source.js";
-import { runMaintenanceWorker } from "./worker/startup-maintenance-thread.js";
+import { runMaintenanceWorker, type MaintenanceEnvironment } from "./worker/startup-maintenance-thread.js";
 import { PolicyEvidenceMaintenance, type PolicyEvidenceRecovery } from "./evolution/policy-evidence-maintenance.js";
 import { finishStartupSteps, runStartupSteps } from "./worker/startup-reconciliation.js";
 import { AgentSkillLibrary, type AgentSkillReconcileRequest, type AgentSkillReconcileResult } from "./import/agent-skill-library.js";
@@ -468,6 +468,9 @@ export class MemoryService {
   private capturePendingListener?: () => void;
   private readonly fallbackSessionId = randomUUID();
   private legacyCaptureMigration?: Promise<void>;
+  private legacyCapturesFailed = false;
+  private skillMaintenance: Promise<void> = Promise.resolve();
+  private readonly maintenanceWriteEnabled = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
   private beforeWorkerRun?: () => Promise<void>;
   private closing = false;
   private stopping?: Promise<void>;
@@ -490,6 +493,7 @@ export class MemoryService {
     this.l3WorldModelContextReadModel = new L3WorldModelContextReadModel(this.repos);
     this.mode = options.mode ?? "local";
     this.config = cloneMemmyConfig(options.config ?? DEFAULT_MEMMY_CONFIG);
+    Atomics.store(this.maintenanceWriteEnabled, 0, Number(this.memoryAddEnabled()));
     this.tokenBudgetLedger = new MemoryTokenBudgetLedger(
       this.repos.runtime,
       () => new Date(),
@@ -988,7 +992,9 @@ export class MemoryService {
 
   private startLegacyCaptureMigration(): void {
     if (this.legacyCaptureMigration || !this.memoryAddEnabled()) return;
+    this.legacyCapturesFailed = false;
     const steps = this.sessionTurns.migrateLegacyCaptures((id, error) => {
+      this.legacyCapturesFailed = true;
       serviceLogger.error("capture.legacy_command_failed", { id, ...memoryErrorFields(error) });
     });
     const signal = this.options.startupSignal
@@ -1028,7 +1034,7 @@ export class MemoryService {
     // A display-only scan is safe to recompute and must not keep running while
     // other accepted work drains during shutdown.
     this.embeddingMaintenanceReader.cancelDiscardableStats();
-    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped, this.legacyCaptureMigration?.catch(() => {})]).then(async () => {
+    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped, this.legacyCaptureMigration?.catch(() => {}), this.skillMaintenance]).then(async () => {
       // Reads that a maintenance run depends on get a bounded grace period before
       // the worker is terminated, so shutdown cannot hang on a stuck scan.
       await this.embeddingMaintenanceReader.stop();
@@ -1507,7 +1513,11 @@ export class MemoryService {
     const l3FieldWasActive = this.l3FieldActive();
 
     this.config = nextConfig;
-    if (!previousConfig.algorithm.enableMemoryAdd) this.startLegacyCaptureMigration();
+    Atomics.store(this.maintenanceWriteEnabled, 0, Number(this.memoryAddEnabled()));
+    if (!previousConfig.algorithm.enableMemoryAdd && this.memoryAddEnabled()) {
+      this.startLegacyCaptureMigration();
+      void this.scheduleSkillMaintenance("retrieval", this.budgetAbort.signal);
+    }
     this.tokenBudgetLedger.setLimits(this.config.tokenBudget);
     this.appBudgetReconcile.succeeded = false;
     this.appBudgetReconcile.nextAttemptAtMs = 0;
@@ -1956,6 +1966,18 @@ export class MemoryService {
     return this.retrieval.refreshImportedSkillResponse(response, request, "turn_start");
   }
 
+  /** Keep a session write and its idempotency response between maintenance transactions. */
+  async withForegroundWrite<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const admission = signal ? AbortSignal.any([signal, this.budgetAbort.signal]) : this.budgetAbort.signal;
+    const release = await this.panelWrites.acquire(admission);
+    try {
+      admission.throwIfAborted();
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   private writeCaptureTransaction<T>(operation: () => T, signal?: AbortSignal): Promise<T> {
     return this.panelWrites.run(async () => this.repos.transaction(operation),
       signal ? AbortSignal.any([signal, this.budgetAbort.signal]) : this.budgetAbort.signal);
@@ -1963,8 +1985,12 @@ export class MemoryService {
 
   private async acceptCapture<T>(execute: () => Promise<T>, sessionId?: string, source?: SourceTurnCompleteRequest["sourceTurn"]): Promise<T> {
     // An accepted legacy command precedes live writes to its session. Unrelated sessions can write between commits.
-    if (this.legacyCaptureMigration && this.sessionTurns.hasLegacyCapturesFor(sessionId, source)) {
+    if ((this.legacyCaptureMigration || this.legacyCapturesFailed) && this.memoryAddEnabled()
+      && this.sessionTurns.hasLegacyCapturesFor(sessionId, source)) {
       await this.legacyCaptureMigration;
+      if (this.memoryAddEnabled() && this.sessionTurns.hasLegacyCapturesFor(sessionId, source)) {
+        throw new MemoryServiceError("memory_upgrading", "An earlier capture for this session is awaiting recovery");
+      }
     }
     const result = await execute();
     this.capturePendingListener?.();
@@ -4046,25 +4072,40 @@ export class MemoryService {
     // be private to the caller (in-memory database, TEMP tables or local functions).
     const path = this.options.backend?.sqlitePath;
     const managedFile = path && path !== ":memory:" ? path : undefined;
-    const settings = () => ({
-      enableMemoryAdd: this.memoryAddEnabled(), embedAfterCapture: this.config.algorithm.capture.embedAfterCapture
-    });
-    try {
-      if (managedFile) {
-        await runMaintenanceWorker(managedFile, { type: "skills", pageSize }, signal, settings);
-      } else {
-        await runStartupSteps(this.agentSkills.startupMaintenance(pageSize, () => this.memoryAddEnabled()), signal);
-      }
-    } catch (error) {
-      signal.throwIfAborted();
-      serviceLogger.error("agent_skill.legacy_migration_failed", memoryErrorFields(error));
-    }
+    await this.scheduleSkillMaintenance("skills", signal);
+    signal.throwIfAborted();
     const policyWork = (at: string, limit: number) => managedFile
-      ? runMaintenanceWorker(managedFile, { type: "policies", at, limit }, signal, () => ({
-          ...settings(), algorithm: this.config.algorithm
-        }))
+      ? runMaintenanceWorker(managedFile, { type: "policies", at, limit }, signal, this.maintenanceEnvironment())
       : runStartupSteps(this.policyEvidence.steps(at, limit, () => this.memoryAddEnabled()), signal);
     return runStartupSteps(this.startupRecoverySteps(10_000, pageSize, 3, policyWork), signal);
+  }
+
+  private maintenanceEnvironment(): MaintenanceEnvironment {
+    return {
+      writeEnabled: this.maintenanceWriteEnabled,
+      acquire: signal => this.panelWrites.acquire(signal),
+      settings: () => ({ embedAfterCapture: this.config.algorithm.capture.embedAfterCapture, algorithm: this.config.algorithm })
+    };
+  }
+
+  private scheduleSkillMaintenance(type: "skills" | "retrieval", signal: AbortSignal): Promise<void> {
+    const pageSize = 32;
+    this.skillMaintenance = this.skillMaintenance.then(async () => {
+      signal.throwIfAborted();
+      if (this.legacyCaptureMigration) await this.legacyCaptureMigration;
+      const path = this.options.backend?.sqlitePath;
+      if (path && path !== ":memory:") {
+        await runMaintenanceWorker(path, { type, pageSize }, signal, this.maintenanceEnvironment());
+      } else {
+        const enabled = () => this.memoryAddEnabled();
+        const steps = type === "skills" ? this.agentSkills.startupMaintenance(pageSize, enabled)
+          : this.agentSkills.upgradeRetrievalRepresentation(pageSize, enabled);
+        await runStartupSteps<void | number>(steps, signal);
+      }
+    }).catch(error => {
+      if (!signal.aborted) serviceLogger.error("agent_skill.legacy_migration_failed", memoryErrorFields(error));
+    });
+    return this.skillMaintenance;
   }
 
   private *startupRecoverySteps(limit: number, pageSize: number, recoveryAttempts: number,

@@ -655,7 +655,7 @@ async function routeRequest(
     requireAdminWrite(principal);
     const request = asObject(body, "admin.reload-config") as MemoryReloadConfigRequest;
     await agentSources.reconcileScanPermission?.();
-    const result = service.reloadConfig({
+    const result = await service.withForegroundWrite(async () => service.reloadConfig({
       requestId: typeof request.requestId === "string" ? request.requestId : undefined,
       adapterId: typeof request.adapterId === "string" ? request.adapterId : undefined,
       reason: typeof request.reason === "string" ? request.reason : undefined,
@@ -663,7 +663,7 @@ async function routeRequest(
       restartFailedProcessing: typeof request.restartFailedProcessing === "boolean"
         ? request.restartFailedProcessing
         : undefined
-    });
+    }), signal);
     autoWorker.schedule();
     return result;
   }
@@ -694,12 +694,12 @@ async function routeRequest(
           workspacePath: request.workspacePath,
           meta: request.meta
         };
-    const result = await service.idempotent(
+    const result = await service.withForegroundWrite(() => service.idempotent(
       "sessions.create",
       publicRequest,
       publicRequest,
       () => service.openSession(publicRequest)
-    );
+    ), signal);
     if (request.l3WorldModelProtocolVersion === 2 && result.projectId) autoWorker.schedule();
     return publicOpenSessionResponse(result);
   }
@@ -709,9 +709,9 @@ async function routeRequest(
     requireMemoryWrite(principal);
     const request = envelopeWithPrincipal(asObject(body, "sessions.close"), principal) as RequestEnvelope;
     const sessionId = decodeMatchSegment(sessionClose, 1);
-    const result = await service.idempotent("sessions.close", request, { sessionId, request }, () =>
+    const result = await service.withForegroundWrite(() => service.idempotent("sessions.close", request, { sessionId, request }, () =>
       service.closeSession(sessionId, request)
-    );
+    ), signal);
     // Close can queue L3 batches even when no episode closes, so always wake the worker.
     autoWorker.schedule();
     return publicCloseSessionResponse(result);

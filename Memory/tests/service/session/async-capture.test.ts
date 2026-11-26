@@ -399,8 +399,8 @@ describe("raw-first independent L1 and Episode processing", () => {
     const pending = remaining();
     expect(pending).toBeGreaterThan(1);
     const second = open();
-    const duplicate = await second.completeTurn("old-39", { sessionId: old, query: "Question 39", answer: "Answer 39" });
-    expect(duplicate.duplicate).toBe(true);
+    await expect(second.completeTurn("new", { sessionId: old, query: "New", answer: "Answer" }))
+      .rejects.toMatchObject({ code: "memory_upgrading" });
     expect(remaining()).toBe(1);
     expect(db.db.prepare("SELECT status FROM evolution_jobs WHERE id='invalid'").pluck().get()).toBe("dead_letter");
     expect(db.db.prepare("SELECT count(*) FROM raw_turns WHERE session_id=?").pluck().get(old)).toBe(40);
@@ -413,6 +413,46 @@ describe("raw-first independent L1 and Episode processing", () => {
     }));
     expect((await open().completeTurn("invalid", repaired)).duplicate).toBe(true);
     expect(remaining()).toBe(0);
+  });
+
+  it.each([false, true])("recovers a failed tool event exactly once across restarts (completed turn already stored: %s)", async existing => {
+    const { service, db } = fixture.createTestService();
+    const { sessionId } = service.openSession({});
+    const other = service.openSession({}).sessionId;
+    const complete = { sessionId, query: "Original question", answer: "Original answer" };
+    if (existing) await service.completeTurn("turn", complete);
+    await service.stop();
+    const insert = db.db.prepare(`INSERT INTO evolution_jobs
+      (id,job_type,status,user_id,payload_json,attempts,max_attempts,created_at,updated_at)
+      VALUES (?,'capture_replay','queued','local-user',?,0,3,'2026-01-01','2026-01-01')`);
+    const tool = { sessionId, turnId: "turn", toolCallId: "call", toolName: "read", result: "file contents" };
+    const add = (id: string, operation: string, ...args: unknown[]) =>
+      insert.run(id, JSON.stringify({ command: { operation, args } }));
+    add("tool", "observeTool", tool);
+    add("complete", "completeTurn", "turn", complete);
+    add("independent", "completeTurn", "turn", { ...complete, sessionId: other });
+    db.db.exec(`CREATE TRIGGER fail_tool BEFORE INSERT ON artifacts WHEN NEW.kind='tool_call'
+      BEGIN SELECT RAISE(ABORT, 'temporary write failure'); END`);
+    const open = () => fixture.createTestMemoryService({ db: new MemoryDb({ path: db.path }) });
+    const first = open();
+    await first.runWorkerOnce(0);
+    const jobs = () => db.db.prepare("SELECT id FROM evolution_jobs WHERE job_type='capture_replay' ORDER BY rowid").pluck().all();
+    expect(jobs()).toEqual(["tool", "complete"]);
+    await expect(first.completeTurn("later", complete)).rejects.toMatchObject({ code: "memory_upgrading" });
+    expect(db.db.prepare("SELECT turn_id FROM raw_turns WHERE session_id=?").pluck().all(sessionId)).toEqual(existing ? ["turn"] : []);
+    await first.stop();
+    db.db.exec("DROP TRIGGER fail_tool");
+    for (let i = 0; i < 2; i++) {
+      const restored = open();
+      await restored.runWorkerOnce(0);
+      expect(jobs()).toEqual([]);
+      expect(db.db.prepare("SELECT count(*) FROM artifacts WHERE kind='tool_call' AND session_id=?").pluck().get(sessionId)).toBe(1);
+      const raw = new Repositories(db.db).runtime.getRawTurnBySessionTurn(sessionId, "turn")!;
+      expect(raw.toolResults).toMatchObject([{ id: "call", output: "file contents" }]);
+      expect(raw.toolCalls).toMatchObject([{ id: "call" }]);
+      await restored.stop();
+      if (i === 0) add("tool", "observeTool", tool);
+    }
   });
 
   it.each([false, true])("export/import cannot restore excluded raw text (includeRawText=%s)", async includeRawText => {
