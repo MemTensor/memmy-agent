@@ -312,10 +312,11 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
             state: pendingApproval ? "pending_approval" : entry.automatic && previous.state === "installed" ? "installed" : "disabled",
             ...artifact
           };
+          const needsReactivation = previous.state === "active" && !pendingApproval;
           let secrets: Record<string, string>;
           try {
             validateConfig(draft.manifest, draft.config);
-            secrets = pendingApproval ? {} : readSecrets(draft, options.secretStore);
+            secrets = needsReactivation ? readSecrets(draft, options.secretStore) : {};
           } catch (error) {
             if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(artifact);
             throw error;
@@ -328,7 +329,7 @@ export function createPluginService(options: CreatePluginServiceOptions): Plugin
               ...artifact
             });
             updated = options.repository.setApprovedPermissions(id, approvedPermissions);
-            if (previous.state === "active" && !pendingApproval && mayReactivate(manifest)) {
+            if (needsReactivation && mayReactivate(manifest)) {
               updated = await reactivate(updated, secrets);
             }
             if (artifact.rootPath !== previous.rootPath) await options.artifactManager.remove(previous);

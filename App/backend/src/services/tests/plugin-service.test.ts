@@ -136,6 +136,26 @@ describe("PluginService", () => {
     expect(service.get(next.id).version).toBe("1.1.0");
   });
 
+  it.each(["installed", "disabled"] as const)("updates a %s plugin without reading secrets until activation", async state => {
+    const current = { ...publicPlugin, permissions: release.manifest.permissions };
+    const next = { ...current, version: "1.1.0" };
+    const { service, runtimeHost, artifactManager } = createContext([{ manifest: current }, { manifest: next }]);
+    await service.install(current.id, current.version);
+    await service.approvePermissions(current.id, current.permissions);
+    if (state === "disabled") await service.disable(current.id);
+    const readSecret = vi.spyOn(store!.secretStore, "get");
+
+    const [entry] = await service.catalog();
+    expect(entry?.autoUpdateFromVersion).toBe(current.version);
+    await expect(service.update(current.id, next.version, entry!.autoUpdateFromVersion))
+      .resolves.toMatchObject({ version: next.version, state });
+    expect((await service.catalog())[0]?.autoUpdateFromVersion).toBeUndefined();
+    expect(artifactManager.install).toHaveBeenCalledTimes(2); // Initial install and one upgrade.
+    expect(readSecret).not.toHaveBeenCalled();
+    expect(runtimeHost.activate).not.toHaveBeenCalled();
+    await expect(service.enable(current.id)).rejects.toThrow("Missing plugin secret");
+  });
+
   it.each(["publisher opt-out", "installed opt-out", "new permissions", "unsupported", "account-only", "revoked access", "grant-only", "withdrawn"] as const)(
     "leaves %s releases to the manual path", async scenario => {
       const current = { ...publicPlugin, rules: { ...publicPlugin.rules, autoUpdate: scenario !== "installed opt-out" } };
