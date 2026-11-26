@@ -2058,7 +2058,7 @@ export class ComputerHistoryDemoService {
     const permissions = await this.checkPermissions();
     if (!current()) return;
     if (!permissions.supported) throw new ComputerHistoryApiError(400, "Computer History recording requires macOS or Windows 11");
-    if (!permissions.accessibility || !permissions.inputMonitoring) {
+    if (!historyPermissionsReady(permissions)) {
       void this.finalizeSegment(previous);
       this.completeObservationStop();
       return;

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import { Check, X } from "lucide-react";
 import type { MemmyAgentClient } from "../../api/memmy-agent-client.js";
-import type { ComputerHistoryPermission, ComputerHistoryPermissions } from "../../api/computer-history-contract.js";
+import { historyPermissionsReady, type ComputerHistoryPermission, type ComputerHistoryPermissions } from "../../api/computer-history-contract.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import { Button } from "../../components/button.js";
 import { Modal } from "../../components/modal.js";
@@ -44,15 +44,14 @@ export function ComputerHistoryPermissionGuide(props: {
       setStatus(next);
       const intent = readHistoryPermissionIntent();
       const restarted = sessionId && intent?.sessionId && intent.sessionId !== sessionId;
-      const ready = next.supported && next.accessibility && next.inputMonitoring;
+      const ready = historyPermissionsReady(next);
       if (ready && restarted && (!autoStartAttempted.current || retry)) {
         // A process change resumes the enable action; remounts and reloads do not.
         autoStartAttempted.current = true;
         setStarting(true);
         await onStart.current();
       } else if (sessionId && intent && (!intent.sessionId || !next.accessibility)) {
-        // A missing grant needs setup and a new restart in this process. Keep a
-        // completed restart's intent while input listening is still refreshing.
+        // A missing Accessibility grant needs a new setup and restart.
         saveHistoryPermissionSetup(intent.action, sessionId);
       }
     } catch (cause) {
@@ -122,9 +121,7 @@ export function ComputerHistoryPermissionGuide(props: {
       const next = await props.client.checkComputerHistoryPermissions();
       if (!mounted.current) return;
       setStatus(next);
-      // Accessibility is the only grant in this flow. The existing native
-      // process may not report input listening until the app is restarted.
-      if (next.supported && next.accessibility) {
+      if (historyPermissionsReady(next)) {
         await window.memmy?.restartForComputerHistoryPermissions?.();
       }
     } catch (cause) {
@@ -132,7 +129,7 @@ export function ComputerHistoryPermissionGuide(props: {
     } finally { active.current = false; if (mounted.current) setBusy(false); }
   };
 
-  const authorized = status?.supported && status.accessibility;
+  const authorized = historyPermissionsReady(status ?? undefined);
   const blocked = busy || guiding;
   return createPortal(<div className="ch-recording-confirmation"><Modal
     open

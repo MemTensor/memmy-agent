@@ -24,8 +24,8 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 describe("Computer History permission preflight", () => {
-  it.each([[false, false], [true, false], [false, true]])("blocks recording before file writes with Accessibility=%s Input Monitoring=%s", async (accessibility, inputMonitoring) => {
-    const status = { supported: true, accessibility, inputMonitoring };
+  it.each([false, true])("blocks recording before file writes without Accessibility (Input Monitoring=%s)", async (inputMonitoring) => {
+    const status = { supported: true, accessibility: false, inputMonitoring };
     const { instance, root } = service(async () => status);
     const start = vi.spyOn(instance, "startObservation");
     const before = fs.readdirSync(root, { recursive: true });
@@ -35,7 +35,7 @@ describe("Computer History permission preflight", () => {
     expect(fs.readdirSync(root, { recursive: true })).toEqual(before);
   });
   it("checks fresh grants for each start and resume instead of caching them", async () => {
-    const read = vi.fn().mockResolvedValue(granted);
+    const read = vi.fn().mockResolvedValue({ ...granted, inputMonitoring: false });
     const { instance } = service(read);
     const start = vi.spyOn(instance, "startObservation").mockImplementation(() => instance.snapshot());
     const resume = vi.spyOn(instance, "resumeObservation").mockImplementation(() => instance.snapshot());

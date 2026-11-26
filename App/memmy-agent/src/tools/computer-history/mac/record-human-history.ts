@@ -488,14 +488,13 @@ export async function checkPermissions(
 ): Promise<RecorderPermissions> {
   let permissions = await readPermissions(binary, "--permissions");
   const missingRequiredPermission = () => (
-    !permissions.inputMonitoring
+    (!accessibility && !permissions.inputMonitoring)
       || (screenshots && !permissions.screenRecording)
       || (accessibility && !permissions.accessibility)
   );
   if (missingRequiredPermission()) {
     const requests: string[] = [];
-    // Accessibility also grants event listening. Request it once rather than
-    // asking for a redundant Input Monitoring grant alongside it.
+    // Only input-only recording requires Input Monitoring.
     if (!accessibility && !permissions.inputMonitoring) requests.push("--request-input-monitoring");
     if (screenshots && !permissions.screenRecording) requests.push("--request-screen-recording");
     if (accessibility && !permissions.accessibility) requests.push("--request-accessibility");
@@ -503,7 +502,7 @@ export async function checkPermissions(
   }
   if (missingRequiredPermission()) {
     const missing: string[] = [];
-    if (!permissions.inputMonitoring) missing.push("Input Monitoring");
+    if (!accessibility && !permissions.inputMonitoring) missing.push("Input Monitoring");
     if (screenshots && !permissions.screenRecording) missing.push("Screen Recording");
     if (accessibility && !permissions.accessibility) missing.push("Accessibility");
     throw new Error(

@@ -40,5 +40,5 @@ export interface HistoryPlatformDriver {
 }
 
 export function historyPermissionsReady(status: HistoryPermissions): boolean {
-  return status.supported && (status.platform === "windows" ? status.ready === true : status.accessibility && status.inputMonitoring);
+  return status.supported && (status.platform === "windows" ? status.ready === true : status.accessibility);
 }

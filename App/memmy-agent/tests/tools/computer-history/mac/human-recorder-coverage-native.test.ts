@@ -319,9 +319,14 @@ func emitEvent(kind: String, application: [String: Any]? = nil, extra: [String: 
 ${production("let samplingLock =", "let callback:")}
 ${production("var historySamplingTimer:", "public func startHistoryRecorder(")}
 currentSession = 2; historySamplingTick(expectedSession: 1)
-eventTap = nil; historySamplingTick(expectedSession: 2)
+historySamplingTick(expectedSession: 2)
 let staleTimersBlocked = diagnostics.isEmpty && samples.isEmpty
-eventTap = 1
+historySamplingTimer = Timer(timeInterval: 5, repeats: true) { _ in }
+eventTap = nil; monitoring = false; historySamplingTick(expectedSession: 2)
+let sampledWithoutEventTap = samples.map { $0["kind"] as? String } == ["sampling.changed"]
+let reportedUnavailableWithoutEventTap = diagnostics.contains("input_monitoring_unavailable")
+samples.removeAll(); diagnostics.removeAll(); observed.removeAll()
+eventTap = 1; monitoring = true
 for _ in 0..<20 { requestScrollSample(application: applicationPayload()) }
 let scrollBurst = samples.count
 lastScrollSampleAt = Date().addingTimeInterval(-1)
@@ -336,6 +341,7 @@ trusted = false; historySamplingTick()
 trusted = true; excluded = true; historySamplingTick()
 print(String(data: try JSONSerialization.data(withJSONObject: ["scrollBurst": scrollBurst, "nextScroll": nextScroll,
   "allowed": allowed, "samplesAfterBlocked": samples.count, "staleTimersBlocked": staleTimersBlocked,
+  "sampledWithoutEventTap": sampledWithoutEventTap, "reportedUnavailableWithoutEventTap": reportedUnavailableWithoutEventTap,
   "observed": observed, "diagnostics": diagnostics,
   "samplingKinds": samples.map { $0["kind"]! }]), encoding: .utf8)!)
 `);
@@ -344,6 +350,8 @@ print(String(data: try JSONSerialization.data(withJSONObject: ["scrollBurst": sc
   assert.equal(result.allowed, 3);
   assert.equal(result.samplesAfterBlocked, 3);
   assert.equal(result.staleTimersBlocked, true);
+  assert.equal(result.sampledWithoutEventTap, true);
+  assert.equal(result.reportedUnavailableWithoutEventTap, true);
   assert.deepEqual(result.observed, [1, 1, 1]);
   assert.deepEqual(result.samplingKinds, ["sampling.changed", "sampling.changed", "sampling.changed"]);
   assert.equal(result.diagnostics.filter((code: string) => code === "input_monitoring_ready").length, 2);

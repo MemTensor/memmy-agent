@@ -75,9 +75,10 @@ describe("recorder requests only required missing permissions", () => {
     await checkPermissions("recorder", { screenshots: false }, read);
     expect(read).toHaveBeenLastCalledWith("recorder", "--permissions", ["--request-accessibility"]);
   });
-  it("keeps listening blocked without requesting a redundant grant when Accessibility is already on", async () => {
-    const read = vi.fn().mockResolvedValue({ ...granted, inputMonitoring: false });
-    await expect(checkPermissions("recorder", { screenshots: false }, read)).rejects.toThrow("missing macOS permission: Input Monitoring.");
+  it("allows window recording without requesting Input Monitoring when Accessibility is on", async () => {
+    const status = { ...granted, inputMonitoring: false };
+    const read = vi.fn().mockResolvedValue(status);
+    await expect(checkPermissions("recorder", { screenshots: false }, read)).resolves.toEqual(status);
     expect(read).toHaveBeenCalledExactlyOnceWith("recorder", "--permissions");
   });
   it("requests Accessibility alone when both Accessibility and listening are unavailable", async () => {
