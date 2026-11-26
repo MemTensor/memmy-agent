@@ -46,10 +46,6 @@ export function createMockCloudClient(options: CreateMockCloudClientOptions = {}
   let fallbackProfile: CloudAccountProfile | null = null;
 
   return {
-    async getModelCapabilityCatalog() {
-      throw new Error("Model catalog response is not configured in this test");
-    },
-
     async ensureInvitationCode() {
       return { enabled: false, invitationCode: null, usedInviteSlotsToday: 0, dailySuccessLimit: 0,
         remainingInvitesToday: 0, dailyLimitReached: false };

@@ -11,7 +11,6 @@ import type {
   ModelConfigTestInput,
   ModelConfigTestResult,
   ModelConfigView,
-  ModelCapabilityCatalog,
   OnboardingStateDto,
   PatchAppSettingsInput,
   PatchOnboardingInput,
@@ -70,7 +69,6 @@ export interface CreateAppConfigServiceOptions {
   memmyConfigWriter?: MemmyConfigWriter;
   memoryClient?: Pick<MemoryClient, "reloadConfig">;
   scanPreferencesStore?: ScanPreferencesStore;
-  getModelCapabilityCatalog?: () => Promise<ModelCapabilityCatalog | null>;
 }
 
 const BUILT_IN_AVATARS = AvatarOptionSchema.array().parse([
@@ -209,9 +207,7 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
       if (!options.memmyConfigWriter?.readModelConfig) {
         throw new Error("Memmy config writer is not configured");
       }
-      const config = await options.memmyConfigWriter.readModelConfig();
-      const capabilityCatalog = await options.getModelCapabilityCatalog?.();
-      return { ...config, ...(capabilityCatalog ? { capabilityCatalog } : {}) };
+      return options.memmyConfigWriter.readModelConfig();
     },
 
     async setModelConfig(input) {
@@ -220,8 +216,7 @@ export function createAppConfigService(options: CreateAppConfigServiceOptions): 
       }
       const config = await options.memmyConfigWriter.writeModelConfig(input);
       await options.memoryClient?.reloadConfig({ reason: "model_config_saved" });
-      const capabilityCatalog = await options.getModelCapabilityCatalog?.();
-      return { ...config, ...(capabilityCatalog ? { capabilityCatalog } : {}) };
+      return config;
     },
 
     async testModelConfig(input) {

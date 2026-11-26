@@ -61,7 +61,6 @@ import {
   suppressBundledPlugins
 } from "./services/bundled-plugin-bootstrap-service.js";
 import { reconcileEntitledPlugins } from "./services/plugin-entitlement-reconcile-service.js";
-import type { ModelCapabilityCatalogSyncService } from "./services/model-capability-catalog-sync-service.js";
 
 export type { BootstrapScenario };
 export { loadCloudServiceEnv };
@@ -86,8 +85,6 @@ export interface CreateLocalBackendOptions {
   runtimeConfigPath?: string;
   /** Memmy config path. Required unless MEMMY_CONFIG is set. */
   memmyConfigPath?: string;
-  /** Defaults to ~/.memmy/models.json; isolated installations and tests may override it. */
-  modelCapabilityCatalogPath?: string;
   /** Memory service address exposed to desktop and browser-debug clients. */
   memoryBaseUrl?: string;
   /** Resolves when the managed Memory service is ready for startup config reload. */
@@ -123,7 +120,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
   let collabSyncTimer: ReturnType<typeof setInterval> | undefined;
   let pluginService: PluginService | null = null;
-  let modelCapabilityCatalog: ModelCapabilityCatalogSyncService | null = null;
   let mcpBridgeRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let mcpBridgeClosed = false;
   let committingMcpBridgeWrite: Promise<void> | undefined;
@@ -208,7 +204,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       agentAdapterRegistry,
       memoryClient,
       cloudClient,
-      modelCapabilityCatalogPath: options.modelCapabilityCatalogPath,
       permissionManager,
       bootstrapScenario: options.bootstrapScenario,
       timeZone: configuredTimeZone,
@@ -225,8 +220,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       trustedBundledPluginRoots: bundledCatalog ? [bundledCatalog.trustedArtifactRoot] : undefined
     });
     pluginService = services.plugins;
-    modelCapabilityCatalog = services.modelCapabilityCatalog;
-    modelCapabilityCatalog.start();
     if (bundledCatalog) {
       const failures = await suppressBundledPlugins({
         plugins: services.plugins,
@@ -487,7 +480,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         return appStateStore.repositories.bootstrap.recordLastLaunchMode(mode);
       },
       async close() {
-        await services.modelCapabilityCatalog.stop();
         clearInterval(collabSyncTimer);
         await stopMcpBridgeWrites();
         try {
@@ -499,7 +491,6 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       }
     };
   } catch (error) {
-    await modelCapabilityCatalog?.stop();
     clearInterval(collabSyncTimer);
     await stopMcpBridgeWrites();
     await server?.close().catch(() => undefined);

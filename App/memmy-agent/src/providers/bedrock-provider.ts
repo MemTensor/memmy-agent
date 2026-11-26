@@ -323,7 +323,6 @@ export class BedrockProvider extends LLMProvider {
     temperature?: number;
     reasoningEffort?: string | null;
     toolChoice?: string | Record<string, any> | null;
-    modelCapabilities?: import("./turn-model-capabilities.js").TurnModelCapabilities;
   }): Record<string, any> {
     const modelId = BedrockProvider.stripPrefix(args.model ?? this.defaultModel);
     const [system, convertedMessages] = this.convertMessages(LLMProvider.sanitizeEmptyContent(args.messages));
@@ -332,18 +331,15 @@ export class BedrockProvider extends LLMProvider {
     const kwargs: Record<string, any> = {
       modelId,
       messages,
-      inferenceConfig: {},
+      inferenceConfig: { maxTokens: Math.max(1, args.maxTokens ?? this.generation.maxTokens) },
     };
-    const maxTokens = LLMProvider.requestMaxTokens(args, this.generation);
-    if (maxTokens !== undefined) kwargs.inferenceConfig.maxTokens = Math.max(1, maxTokens);
     if (system.length) kwargs.system = system;
     if (BedrockProvider.supportsTemperature(modelId)) kwargs.inferenceConfig.temperature = args.temperature ?? this.generation.temperature;
 
     let additional: Record<string, any> = {};
-    const reasoningEffort = LLMProvider.requestReasoningEffort(args, this.generation);
+    const reasoningEffort = args.reasoningEffort ?? this.generation.reasoningEffort;
     if (BedrockProvider.usesAdaptiveThinkingOnly(modelId)) {
-      const thinking = BedrockProvider.adaptiveThinking(reasoningEffort
-        ?? (args.modelCapabilities?.thinkingEnabled === true ? "adaptive" : undefined));
+      const thinking = BedrockProvider.adaptiveThinking(reasoningEffort);
       if (thinking) additional.thinking = thinking;
     }
     if (this.extraBodyFields) additional = deepMerge(additional, this.extraBodyFields);

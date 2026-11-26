@@ -212,7 +212,6 @@ describe("SubagentManager", () => {
 
     await sm.spawn({
       task: `Read and describe ${imagePath}`,
-      modelCapabilities: { mode: "catalog", inputModalities: ["text"] },
       workspace,
       provider,
       model: "deepseek-v4-pro",

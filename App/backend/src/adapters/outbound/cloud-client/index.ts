@@ -1,7 +1,5 @@
 export { createHttpCloudClient, type CreateHttpCloudClientOptions } from "./http-cloud-client.js";
 export type {
-  GetModelCapabilityCatalogInput,
-  ModelCapabilityCatalogResult,
   AckLotteryRewardInput,
   AckTaskTokenGiftInput,
   CheckReleaseInput,

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { OutboundMessage } from "../runtime-messages/events.js";
 import type { MessageBus } from "../runtime-messages/queue.js";
 import type { LLMProvider } from "../../providers/base.js";
-import type { LLMRuntime, LLMRuntimeResolver } from "../../utils/llm-runtime.js";
+import type { LLMRuntimeResolver } from "../../utils/llm-runtime.js";
 import { truncateText } from "../../utils/helpers.js";
 import type { ByokTokenUsageRecorderLike } from "../../integrations/byok-token-usage/recorder.js";
 import { Session, SessionManager } from "./manager.js";
@@ -25,7 +25,6 @@ export type WebuiTitleTrackInput = {
 };
 
 type PendingTitleRequest = {
-  runtime: LLMRuntime;
   chatId: string;
   sessionKey: string;
   content: string;
@@ -85,7 +84,6 @@ export class WebuiTitleService {
     if (!runtime?.provider) return;
     const sessionKey = input.sessionKey ?? `websocket:${input.chatId}`;
     this.pendingByChatId.set(input.chatId, {
-      runtime,
       chatId: input.chatId,
       sessionKey,
       content: goalObjective ?? input.content,
@@ -130,10 +128,7 @@ export class WebuiTitleService {
       const userText = firstTitleUserMessage(session) || this.firstMediaText(pending.mediaPaths);
       if (!userText) return false;
 
-      const runtime = pending.runtime.prepare
-        ? await pending.runtime.prepare({ maxTokens: TITLE_GENERATION_MAX_TOKENS, thinkingEnabled: false })
-        : pending.runtime;
-      const response = await this.requestModelTitle(runtime, userText);
+      const response = await this.requestModelTitle(pending.provider, pending.model, userText);
       this.recordTitleUsage(pending, response?.usage);
 
       const title = cleanGeneratedTitle(response?.content);
@@ -180,7 +175,7 @@ export class WebuiTitleService {
     }
   }
 
-  private async requestModelTitle(runtime: LLMRuntime, userText: string): Promise<any> {
+  private async requestModelTitle(provider: LLMProvider | any, model: string, userText: string): Promise<any> {
     const prompt = [
       "Generate a concise title for this chat.",
       "Rules:",
@@ -193,8 +188,7 @@ export class WebuiTitleService {
       `User: ${truncateText(userText, 1_000)}`,
     ].join("\n");
 
-    return runtime.provider.chatWithRetry({
-      ...(runtime.modelCapabilities ? { modelCapabilities: runtime.modelCapabilities, capabilityCatalogState: runtime.capabilityCatalogState } : {}),
+    return provider.chatWithRetry({
       messages: [
         {
           role: "system",
@@ -203,7 +197,7 @@ export class WebuiTitleService {
         { role: "user", content: prompt },
       ],
       tools: null,
-      model: runtime.model,
+      model,
       maxTokens: TITLE_GENERATION_MAX_TOKENS,
       temperature: 0.2,
       reasoningEffort: TITLE_GENERATION_REASONING_EFFORT,

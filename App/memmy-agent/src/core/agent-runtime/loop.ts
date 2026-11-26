@@ -31,14 +31,11 @@ import {
   type ModelSelectionInput,
   type ResolvedModelSelection,
 } from "../../providers/model-catalog.js";
-import { CloudModelCapabilitySchema, CloudModelThinkingConfigSchema } from "@memmy/local-api-contracts";
-import { createRuntimeModelCapabilityCatalog } from "../../providers/model-capability-catalog.js";
-import { resolveTurnModelCapabilities } from "../../providers/turn-model-capabilities.js";
+import { getModelThinkingConfig } from "@memmy/local-api-contracts";
 import type { ProviderErrorCategory } from "../../providers/provider-error-classifier.js";
 
 type UserFacingModelErrorCategory = ProviderErrorCategory | "model_failed";
 type UserFacingModelError = {
-  origin?: "model_catalog_fallback";
   category: UserFacingModelErrorCategory;
   detail?: string;
   presetId?: string;
@@ -58,7 +55,6 @@ function userFacingModelError(
 ): UserFacingModelError {
   return {
     category,
-    ...(selection?.turnCapabilities?.mode === "provider-fallback" ? { origin: "model_catalog_fallback" as const } : {}),
     ...(detail ? { detail } : {}),
     ...(selection ? {
       presetId: selection.presetId,
@@ -362,7 +358,6 @@ export class TurnContext {
 }
 
 type AgentLoopInit = {
-  modelCapabilityCatalog?: ReturnType<typeof createRuntimeModelCapabilityCatalog> | null;
   bus?: MessageBus;
   config?: Config;
   provider?: any;
@@ -753,17 +748,19 @@ function thinkingFieldsFromMetadata(metadata: Record<string, unknown> | null | u
 
 export function reasoningEffortFromTurnMetadata(
   metadata: Record<string, unknown> | null | undefined,
-  _model: string | null | undefined,
+  model: string | null | undefined,
 ): string | undefined {
-  if (metadata?.thinking_enabled === false) return "none";
-  if (typeof metadata?.thinking_level === "string" && metadata.thinking_level.trim()) {
+  if (typeof metadata?.thinking_enabled !== "boolean") return undefined;
+  const config = metadata.model_provider === "custom" ? null : getModelThinkingConfig(model);
+  const enabled = config && !config.switchable ? true : metadata.thinking_enabled;
+  if (!enabled) return "none";
+  if (typeof metadata.thinking_level === "string" && metadata.thinking_level.trim()) {
     return metadata.thinking_level;
   }
-  return undefined;
+  return "medium";
 }
 
 export class AgentLoop {
-  private readonly modelCapabilityCatalog: ReturnType<typeof createRuntimeModelCapabilityCatalog> | null;
   bus: MessageBus;
   config: Config;
   toolsConfig: Config["tools"];
@@ -868,10 +865,6 @@ export class AgentLoop {
     this.defaultSelectionSignature = defaultSelectionSignature(Array.isArray(this.providerSignature) ? this.providerSignature : null);
     this.runtimeModelPublisher = init.runtimeModelPublisher ?? null;
     this.modelSelectionResolver = init.modelSelectionResolver ?? null;
-    // An injected standalone Provider owns its configuration; managed model selections use the public catalog.
-    this.modelCapabilityCatalog = init.modelCapabilityCatalog !== undefined
-      ? init.modelCapabilityCatalog
-      : init.provider && !init.modelSelectionResolver ? null : createRuntimeModelCapabilityCatalog();
     this.extraHooks = [...(init.hooks ?? [])];
     this.bus = init.bus ?? new MessageBus();
     const initConfig = init.config ?? new Config();
@@ -999,21 +992,9 @@ export class AgentLoop {
       dagQueue: this.sessionDagQueue,
       dagCatchupTimeoutMs: this.config.sessionDag.compactionCatchupTimeoutMs,
     });
-    this.autoCompact = new AutoCompact(this.sessions, this.consolidator, init.sessionTtlMinutes ?? defaults.sessionTtlMinutes,
-      this.modelCapabilityCatalog ? async (sessionKey) => {
-        const session = this.sessions.loadSession(sessionKey);
-        const selected = this.resolveTurnModelSelection(this.persistedSessionSelection(session));
-        if (!selected) throw new SessionWorkspaceError("model_selection_unavailable");
-        const prepared = await this.prepareTurnModelSelection(selected, {});
-        return this.consolidator.withProviderSnapshot(prepared.snapshot.provider, prepared.model,
-          prepared.snapshot.contextWindowTokens, prepared.turnCapabilities, prepared.capabilityCatalogState);
-      } : undefined);
+    this.autoCompact = new AutoCompact(this.sessions, this.consolidator, init.sessionTtlMinutes ?? defaults.sessionTtlMinutes);
     this.dream = this.fileMemoryEnabled
       ? new Dream({
-          resolveRuntime: () => {
-            const runtime = this.llmRuntime();
-            return runtime.prepare ? runtime.prepare() : Promise.resolve(runtime);
-          },
           toolResultCompressionEnabled: this.toolResultCompressionEnabled,
           store: this.context.memory,
           provider: this.provider,
@@ -1045,7 +1026,7 @@ export class AgentLoop {
   }
 
   llmRuntime(modelPreset?: string | null): LLMRuntime {
-    if (!this.modelCapabilityCatalog && !this.modelSelectionResolver && modelPreset === undefined) {
+    if (!this.modelSelectionResolver && modelPreset === undefined) {
       this.refreshProviderSnapshot();
       return new LLMRuntime(this.provider, this.model ?? "");
     }
@@ -1053,20 +1034,7 @@ export class AgentLoop {
       ...(modelPreset !== undefined ? { requestedPreset: modelPreset } : {}),
     });
     if (!selection) throw new SessionWorkspaceError("model_selection_unavailable");
-    return new LLMRuntime({
-      provider: selection.snapshot.provider, model: selection.snapshot.model,
-      ...(this.modelCapabilityCatalog ? { prepare: async (options: { maxTokens?: number; thinkingEnabled?: boolean } = {}) => {
-        const prepared = await this.prepareTurnModelSelection(selection,
-          options.thinkingEnabled !== undefined ? { thinking_enabled: options.thinkingEnabled } : {});
-        const capabilities = prepared.turnCapabilities!;
-        return new LLMRuntime({
-          provider: prepared.snapshot.provider, model: prepared.model,
-          modelCapabilities: Object.freeze({ ...capabilities,
-            ...(options.maxTokens !== undefined ? { taskMaxTokens: options.maxTokens } : {}) }),
-          capabilityCatalogState: prepared.capabilityCatalogState,
-        });
-      } } : {}),
-    });
+    return new LLMRuntime(selection.snapshot.provider, selection.snapshot.model);
   }
 
   static fromConfig(config: Config, bus: MessageBus = new MessageBus(), extra: AgentLoopInit = {}): AgentLoop {
@@ -1189,8 +1157,6 @@ export class AgentLoop {
         modelPreset: selection.preset,
         modelProvider: selection.provider,
         actualModelContext: persistedModelSelection(selection),
-        modelCapabilities: selection.turnCapabilities,
-        capabilityCatalogState: selection.capabilityCatalogState,
       }),
     };
   }
@@ -1855,12 +1821,11 @@ export class AgentLoop {
   }
 
   replayTokenBudget(modelSelection: ResolvedModelSelection | null = null): number {
-    if (modelSelection?.turnCapabilities && (!modelSelection.turnCapabilities.contextWindowTokens || !modelSelection.turnCapabilities.maxTokens)) return 0;
     const contextWindowTokens = modelSelection?.snapshot.contextWindowTokens
       ?? this.contextWindowTokens;
     const provider = modelSelection?.snapshot.provider ?? this.provider;
     if (contextWindowTokens <= 0) return 0;
-    const reserved = Number(modelSelection?.turnCapabilities?.maxTokens ?? provider?.generation?.maxTokens ?? 4096);
+    const reserved = Number(provider?.generation?.maxTokens ?? 4096);
     const budget = contextWindowTokens
       - Math.max(1, reserved)
       - CONTEXT_SAFETY_BUFFER_TOKENS;
@@ -2645,39 +2610,6 @@ export class AgentLoop {
     } catch {
       return null;
     }
-  }
-
-  private async prepareTurnModelSelection(selection: ResolvedModelSelection, metadata: Record<string, any>, signal?: AbortSignal | null): Promise<ResolvedModelSelection> {
-    if (!this.modelCapabilityCatalog) return selection;
-    const state = await this.modelCapabilityCatalog.load(signal ?? undefined);
-    const preset = this.config.modelPresets[selection.presetId];
-    const raw = preset as unknown as Record<string, any> | undefined;
-    const configuration = selection.capabilityConfig ?? {
-      ...(raw?.custom === true || preset?.provider === "custom" ? { customConfig: {
-        ...preset.explicitTokenSettings,
-        ...(preset.inputModalities ? { inputModalities: CloudModelCapabilitySchema.shape.inputModalities.parse(preset.inputModalities) } : {}),
-        ...(raw?.thinking ? { thinking: CloudModelThinkingConfigSchema.parse(raw.thinking) } : {}),
-      } } : {}),
-      explicitGeneration: { ...this.config.agents.defaults.explicitTokenSettings, ...preset?.explicitTokenSettings, reasoningEffort: preset?.reasoningEffort },
-      agentReasoningEffort: this.config.agents.defaults.reasoningEffort,
-    };
-    const capabilities = resolveTurnModelCapabilities({
-      state, model: selection.model,
-      providerReasoningEffort: selection.snapshot.provider?.generation?.reasoningEffort,
-      ...configuration,
-      // The frontend sends only explicit choices; resolve defaults from this turn's catalog.
-      sessionThinking: {
-        ...(typeof metadata.thinking_enabled === "boolean" ? { enabled: metadata.thinking_enabled } : {}),
-        ...(typeof metadata.thinking_level === "string" ? { level: metadata.thinking_level } : {}),
-      },
-    });
-    return Object.freeze({
-      ...selection,
-      inputModalities: capabilities.inputModalities as ResolvedModelSelection["inputModalities"],
-      snapshot: Object.freeze({ ...selection.snapshot, contextWindowTokens: capabilities.contextWindowTokens ?? 0 }),
-      turnCapabilities: capabilities,
-      capabilityCatalogState: state,
-    });
   }
 
   private persistedSessionSelection(session: Session | null): ModelSelectionInput {
@@ -3917,11 +3849,6 @@ export class AgentLoop {
       outputUserText?: string | null;
     } = {},
   ): Promise<AgentLoopResult> {
-    if (this.modelCapabilityCatalog && !modelSelection?.turnCapabilities) {
-      const selected = modelSelection ?? this.resolveTurnModelSelection({});
-      if (!selected) throw new SessionWorkspaceError("model_selection_unavailable");
-      modelSelection = await this.prepareTurnModelSelection(selected, metadata, abortSignal);
-    }
     if (!modelSelection) this.refreshProviderSnapshot();
     this.syncSubagentRuntimeLimits();
     const activeProvider = modelSelection?.snapshot.provider ?? this.provider;
@@ -3993,8 +3920,6 @@ export class AgentLoop {
     } : {}, sessionWorkspace, outputUserText);
     const result = await this.runner.run(
       new AgentRunSpec({
-        modelCapabilities: modelSelection?.turnCapabilities,
-        capabilityCatalogState: modelSelection?.capabilityCatalogState,
         messages: initialMessages,
         finalResponseContinuation: (response) => taskPlanContinuation(response) ?? deliveryContinuation(response),
         privateSkillRefs: session?.metadata?.privatePluginSkillRefs,
@@ -4010,7 +3935,7 @@ export class AgentLoop {
         maxIterationsFinalPrompt: renderTemplate("agent/max-iterations-final-response.md", { strip: true }),
         maxTokens: activeProvider?.generation?.maxTokens ?? this.config.agents.defaults.maxTokens,
         temperature: activeProvider?.generation?.temperature ?? this.config.agents.defaults.temperature,
-        reasoningEffort: modelSelection?.turnCapabilities ? modelSelection.turnCapabilities.reasoningEffort : reasoningEffortFromTurnMetadata(metadata, activeModel)
+        reasoningEffort: reasoningEffortFromTurnMetadata(metadata, activeModel)
           ?? activeProvider?.generation?.reasoningEffort
           ?? this.config.agents.defaults.reasoningEffort,
         maxToolResultChars: this.maxToolResultChars,
@@ -4169,7 +4094,7 @@ export class AgentLoop {
       msg.metadata ?? {},
       "model_preset",
     );
-    let modelSelection = this.resolveTurnModelSelection({
+    const modelSelection = this.resolveTurnModelSelection({
       ...(hasRequestedPreset
         ? {
             requestedPreset: typeof msg.metadata?.model_preset === "string"
@@ -4179,15 +4104,12 @@ export class AgentLoop {
         : this.persistedSessionSelection(existingSession)),
     });
     if (!modelSelection) throw new SessionWorkspaceError("model_selection_unavailable");
-    modelSelection = await this.prepareTurnModelSelection(modelSelection, msg.metadata ?? {}, ctx.abortSignal);
     ctx.modelSelection = modelSelection;
-    ctx.consolidator = this.modelSelectionResolver || modelSelection.turnCapabilities
+    ctx.consolidator = this.modelSelectionResolver
       ? this.consolidator.withProviderSnapshot(
           modelSelection.snapshot.provider,
           modelSelection.snapshot.model,
           modelSelection.snapshot.contextWindowTokens,
-          modelSelection.turnCapabilities,
-          modelSelection.capabilityCatalogState,
         )
       : this.consolidator;
     msg = ctx.msg = new InboundMessage({
@@ -4779,7 +4701,7 @@ export class AgentLoop {
       msg.metadata ?? {},
       "model_preset",
     );
-    let modelSelection = this.resolveTurnModelSelection({
+    const modelSelection = this.resolveTurnModelSelection({
       ...(hasRequestedPreset
         ? {
             requestedPreset: typeof msg.metadata?.model_preset === "string"
@@ -4789,14 +4711,11 @@ export class AgentLoop {
         : this.persistedSessionSelection(existingSession)),
     });
     if (!modelSelection) throw new SessionWorkspaceError("model_selection_unavailable");
-    modelSelection = await this.prepareTurnModelSelection(modelSelection, msg.metadata ?? {}, abortSignal);
-    const scopedConsolidator = this.modelSelectionResolver || modelSelection.turnCapabilities
+    const scopedConsolidator = this.modelSelectionResolver
       ? this.consolidator.withProviderSnapshot(
           modelSelection.snapshot.provider,
           modelSelection.snapshot.model,
           modelSelection.snapshot.contextWindowTokens,
-          modelSelection.turnCapabilities,
-          modelSelection.capabilityCatalogState,
         )
       : this.consolidator;
     msg = new InboundMessage({
@@ -5781,13 +5700,6 @@ export class AgentLoop {
   }
 
   private async runMessageLoop(startedAt: number): Promise<void> {
-    if (this.modelCapabilityCatalog) {
-      try {
-        await this.modelCapabilityCatalog.load();
-      } catch {
-        console.warn("Model catalog unavailable at startup; turns will coordinate synchronization with the local Backend");
-      }
-    }
     await this.initializeRuntimeTools();
     this.reportStartupStage("runtime-tools-ready", startedAt);
     if (!this.running || this.runtimeToolsClosed) return;

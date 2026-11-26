@@ -1,5 +1,4 @@
 import type { LLMProvider } from "../providers/base.js";
-import type { LLMRuntime } from "./llm-runtime.js";
 import { renderTemplate } from "./prompt-templates.js";
 
 export const EVALUATE_TOOL = [
@@ -28,15 +27,10 @@ export async function evaluateResponse(
   taskContext = "",
   provider?: LLMProvider | null,
   model = "",
-  runtime?: LLMRuntime,
 ): Promise<boolean> {
   if (!provider) return Boolean(response?.trim());
   try {
     const llmResponse = await provider.chatWithRetry({
-      ...(runtime?.modelCapabilities ? {
-        modelCapabilities: Object.freeze({ ...runtime.modelCapabilities, taskMaxTokens: 256 }),
-        capabilityCatalogState: runtime.capabilityCatalogState,
-      } : {}),
       messages: [
         { role: "system", content: renderTemplate("agent/evaluator.md", { part: "system" }) },
         {

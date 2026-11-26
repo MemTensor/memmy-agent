@@ -1,4 +1,4 @@
-import type { LLMRuntime, LLMRuntimeResolver } from "../../../utils/llm-runtime.js";
+import type { LLMRuntimeResolver } from "../../../utils/llm-runtime.js";
 import type { MemmyOutputLanguage } from "../../../memmy-memory/discovery.js";
 import { normalizeOutputLanguage } from "@memmy/local-api-contracts";
 import { redactSensitive } from "./summarize-history.js";
@@ -145,16 +145,6 @@ export async function writeSegmentNarrative(
     return null;
   }
 
-  let runtime: LLMRuntime;
-  try {
-    const captured = request.modelPreset ? llmRuntime(request.modelPreset) : llmRuntime();
-    runtime = captured.prepare ? await captured.prepare({ maxTokens: MAX_TOKENS, thinkingEnabled: false }) : captured;
-  } catch (error) {
-    request.onError?.(error instanceof Error ? error.message : String(error));
-    return null;
-  }
-  const capabilities = runtime.modelCapabilities;
-
   const span = request.window === "6h" ? "six-hour grouping interval" : "ten-minute grouping interval";
   const priorCandidates = (request.priorSummaries ?? []).slice(-2)
     .map((summary) => summary.slice(0, MAX_PRIOR_SUMMARY_CHARS).trim())
@@ -232,8 +222,9 @@ export async function writeSegmentNarrative(
   }
 
   try {
+    // An absent preset must remain undefined so the resolver uses its default.
+    const runtime = request.modelPreset ? llmRuntime(request.modelPreset) : llmRuntime();
     const response = await runtime.provider.chatWithRetry({
-      ...(capabilities ? { modelCapabilities: capabilities, capabilityCatalogState: runtime.capabilityCatalogState } : {}),
       messages: messages(),
       tools: null,
       model: runtime.model,

@@ -745,11 +745,11 @@ export function thinkingPayloadForSend(
 ): { thinkingEnabled?: boolean; thinkingLevel?: string | null } {
   const config = resolveThinkingConfigForModel(workspace, candidate);
   if (!config) return {};
-  // Runtime resolves defaults and validates saved choices against its own turn snapshot.
-  return {
-    ...(sessionThinking?.enabled !== undefined ? { thinkingEnabled: sessionThinking.enabled } : {}),
-    ...(sessionThinking?.level !== undefined ? { thinkingLevel: sessionThinking.level } : {})
-  };
+  const thinkingEnabled = resolveThinkingEnabled(config, sessionThinking?.enabled);
+  const thinkingLevel = thinkingEnabled
+    ? resolveThinkingLevel(config, sessionThinking?.level)
+    : null;
+  return { thinkingEnabled, thinkingLevel };
 }
 
 export async function submitAgentComposerMessage(input: SubmitAgentComposerMessageInput): Promise<boolean> {
