@@ -1084,6 +1084,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
   const hotzoneRegistryRef = useRef<Map<string, HTMLElement>>(new Map());
   const refCacheRef = useRef<Map<string, (element: HTMLElement | null) => void>>(new Map());
   const lastMainRouteSessionIdRef = useRef<string | null>(null);
+  const pendingRecordingStartRef = useRef<Promise<void> | null>(null);
   const recordingSubmitInFlightRef = useRef(false);
   const runningSessionItemsRef = useRef<MiniTaskListItem[]>([]);
   const focusedTaskRef = useRef<Task | null>(null);
@@ -1269,10 +1270,14 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
     };
   }, [bus, memmyAgentClient, runningSessionReconcileKey, t]);
 
+  // The recorder also cancels pending work when its client changes or the pet unmounts.
+  useEffect(() => () => { pendingRecordingStartRef.current = null; }, [cancelAsrRecording]);
+
   /**
    * Resets the pet input state.
    */
   const resetPetInputState = useCallback(() => {
+    pendingRecordingStartRef.current = null;
     cancelAsrRecording();
     recordingSubmitInFlightRef.current = false;
     setTextInput("");
@@ -1413,7 +1418,7 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
    * Starts pet voice recording.
    */
   const startRecording = useCallback(() => {
-    if (recordingSubmitInFlightRef.current || asrRecorder.isStarting) {
+    if (recordingSubmitInFlightRef.current || pendingRecordingStartRef.current) {
       return;
     }
 
@@ -1421,18 +1426,25 @@ export function PetPageView({ bus, mainRoute = "/main", onNavigate, onPetWindowC
     setHasInteracted(true);
     setIsActiveSuppressed(false);
     markActivity();
-    void asrRecorder.start()
-      .then(() => {
+    const start = asrRecorder.start();
+    pendingRecordingStartRef.current = start;
+    void start.then(
+      () => {
+        if (pendingRecordingStartRef.current !== start) return;
+        pendingRecordingStartRef.current = null;
         setIsRecording(true);
         setIsPaused(false);
         setRecordSeconds(0);
-      })
-      .catch((error: unknown) => {
+      },
+      (error: unknown) => {
+        if (pendingRecordingStartRef.current !== start) return;
+        pendingRecordingStartRef.current = null;
         setIsRecording(false);
         setIsRecordingSubmitting(false);
         setIsPaused(false);
         setTextInput(toReadableAsrError(error, t));
-      });
+      }
+    );
   }, [asrRecorder, markActivity, t]);
 
   /**
