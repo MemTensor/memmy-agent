@@ -14,11 +14,8 @@ import {
   applyNarrative,
   compactEventEvidence,
   isNarrated,
-  writeSegmentNarrative,
   type WeChatNameMap,
 } from "./summary-writer.js";
-import type { LLMRuntimeResolver } from "../../../utils/llm-runtime.js";
-import { discoverMemmyOutputLanguage, type MemmyOutputLanguage } from "../../../memmy-memory/discovery.js";
 import { readHistoryPermissions, openHistoryPermission, type HistoryPermissions, type HistoryPermission } from "./permissions.js";
 import {
   alignedId,
@@ -119,7 +116,7 @@ export interface ComputerHistoryEntry {
   markdown: string;
   filePath: string;
   /** Whether the readable account covers the latest available source version. */
-  summaryStatus?: "ready" | "pending";
+  summaryStatus?: "ready" | "pending" | "skipped";
   replayPlan?: ComputerHistoryReplayPlan | null;
 }
 
@@ -210,8 +207,6 @@ const RECORDER_RECONNECT_DELAYS_MS = [500, 1_500, 5_000] as const;
 const RECORDER_RECONNECT_STABLE_MS = 60_000;
 const RECORDER_EXIT_DRAIN_MS = 1_000;
 const SEGMENTS_DIRECTORY_NAME = "segments";
-// Enough of a stream that a summary of it says something.
-const LIVE_NARRATION_MIN_BYTES = 4_000;
 const CAPTURE_HEARTBEAT_TIMEOUT_MS = 60_000;
 const CAPTURE_ISSUE_RECOVERY_MS = 30_000;
 const RECORDER_HEALTH_PREFIX = "[recorder-health] ";
@@ -254,8 +249,6 @@ function completeRawEvidence(raw: Buffer): string {
   // treating a truncated line as a complete source version.
   return compactEventEvidence(text.split("\n"), { purpose: "retention" });
 }
-// How many preceding windows the model is shown, so it can relate this one to them.
-const PRIOR_SUMMARY_COUNT = 2;
 // Reads retry every poll; only this many failures in a row ask the user to reconnect.
 const WECHAT_READ_FAILURES_BEFORE_ERROR = 4;
 // The saved keys no longer open the databases, so retrying cannot recover.
@@ -263,11 +256,8 @@ const WECHAT_KEY_FAILURES = new Set(["database_key_rejected", "database_key_miss
 // A pinned segment keeps its raw events past the retention window.
 const PIN_MARKER = ".pinned";
 
-// Six-hour rollups reuse completed ten-minute summaries, but are narrated only
-// after the whole local window closes.
-
-
 interface MarkdownEntry {
+  revision: string;
   id: string;
   title: string;
   description: string | null;
@@ -426,15 +416,6 @@ function isHistoryStreamDisconnect(message: string): boolean {
   return /(?:^|\n)Memmy (?:Computer (?:History stream disconnected unexpectedly|Use\.app closed the History connection)|Windows History stream disconnected unexpectedly)\.(?:\r?$)/m.test(message);
 }
 
-/** Whether the summary on disk has already been written by the model. */
-function isSummaryWritten(file: string): boolean {
-  try {
-    return isNarrated(fs.readFileSync(file, "utf8"));
-  } catch {
-    return false;
-  }
-}
-
 function boundedInterval(value: string | undefined, fallback: number, minimum: number, maximum: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -487,25 +468,9 @@ export class ComputerHistoryDemoService {
   private readonly skillGroupCache = new Map<string, { revision: string; group: HistorySkillGroup | null }>();
   private readonly applicationIcons: ApplicationIconReader;
   private readonly windowsApplicationIcons: WindowsApplicationIconReader;
-  private llmRuntime: LLMRuntimeResolver | null = null;
-  private readonly summaryLanguage: () => MemmyOutputLanguage | undefined;
-  /** Coalesce only an active pass, so failures remain eligible for retry. */
-  private backfill: Promise<number> | null = null;
-  private summaryRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private shuttingDown = false;
-  /** A deletion or a newer input invalidates every older model response. */
-  private readonly summaryVersions = new Map<string, number>();
-  private readonly summaryJobs = new Map<string, {
-    version: number;
-    runtime: LLMRuntimeResolver;
-    language: MemmyOutputLanguage | undefined;
-    promise: Promise<boolean>;
-  }>();
   private narrationError: string | null = null;
-  private narrationErrorCategory: "quota_exhausted" | null = null;
   private modelSource: "account" | "byok" | null = null;
-  /** Coalesce open-segment narration without suppressing later input versions. */
-  private readonly narratedOpenSegments = new Set<string>();
   private readonly markdownCache = new Map<string, Map<string, CachedEntry>>();
   private permissions: HistoryPermissions | undefined;
   private readonly permissionReader: typeof readHistoryPermissions;
@@ -547,8 +512,6 @@ export class ComputerHistoryDemoService {
     observationSettingsFile?: string;
     weChatConsentFile?: string;
     permissionReader?: typeof readHistoryPermissions;
-    /** Read at request and commit time so App language changes need no recorder restart. */
-    summaryLanguage?: () => MemmyOutputLanguage | undefined;
   } = {}) {
     this.recorderScript = input.recorderScript ?? moduleFile("record-human-history.js");
     const memmyHome = process.env.MEMMY_HOME?.trim() || path.join(os.homedir(), ".memmy");
@@ -564,7 +527,6 @@ export class ComputerHistoryDemoService {
     this.applicationIcons = new ApplicationIconReader();
     this.windowsApplicationIcons = new WindowsApplicationIconReader();
     this.permissionReader = input.permissionReader ?? readHistoryPermissions;
-    this.summaryLanguage = input.summaryLanguage ?? discoverMemmyOutputLanguage;
     this.liveSummaryIntervalMs = boundedInterval(
       process.env.MEMMY_COMPUTER_HISTORY_LIVE_SUMMARY_INTERVAL_MS,
       60_000,
@@ -947,7 +909,7 @@ export class ComputerHistoryDemoService {
         throw error;
       }
       if (this.observationState === "running") this.startWeChatPolling();
-      if (this.llmRuntime) this.retrySummariesInBackground();
+      this.memoryAdapter.schedule();
     } else {
       this.weChatConsent.revoke();
       this.clearWeChatPolling();
@@ -1075,10 +1037,9 @@ export class ComputerHistoryDemoService {
       const appended = appendWeChatMessagesToHistory(this.segmentsDirectory,
         segment.eventsFile, batch.messages);
       reader.acknowledge(batch.nextCursor, batch.consentId);
-      // Refreshing the name map can repair an earlier raw id, so re-narrate the
-      // segment when names improved even if no new message was appended.
+      // Refresh the evidence when the reader resolves a previously unknown name.
       const namesChanged = this.persistWeChatNames(batch.names);
-      if (appended || namesChanged) this.invalidateSummary(segment.historyFile);
+      if (appended || namesChanged) this.liveSummarySignature = null;
       this.weChatError = null;
       this.weChatReadFailures = 0;
     } catch (error) {
@@ -1120,34 +1081,6 @@ export class ComputerHistoryDemoService {
     this.weChatPollTimer = null;
   }
 
-  /**
-   * The summaries immediately before this one, oldest first.
-   *
-   * Without them the model has nothing to relate a window to, and any account
-   * of what preceded it would be invention.
-   */
-  private priorSummaries(historyId: string): string[] {
-    let names: string[];
-    try {
-      names = fs.readdirSync(this.historyDirectory);
-    } catch {
-      return [];
-    }
-    return names
-      .filter((name) => name.endsWith("-10min-summary.md") && name < `${historyId}.md`)
-      .sort()
-      .slice(-PRIOR_SUMMARY_COUNT)
-      .map((name) => {
-        try {
-          return fs.readFileSync(path.join(this.historyDirectory, name), "utf8");
-        } catch {
-          return "";
-        }
-      })
-      .filter((markdown) => markdown && isNarrated(markdown)
-        && (this.weChatConsent.read().enabled || !markdown.includes("com.tencent.xinWeChat")));
-  }
-
   /** An application's icon for the timeline, as a data URL. */
   applicationIcon(bundleId: string): Promise<string | null> {
     return isWindows11()
@@ -1176,8 +1109,12 @@ export class ComputerHistoryDemoService {
   }
 
   private memoryEvidence(): HistoryEvidence[] {
+    this.recoverInterruptedSegments();
+    this.recoverStagedEvidence();
+    this.realignRollups();
+    const chatEnabled = this.weChatConsent.read().enabled;
     return this.readMarkdownDirectory(this.historyDirectory)
-      .filter((entry) => isNarrated(entry.markdown) && (
+      .filter((entry) => entry.filePath !== this.segment?.historyFile && (chatEnabled || !this.containsChatEvidence(entry)) && (
         (entry.summaryWindow === "10min"
           && readSourceType(entry.markdown) === "captured"
           && readFrontmatterValue(entry.markdown, "status") === "completed")
@@ -1190,12 +1127,18 @@ export class ComputerHistoryDemoService {
       .flatMap((entry) => {
         const start = instantFromId(entry.id);
         if (!start) return [];
-        const content = entry.markdown.replace(/^---\n[\s\S]*?\n---\n/u, "").trim().slice(0, 16_000);
+        const body = entry.markdown.replace(/^---\n[\s\S]*?\n---\n/u, "");
+        const legacyNarrative = readFrontmatterValue(entry.markdown, "summary_state") === "ready";
+        // The aggregate worker reads its processed parents by ID. Supplying raw
+        // child text here would feed skipped observations back into that worker.
+        const content = entry.summaryWindow === "6h" && !legacyNarrative
+          ? `Activity window starting ${start.toISOString()} with ${entry.coveredHistoryIds.length} captured segments.`
+          : (legacyNarrative ? body : body.split(/^## Citations[ \t]*$/mu)[0]).trim().slice(0, 16_000);
         if (!content) return [];
         const windowMs = entry.summaryWindow === "6h" ? SIX_HOUR_MS : SEGMENT_DURATION_MS;
         return [{ id: entry.id, title: entry.title.slice(0, 160),
-          summary: historyEvidenceSummary(entry.markdown, entry.description), content,
-          revision: fs.statSync(entry.filePath).mtime.toISOString(),
+          summary: legacyNarrative ? historyEvidenceSummary(entry.markdown, entry.description) : undefined, content,
+          revision: entry.revision,
           startedAt: start.toISOString(), endedAt: new Date(start.getTime() + windowMs).toISOString(),
           applications: entry.applications,
           summaryWindow: entry.summaryWindow ?? "10min",
@@ -1205,16 +1148,21 @@ export class ComputerHistoryDemoService {
         || left.startedAt.localeCompare(right.startedAt));
   }
 
+  private containsChatEvidence(entry: MarkdownEntry): boolean {
+    return entry.markdown.includes("com.tencent.xinWeChat") || entry.applications.some((app) =>
+      ["com.tencent.xinwechat", "com.tencent.wechat", "win32.wechat", "win32.weixin"].includes(app.toLowerCase()));
+  }
+
   private memorySkillGroups(): HistorySkillGroup[] {
     const entries = this.readMarkdownDirectory(this.historyDirectory);
     const byId = new Map(entries.map((entry) => [entry.id, entry]));
     return entries.filter((entry) => entry.summaryWindow === "6h"
-      && readSourceType(entry.markdown) === "rollup" && isNarrated(entry.markdown)
+      && readSourceType(entry.markdown) === "rollup"
       && entry.coveredHistoryIds.length >= 2)
       .flatMap((rollup) => {
         const at = instantFromId(rollup.id);
         if (!at || !isSixHourWindowClosed(at)) return [];
-        const revision = fs.statSync(rollup.filePath).mtime.toISOString();
+        const revision = rollup.revision;
         const cached = this.skillGroupCache.get(rollup.id);
         if (cached?.revision === revision) return cached.group ? [cached.group] : [];
         const allSources = rollup.coveredHistoryIds.flatMap((id) => {
@@ -1255,126 +1203,36 @@ export class ComputerHistoryDemoService {
     if (changed) atomicWriteText(this.skillLinksFile, JSON.stringify(links));
   }
 
-  /** Supplies the model used to narrate finalized segments. */
-  setLlmRuntime(
-    llmRuntime: LLMRuntimeResolver | null,
-    source: "account" | "byok" | null = null,
-    unavailableReason: string | null = null,
-  ): void {
+  setSummaryModelSource(source: "account" | "byok" | null): void {
     this.modelSource = source;
-    if (this.llmRuntime !== llmRuntime) {
-      this.backfill = null;
-      this.summaryJobs.clear();
-      this.narratedOpenSegments.clear();
-      this.setNarrationError(null);
-    }
-    this.llmRuntime = llmRuntime;
-    if (!llmRuntime && unavailableReason) this.setNarrationError(unavailableReason);
-    if (this.summaryRetryTimer) clearTimeout(this.summaryRetryTimer);
-    this.summaryRetryTimer = null;
-    if (!llmRuntime || this.shuttingDown) return;
-    // Realign first so the rebuilt rollups are among what the backfill writes.
-    this.realignRollups();
-    this.retrySummariesInBackground();
-    if (this.segment && this.observationState === "running") this.writeLiveSummary(this.segment);
   }
 
-  private setNarrationError(reason: string | null, category?: "quota_exhausted"): void {
+  private setNarrationError(reason: string | null): void {
     this.narrationError = reason;
-    this.narrationErrorCategory = category ?? null;
   }
 
-  private retrySummariesInBackground(): void {
-    if (!this.llmRuntime || this.shuttingDown) return;
-    void this.backfillUnwrittenSummaries().catch((error) => {
-      this.setNarrationError(error instanceof Error ? error.message : String(error));
-    }).finally(() => {
-      if (!this.llmRuntime || this.shuttingDown || this.summaryRetryTimer) return;
-      this.summaryRetryTimer = setTimeout(() => {
-        this.summaryRetryTimer = null;
-        this.retrySummariesInBackground();
-      }, 60_000);
-      this.summaryRetryTimer.unref();
-    });
-  }
-
-  /**
-   * Writes every machine summary the model never got to.
-   *
-   * A summary is only shown once written, so one the model never reached is not
-   * merely plainer — it is absent from the timeline. That covers summaries from
-   * before narration wrote the whole body, and any left behind by a model that
-   * was unreachable at the time. Runs when the runtime arrives, one at a time,
-   * so a backlog does not go out as a burst of concurrent requests.
-   */
-  async backfillUnwrittenSummaries(): Promise<number> {
-    if (!this.llmRuntime) return 0;
-    if (this.backfill) return this.backfill;
-    const pending = this.writeUnwrittenSummaries();
-    this.backfill = pending;
-    try {
-      return await pending;
-    } finally {
-      if (this.backfill === pending) this.backfill = null;
-    }
-  }
-
-  private async writeUnwrittenSummaries(): Promise<number> {
-    this.recoverInterruptedSegments();
-    let written = 0;
-    const runtime = this.llmRuntime;
-    const entries = this.readMarkdownDirectory(this.historyDirectory).reverse();
-    // A failed replacement keeps its full evidence beside the standing entry.
-    // Include those files after a restart as well as ordinary pending entries.
-    const pending = new Map(entries.map((entry) => [entry.filePath, entry.filePath]));
-    if (fs.existsSync(this.historyDirectory)) {
-      for (const name of fs.readdirSync(this.historyDirectory)) {
-        if (!name.endsWith(".md.staging")) continue;
-        const staged = path.join(this.historyDirectory, name);
-        pending.set(staged.slice(0, -".staging".length), staged);
-      }
-    }
-    // Finish ten-minute evidence before deriving its six-hour account.
-    const files = [...pending.entries()].sort(([left], [right]) => (
-      Number(left.endsWith("-6h-summary.md")) - Number(right.endsWith("-6h-summary.md"))
-        || left.localeCompare(right)
-    ));
-    const rollups = new Map<string, string>();
-    for (const [destination, file] of files) {
-      if (this.shuttingDown || this.llmRuntime !== runtime) break;
-      const id = path.basename(destination, ".md");
-      if (id.endsWith("-6h-summary")) {
-        rollups.set(destination, file);
+  /** Earlier releases left newer evidence beside the last narrated Markdown. */
+  private recoverStagedEvidence(): void {
+    if (!fs.existsSync(this.historyDirectory)) return;
+    for (const name of fs.readdirSync(this.historyDirectory)) {
+      if (!name.endsWith("-10min-summary.md.staging") && !name.endsWith("-6h-summary.md.staging")) continue;
+      const staged = path.join(this.historyDirectory, name);
+      const file = staged.slice(0, -".staging".length);
+      const markdown = readText(staged);
+      if (!markdown || file === this.segment?.historyFile) continue;
+      if (fs.existsSync(file) && fs.statSync(staged).mtimeMs < fs.statSync(file).mtimeMs) {
+        fs.rmSync(staged, { force: true });
         continue;
       }
-      const markdown = readText(file);
-      if (!markdown) continue;
-      const entry = { id, filePath: destination, markdown };
-      if (isCodexSkysightCopy(entry.id)) continue;
-      if (!isMachineSummary(readSourceType(entry.markdown))) continue;
-      if (file === destination && isNarrated(entry.markdown)) continue;
-      // The open segment is still being written to; it is narrated in place.
-      if (entry.filePath === this.segment?.historyFile) continue;
-      if (await this.writeSummaryWith(file, "10min", this.eventStreamPathFor(entry.id))) {
-        written += 1;
-      }
+      if (name.endsWith("-6h-summary.md.staging")) {
+        if (readSourceType(markdown) !== "rollup") continue;
+        if (!this.preservesRollupCoverage(file, markdown)) {
+          fs.rmSync(staged, { force: true });
+          continue;
+        }
+      } else if (readSourceType(markdown) !== "captured" || readFrontmatterValue(markdown, "status") !== "completed") continue;
+      fs.renameSync(staged, file);
     }
-    if (this.shuttingDown || this.llmRuntime !== runtime) return written;
-    // Include windows whose ten-minute entries were already ready before this
-    // process started. Retrying only newly narrated entries left missing and
-    // legacy rollups stranded forever. Stable input hashes avoid model churn.
-    for (const file of this.prepareRollups()) {
-      rollups.set(file.replace(/\.staging$/u, ""), file);
-    }
-    for (const [destination, file] of rollups) {
-      if (this.shuttingDown || this.llmRuntime !== runtime) break;
-      const markdown = readText(file);
-      if (!markdown || !isMachineSummary(readSourceType(markdown))) continue;
-      if (file === destination && isNarrated(markdown)) continue;
-      if (await this.writeSummaryWith(file, "6h", null)) written += 1;
-    }
-    this.removeSupersededRollups();
-    return written;
   }
 
   /** Lightweight status for the menu bar; avoids reading summaries and Skill links. */
@@ -1394,7 +1252,7 @@ export class ComputerHistoryDemoService {
     const historyEntries = this.readMarkdownDirectory(this.historyDirectory);
     const currentId = this.segment ? `${this.segment.id}-10min-summary` : null;
     const standingCurrent = historyEntries.find((entry) => entry.id === currentId);
-    const currentRaw = (!standingCurrent || !isNarrated(standingCurrent.markdown)) ? this.currentRawHistory() : null;
+    const currentRaw = standingCurrent ? null : this.currentRawHistory();
     const skillIdsByHistory = this.readSkillLinks();
     return {
       memorySync: this.memoryAdapter.status(),
@@ -1405,32 +1263,29 @@ export class ComputerHistoryDemoService {
         segmentStartedAt: this.segment?.startedAt ?? null,
         error: this.observationError,
         narrationError: this.narrationError,
-        narrationErrorCategory: this.narrationErrorCategory,
+        narrationErrorCategory: null,
         modelSource: this.modelSource,
         ...(this.permissions ? { permissions: this.permissions } : {}),
         captureHealth: this.captureHealth(),
       },
       histories: [
-        ...historyEntries.map((entry) => {
+        ...historyEntries.map(({ revision, ...entry }) => {
           const sourceType = readSourceType(entry.markdown);
           const hasRawEvents = this.segmentDirectoryFor(entry.id) !== null;
           const skillMemoryIds = skillIdsByHistory[entry.id] ?? [];
           const memoryId = this.memoryAdapter.memoryIdFor(entry.id);
+          const machine = isMachineSummary(sourceType) && entry.summaryWindow !== null;
+          const result = machine && entry.id !== currentId ? this.memoryAdapter.summaryFor(entry.id, revision) : undefined;
+          const summary = result?.status === "ready" ? result : undefined;
           return { ...entry, skillMemoryIds, ...(memoryId ? { memoryId } : {}),
-            ...(isMachineSummary(sourceType) ? { summaryStatus: this.storedSummaryIsPending(entry)
-              ? "pending" as const : "ready" as const } : {}),
+            ...(machine ? { description: summary?.text ?? null, summaryStatus: result?.status ?? "pending" as const } : {}),
+            ...(summary ? { title: summary.title, markdown: applyNarrative(entry.markdown, {
+              title: summary.title, description: summary.text, body: summary.text,
+            }) } : {}),
             sourceType, replayPlan: replayPlanFor(entry, sourceType, hasRawEvents) };
         }),
-        ...(currentRaw && !standingCurrent ? [currentRaw.history] : []),
+        ...(currentRaw ? [currentRaw.history] : []),
       ]
-        // An entry appears once it has been written. Showing the placeholder
-        // would put the mechanical wording in front of the reader, which is the
-        // thing the written summary exists to avoid. Rollups are machine
-        // generated too: read as "imported", they slipped past this gate and
-        // put a templated body on the timeline.
-        .filter((entry) => !isMachineSummary(entry.sourceType) || isNarrated(entry.markdown)
-          || (entry.sourceType === "captured" && (entry.id === currentId ? currentRaw !== null
-            : this.hasStoredRawActivity(entry.id))))
         // Hide partial accounts left by the former incremental implementation.
         // They remain on disk so the closed-window pass can safely replace or
         // retain them, but they are not final history while the window is open.
@@ -1544,7 +1399,6 @@ export class ComputerHistoryDemoService {
         && this.segmentId(new Date(previous.startedAt)) === id) startedAt = previous.startedAt;
     } catch { /* A missing or invalid older timestamp does not prevent recording. */ }
     const historyFile = path.join(this.historyDirectory, `${id}-10min-summary.md`);
-    this.invalidateSummary(historyFile);
     fs.rmSync(`${historyFile}.staging`, { force: true });
     fs.writeFileSync(
       metadataFile,
@@ -1831,14 +1685,14 @@ export class ComputerHistoryDemoService {
     if (!current()) return;
     if (!permissions.supported) throw new ComputerHistoryApiError(400, "Computer History recording requires macOS or Windows 11");
     if (!permissions.accessibility || !permissions.inputMonitoring) {
-      void this.finalizeSegment(previous);
+      this.finalizeSegment(previous);
       this.completeObservationStop();
       return;
     }
     this.ensureObservationSettings();
     this.assertObservesSomething();
     if (previous.id !== this.segmentId(new Date())) {
-      void this.finalizeSegment(previous);
+      this.finalizeSegment(previous);
       this.segment = null;
       this.segment = this.openSegment();
     }
@@ -1861,7 +1715,7 @@ export class ComputerHistoryDemoService {
       const finalize = () => {
         // Finalization writes the closed evidence before its first await. A
         // fresh same-bucket open then invalidates any pending model response.
-        void this.finalizeSegment(segment);
+        this.finalizeSegment(segment);
         if (this.segment === segment) this.segment = null;
       };
       if (child?.pid && child.exitCode === null && child.signalCode === null) {
@@ -1956,178 +1810,20 @@ export class ComputerHistoryDemoService {
     }
   }
 
-  /**
-   * Summarizes a closed segment and leaves it behind as searchable history.
-   *
-   * A segment narrated while it was open already stands on the timeline, and
-   * regenerating it in place would put the placeholder back over that account
-   * until the model caught up — an entry that blinks out and returns, or, if
-   * the model is unreachable, never returns at all. So the fuller summary is
-   * built beside the standing one and swapped in only once it is written.
-   * Nothing on disk ever says less than it did a moment ago.
-   */
-  private async finalizeSegment(segment: SegmentState): Promise<void> {
+  private finalizeSegment(segment: SegmentState): void {
     if (!segmentHasActivity(segment.eventsFile)) return;
-    this.invalidateSummary(segment.historyFile);
-    const staging = `${segment.historyFile}.staging`;
-    const destination = isSummaryWritten(segment.historyFile) ? staging : segment.historyFile;
-    const error = this.writeSegmentSummary(segment, destination, true);
-    if (error) {
-      this.observationError = error;
-      fs.rmSync(staging, { force: true });
-      return;
-    }
-    this.narratedOpenSegments.delete(segment.id);
-    const summaryId = path.basename(segment.historyFile, ".md");
-    const written = await this.writeSummaryWith(destination, "10min", segment.eventsFile, summaryId);
-    // Failed replacements remain staged for the next pass. A deleted or
-    // superseded request returns false and must not create a derived rollup.
-    if (written) this.writeSixHourRollup(segment.id);
+    const error = this.writeSegmentSummary(segment, segment.historyFile, true);
+    if (error) { this.observationError = error; return; }
+    fs.rmSync(`${segment.historyFile}.staging`, { force: true });
+    this.memoryAdapter.schedule();
   }
 
-  /**
-   * Rewrites a finished summary's title and description with a model-written
-   * account of the window.
-   *
-   * Deliberately fire-and-forget: the mechanical summary is already on disk, so
-   * a slow or unreachable model delays the better wording, never the recording.
-   */
-  private narrateSummary(file: string, window: "10min" | "6h", eventsFile: string | null): void {
-    void this.writeSummaryWith(file, window, eventsFile).catch((error) => {
-      this.setNarrationError(error instanceof Error ? error.message : String(error));
-    });
-  }
-
-  private invalidateSummary(file: string): void {
-    this.summaryVersions.set(file, (this.summaryVersions.get(file) ?? 0) + 1);
-  }
-
-  /** Never replace the only written account of a source that is no longer available. */
   private preservesRollupCoverage(destination: string, candidate: string): boolean {
     const standing = readText(destination);
-    if (!standing || !isNarrated(standing)) return true;
+    if (!standing) return true;
     const id = path.basename(destination, ".md");
     const proposed = new Set(rollupCoveredHistoryIds(candidate, id));
-    if (rollupCoveredHistoryIds(standing, id).every((source) => proposed.has(source))) return true;
-    // This path may already be queued or at the model. Invalidate its response
-    // and remove the unsafe replacement while retaining the standing account.
-    this.invalidateSummary(destination);
-    fs.rmSync(`${destination}.staging`, { force: true });
-    return false;
-  }
-
-  /** Share a request only while its input version, runtime, and output language match. */
-  private writeSummaryWith(
-    file: string,
-    window: "10min" | "6h",
-    eventsFile: string | null,
-    summaryId?: string,
-  ): Promise<boolean> {
-    const llmRuntime = this.llmRuntime;
-    if (!llmRuntime || this.shuttingDown) {
-      if (!llmRuntime && !this.shuttingDown && !this.narrationError) {
-        this.setNarrationError("Computer History summary is pending: no model runtime is available");
-      }
-      return Promise.resolve(false);
-    }
-    const destination = file.endsWith(".staging") ? file.slice(0, -".staging".length) : file;
-    if (window === "6h") {
-      const windowStart = instantFromId(path.basename(destination, ".md"));
-      // Existing pending files from the former incremental implementation can
-      // survive an upgrade. Keep them off the model path until the complete
-      // window is available, just like newly prepared rollups.
-      if (!windowStart || !isSixHourWindowClosed(windowStart)) return Promise.resolve(false);
-    }
-    const version = this.summaryVersions.get(destination) ?? 0;
-    const language = this.summaryLanguage();
-    const active = this.summaryJobs.get(destination);
-    if (active?.version === version && active.runtime === llmRuntime && active.language === language) return active.promise;
-    const markdown = readText(file);
-    if (!markdown) return Promise.resolve(false);
-    const containsWeChat = markdown.includes("com.tencent.xinWeChat");
-    const weChatConsentId = this.weChatConsent.read().consentId;
-    if (containsWeChat && !weChatConsentId) return Promise.resolve(false);
-    if (window === "6h" && !this.preservesRollupCoverage(destination, markdown)) return Promise.resolve(false);
-    const isCurrent = () => !this.shuttingDown
-      && this.llmRuntime === llmRuntime
-      && this.summaryLanguage() === language
-      && (!containsWeChat || this.weChatConsent.read().consentId === weChatConsentId)
-      && (this.summaryVersions.get(destination) ?? 0) === version
-      && readText(file) === markdown;
-    const promise = this.narratePreparedSummary(
-      file, destination, window, eventsFile, summaryId, markdown, llmRuntime, language, isCurrent,
-    ).finally(() => {
-      if (this.summaryJobs.get(destination)?.promise === promise) this.summaryJobs.delete(destination);
-    });
-    this.summaryJobs.set(destination, { version, runtime: llmRuntime, language, promise });
-    return promise;
-  }
-
-  private async narratePreparedSummary(
-    file: string,
-    destination: string,
-    window: "10min" | "6h",
-    eventsFile: string | null,
-    summaryId: string | undefined,
-    markdown: string,
-    llmRuntime: LLMRuntimeResolver,
-    language: MemmyOutputLanguage | undefined,
-    isCurrent: () => boolean,
-  ): Promise<boolean> {
-    // A segment is narrated from its own event stream, compacted into activity
-    // arcs. A rollup has no stream of its own and is narrated from the
-    // ten-minute summaries it already gathered.
-    let evidence = markdown.replace(/^---\n[\s\S]*?\n---\n/u, "");
-    if (eventsFile) {
-      try {
-        const compacted = compactEventEvidence(fs.readFileSync(eventsFile, "utf8").split("\n"),
-          { weChatNames: this.weChatNameMap() });
-        if (compacted) evidence = compacted;
-      } catch {
-        // Fall back to the mechanical summary body.
-      }
-    } else if (window === "10min") {
-      const retained = this.readRetentionCheckpoint(path.basename(destination, ".md"));
-      if (retained) evidence = retained.evidence;
-    }
-    const narrative = await writeSegmentNarrative(llmRuntime, {
-      applications: applicationsFromMarkdown(markdown),
-      evidence,
-      window,
-      language,
-      priorSummaries: this.priorSummaries(summaryId ?? path.basename(destination, ".md")),
-      onError: (reason, category) => {
-        // Narration is best effort, but a silent no-op is indistinguishable
-        // from a feature that was never wired, so say why it produced nothing.
-        if (!isCurrent()) return;
-        this.setNarrationError(reason, category);
-        console.warn(`[computer-history] summary narration skipped: ${reason}`);
-      },
-    });
-    if (!narrative || !isCurrent()) return false;
-    try {
-      // Recheck at commit too: another writer may have supplied a fuller
-      // standing account while this candidate was being narrated.
-      if (window === "6h" && !this.preservesRollupCoverage(destination, markdown)) return false;
-      // The body must describe exactly the evidence sent to the model. Never
-      // combine an old response with a file another pass has since rewritten.
-      atomicWriteText(destination, applyNarrative(markdown, narrative));
-      if (file !== destination) fs.rmSync(file, { force: true });
-      this.setNarrationError(null);
-      if (window === "10min") this.memoryAdapter.schedule();
-      return true;
-    } catch (error) {
-      this.setNarrationError(error instanceof Error ? error.message : String(error));
-      return false;
-    }
-  }
-
-  /** Builds the final six-hour summary once the segment closes its whole window. */
-  private writeSixHourRollup(segmentId: string): void {
-    const at = instantFromId(segmentId);
-    if (!at) return;
-    const rollupFile = this.writeRollupFor(sixHourWindowStart(at));
-    if (rollupFile) this.narrateSummary(rollupFile, "6h", null);
+    return rollupCoveredHistoryIds(standing, id).every((source) => proposed.has(source));
   }
 
   private storedTenMinuteSummaries(): SummaryInput[] {
@@ -2137,26 +1833,24 @@ export class ComputerHistoryDemoService {
   }
 
   /** One preparation per eligible local window, including already-ready history. */
-  private prepareRollups(): string[] {
-    const summaries = this.storedTenMinuteSummaries();
-    const windows = new Map<number, Date>();
-    for (const summary of summaries) {
-      if (!isCompletedCapturedSummary(summary)) continue;
-      const start = sixHourWindowStart(instantFromId(summary.name)!);
-      windows.set(start.getTime(), start);
+  private prepareRollups(): void {
+    const windows = new Map<number, SummaryInput[]>();
+    for (const source of this.storedTenMinuteSummaries()) {
+      if (!isCompletedCapturedSummary(source)) continue;
+      const start = sixHourWindowStart(instantFromId(source.name)!).getTime();
+      const sources = windows.get(start);
+      if (sources) sources.push(source);
+      else windows.set(start, [source]);
     }
-    return [...windows.values()].sort((left, right) => left.getTime() - right.getTime())
-      .map((start) => this.writeRollupFor(start, summaries))
-      .filter((file): file is string => file !== null);
+    for (const [start, sources] of windows) this.writeRollupFor(new Date(start), sources);
   }
 
-  /** Writes the mechanical six-hour summary for a closed window; the model writes it later. */
+  /** Persist closed-window membership so Memory can aggregate the corresponding L1s. */
   private writeRollupFor(windowStart: Date, summaries = this.storedTenMinuteSummaries()): string | null {
     // Ten-minute summaries provide the live view while this window is open.
     // Preparing a partial rollup here used to trigger up to 36 model rewrites
     // for one final account and made its meaning change every ten minutes.
     if (!isSixHourWindowClosed(windowStart)) return null;
-    if (this.hasPendingTenMinuteSummary(windowStart)) return null;
     const rollup = buildSixHourSummary(summaries, windowStart);
     if (!rollup) return null;
     const rollupFile = path.join(this.historyDirectory, rollup.fileName);
@@ -2166,50 +1860,14 @@ export class ComputerHistoryDemoService {
     if (!this.preservesRollupCoverage(rollupFile, rollup.markdown)) return null;
     const inputHash = hashText(rollup.markdown);
     const standing = readText(rollupFile);
-    const staged = `${rollupFile}.staging`;
-    const pending = readText(staged);
-    const matchesInput = (markdown: string) => (
-      readFrontmatterValue(markdown, "summary_input_hash") === inputHash
-      && JSON.stringify(rollupCoveredHistoryIds(markdown, rollup.id + "-6h-summary")) === JSON.stringify(rollup.coveredHistoryIds)
-    );
-    if (standing && isNarrated(standing) && matchesInput(standing)) {
-      // A completed account wins over any abandoned replacement. Otherwise a
-      // staging path queued earlier in the pass could overwrite current prose
-      // with older membership even though this preparation needs no new work.
-      if (pending !== null) {
-        this.invalidateSummary(rollupFile);
-        fs.rmSync(staged, { force: true });
-      }
+    if (standing && readFrontmatterValue(standing, "summary_input_hash") === inputHash
+      && JSON.stringify(rollupCoveredHistoryIds(standing, rollup.fileName)) === JSON.stringify(rollup.coveredHistoryIds)) {
       return null;
     }
-    if (pending && matchesInput(pending)) return staged;
-    const destination = standing && isNarrated(standing) ? staged : rollupFile;
     const markdown = rollup.markdown.replace(/^---\n/u, `---\nsummary_input_hash: ${inputHash}\n`);
-    if (readText(destination) !== markdown) {
-      this.invalidateSummary(rollupFile);
-      atomicWriteText(destination, markdown);
-    }
-    return destination;
-  }
-
-  /** Wait until every captured source in the closed window has finished narration. */
-  private hasPendingTenMinuteSummary(windowStart: Date): boolean {
-    if (!fs.existsSync(this.historyDirectory)) return false;
-    const start = windowStart.getTime();
-    const end = start + SIX_HOUR_MS;
-    return fs.readdirSync(this.historyDirectory).some((name) => {
-      const destinationName = name.endsWith(".md.staging") ? name.slice(0, -".staging".length) : name;
-      if (!destinationName.endsWith("-10min-summary.md")) return false;
-      const id = destinationName.slice(0, -3);
-      const at = instantFromId(id)?.getTime();
-      if (at === undefined || at < start || at >= end) return false;
-      const markdown = readText(path.join(this.historyDirectory, name));
-      if (!markdown) return false;
-      const source = readFrontmatterValue(markdown, "source_type");
-      return (source === "captured" || source === "human_computer_history")
-        && readFrontmatterValue(markdown, "status") === "completed"
-        && !isNarrated(markdown);
-    });
+    atomicWriteText(rollupFile, markdown);
+    fs.rmSync(`${rollupFile}.staging`, { force: true });
+    return rollupFile;
   }
 
   /**
@@ -2239,7 +1897,6 @@ export class ComputerHistoryDemoService {
         this.removeStoredHistory(name.slice(0, -3));
         removed += 1;
       } else if (fs.existsSync(`${file}.staging`)) {
-        this.invalidateSummary(file);
         fs.rmSync(`${file}.staging`, { force: true });
       }
     }
@@ -2249,7 +1906,7 @@ export class ComputerHistoryDemoService {
 
   private removeSupersededRollups(): number {
     const rollups = this.readMarkdownDirectory(this.historyDirectory)
-      .filter((entry) => entry.summaryWindow === "6h" && isNarrated(entry.markdown));
+      .filter((entry) => entry.summaryWindow === "6h" && (isNarrated(entry.markdown) || this.memoryAdapter.summaryFor(entry.id, entry.revision)?.status === "ready"));
     const replaced = new Set(rollups.filter((entry) => {
       const at = instantFromId(entry.id);
       return at && isLocalSixHourWindow(at);
@@ -2273,7 +1930,7 @@ export class ComputerHistoryDemoService {
       await this.detachRecorder(previous);
       // Not awaited: the entry already on the timeline stays right while the
       // model writes the fuller one, so nothing is held up waiting for it.
-      void this.finalizeSegment(previous);
+      this.finalizeSegment(previous);
       if (previous.stoppedByUser && this.segment === previous) {
         this.completeObservationStop();
         return;
@@ -2305,7 +1962,7 @@ export class ComputerHistoryDemoService {
     this.assertObservesSomething();
     this.cleanupExpiredRecordings();
     if (this.segment && this.segment.id !== this.segmentId(new Date())) {
-      void this.finalizeSegment(this.segment);
+      this.finalizeSegment(this.segment);
       this.segment = null;
     }
     const segment = this.segment ?? this.openSegment();
@@ -2355,7 +2012,7 @@ export class ComputerHistoryDemoService {
     if (!status.accessibility || !status.inputMonitoring) {
       this.observationError = null;
       if (this.observationState === "failed") {
-        if (this.segment) void this.finalizeSegment(this.segment);
+        if (this.segment) this.finalizeSegment(this.segment);
         this.completeObservationStop();
       }
       return this.snapshot();
@@ -2437,7 +2094,7 @@ export class ComputerHistoryDemoService {
       const segment = this.segment;
       if (segment) await this.detachRecorder(segment);
       if (segment?.stoppedByUser) {
-        void this.finalizeSegment(segment);
+        this.finalizeSegment(segment);
         this.completeObservationStop();
         return;
       }
@@ -2490,7 +2147,7 @@ export class ComputerHistoryDemoService {
       if (segment) {
         await this.detachRecorder(segment);
         // Stopping should not wait on the model; the swap happens when it lands.
-        void this.finalizeSegment(segment);
+        this.finalizeSegment(segment);
       }
       await Promise.all([...this.recorderChildren].map((child) => this.stopRecorderChild(child)));
       this.completeObservationStop();
@@ -2512,8 +2169,6 @@ export class ComputerHistoryDemoService {
     this.cancelRecorderReconnect();
     if (this.weChatConnectionChild) this.weChatConsent.revoke();
     this.clearWeChatPolling();
-    if (this.summaryRetryTimer) clearTimeout(this.summaryRetryTimer);
-    this.summaryRetryTimer = null;
     try {
       if (this.recorderTransition || this.observationState !== "stopped") await this.stopObservation();
     } catch {
@@ -2540,7 +2195,6 @@ export class ComputerHistoryDemoService {
   }
 
   private writeLiveSummary(segment: SegmentState): void {
-    if (this.summaryJobs.has(segment.historyFile)) return;
     let stat: fs.Stats;
     try {
       stat = fs.statSync(segment.eventsFile);
@@ -2552,34 +2206,10 @@ export class ComputerHistoryDemoService {
     }
     const signature = `${stat.size}:${stat.mtimeMs}`;
     if (!stat.size) return;
-    const standing = readText(segment.historyFile);
-    const staging = `${segment.historyFile}.staging`;
-    const destination = standing && isNarrated(standing) ? staging : segment.historyFile;
-    const prepared = readText(destination);
-    // A completed account remains readable while its fuller replacement is
-    // prepared beside it. Unchanged input needs no second model request.
-    if (standing && isNarrated(standing) && !prepared
-      && Number(readFrontmatterValue(standing, "summary_input_bytes")) === stat.size) return;
-    if (signature !== this.liveSummarySignature || !prepared) {
-      this.invalidateSummary(segment.historyFile);
-      const error = this.writeSegmentSummary(segment, destination);
-      if (error) { this.setNarrationError(error); return; }
-      this.liveSummarySignature = signature;
-    }
-
-    // Narrate an open segment once it has enough to say. Waiting for the
-    // segment to close left the entry reading mechanically for the whole ten
-    // minutes someone is most likely to look at it.
-    if (stat.size >= LIVE_NARRATION_MIN_BYTES && !this.narratedOpenSegments.has(segment.id)) {
-      this.narratedOpenSegments.add(segment.id);
-      void this.writeSummaryWith(destination, "10min", segment.eventsFile).catch((error) => {
-        this.setNarrationError(error instanceof Error ? error.message : String(error));
-      }).finally(() => {
-        // A failed live request can try again on the next tick, even if the
-        // user has not generated another event in the meantime.
-        this.narratedOpenSegments.delete(segment.id);
-      });
-    }
+    if (signature === this.liveSummarySignature && fs.existsSync(segment.historyFile)) return;
+    const error = this.writeSegmentSummary(segment);
+    this.setNarrationError(error);
+    if (!error) this.liveSummarySignature = signature;
   }
 
   /** Prepare abandoned raw segments before retries or retention can lose them. */
@@ -2619,8 +2249,8 @@ export class ComputerHistoryDemoService {
           startedAt: new Date(segmentAgeMs(directory)).toISOString(),
           child: null, output: "", stoppedByUser: false,
         };
-        this.invalidateSummary(historyFile);
-        const error = this.writeSegmentSummary(segment, standing && isNarrated(standing) ? staging : historyFile, true);
+        const error = this.writeSegmentSummary(segment, historyFile, true);
+        if (!error) fs.rmSync(staging, { force: true });
         if (error) this.setNarrationError(error);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -2643,9 +2273,7 @@ export class ComputerHistoryDemoService {
         .replace(/^---\n/, "---\ncapture_policy: accessibility_events_and_page_urls_no_screenshots\n"
           + `capture_complete: ${closed}\nsummary_input_bytes: ${source.length}\nsummary_input_sha256: ${hashBytes(source)}\n`
           + (interrupted ? "capture_end_reason: interrupted\n" : ""));
-      // Retention can remove raw files while the model is offline. Keep the
-      // bounded, distilled input with the pending summary so a later retry
-      // still has evidence. applyNarrative replaces it on success.
+      // Keep the bounded extraction input available after raw-event retention expires.
       const evidence = compactEventEvidence(raw.split("\n"), { weChatNames: this.weChatNameMap() });
       const pending = evidence ? markdown.replace("（尚未生成）", evidence) : markdown;
       fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -2711,30 +2339,6 @@ export class ComputerHistoryDemoService {
     } catch { /* Keep incomplete or unreadable evidence. Never expose its contents. */ }
     this.setNarrationError("Computer History raw retention is deferred until complete evidence is safely persisted");
     return false;
-  }
-
-  private activeSummaryIsPending(markdown: string): boolean {
-    if (!this.segment || !isNarrated(markdown)) return true;
-    try {
-      return Number(readFrontmatterValue(markdown, "summary_input_bytes")) !== fs.statSync(this.segment.eventsFile).size
-        || fs.existsSync(`${this.segment.historyFile}.staging`);
-    } catch { return true; }
-  }
-
-  private storedSummaryIsPending(entry: MarkdownEntry): boolean {
-    if (!isNarrated(entry.markdown) || fs.existsSync(`${entry.filePath}.staging`)) return true;
-    if (readSourceType(entry.markdown) !== "captured") return false;
-    const raw = this.eventStreamPathFor(entry.id);
-    if (!raw) return false;
-    const bytes = readFrontmatterValue(entry.markdown, "summary_input_bytes");
-    return bytes !== null && Number(bytes) !== fs.statSync(raw).size;
-  }
-
-  private hasStoredRawActivity(historyId: string): boolean {
-    const checkpoint = this.readRetentionCheckpoint(historyId);
-    if (checkpoint?.evidence) return true;
-    const raw = this.eventStreamPathFor(historyId);
-    return raw !== null && segmentHasActivity(raw);
   }
 
   /** A raw-backed retrieval candidate remains available before model narration. */
@@ -2922,11 +2526,10 @@ export class ComputerHistoryDemoService {
     return this.snapshot();
   }
 
-  /** Invalidate first: a model response may already be waiting to commit. */
+  /** Revoke the Memory link before removing the local evidence. */
   private removeStoredHistory(id: string): void {
     this.memoryAdapter.remove(id);
     const file = path.join(this.historyDirectory, `${id}.md`);
-    this.invalidateSummary(file);
     fs.rmSync(file, { force: true });
     fs.rmSync(`${file}.staging`, { force: true });
     const checkpoint = this.retentionCheckpointPath(id);
@@ -2993,7 +2596,6 @@ export class ComputerHistoryDemoService {
           this.recorderReconnectAttempts = 0;
           this.clearLiveSummaryTimer();
           this.clearRotationTimer();
-          this.invalidateSummary(previous.historyFile);
           // Wait for the native writer to exit before deleting its files. Do not
           // finalize this segment: the user has asked to discard its evidence.
           await this.detachRecorder(previous);
@@ -3025,10 +2627,6 @@ export class ComputerHistoryDemoService {
         if (previous) {
           this.segment = null;
           this.resetCaptureHealth();
-          this.narratedOpenSegments.delete(previous.id);
-          // Invalidated model responses cannot commit, and must not block the
-          // first summary of fresh activity in the same ten-minute bucket.
-          this.summaryJobs.delete(previous.historyFile);
           if (previous.stoppedByUser || this.shuttingDown || this.observationState === "stopping") {
             this.completeObservationStop();
           } else if (this.observationState === "running" || this.observationState === "paused") {
@@ -3088,13 +2686,18 @@ export class ComputerHistoryDemoService {
     const byId = new Map(snapshot.histories.map((history) => [history.id, history]));
     const rawById = new Map<string, string>();
     for (const history of snapshot.histories) {
-      if (history.summaryStatus !== "pending" || history.id === current?.history.id
+      if ((history.summaryStatus !== "pending" && history.summaryStatus !== "skipped") || history.id === current?.history.id
         || (options.historyId && history.id !== options.historyId)) continue;
       const pending = this.pendingHistoryForSearch(history);
-      if (pending) { byId.set(history.id, pending.history); rawById.set(history.id, pending.raw); }
+      if (pending) {
+        byId.set(history.id, { ...pending.history, summaryStatus: history.summaryStatus });
+        rawById.set(history.id, pending.raw);
+      }
     }
-    if (current && this.activeSummaryIsPending(byId.get(current.history.id)?.markdown ?? "")) byId.set(current.history.id, current.history);
-    if (current) rawById.set(current.history.id, current.raw);
+    if (current) {
+      byId.set(current.history.id, current.history);
+      rawById.set(current.history.id, current.raw);
+    }
     // Searching is evidence retrieval, not replay selection. Filtering by
     // replayability meant an entry vanished from search the moment its raw
     // events expired — exactly when the written summary is all that is left and
@@ -3147,6 +2750,7 @@ export class ComputerHistoryDemoService {
         const markdown = fs.readFileSync(filePath, "utf8");
         const id = entry.name.slice(0, -3);
         const parsed: MarkdownEntry = {
+          revision: stat.mtime.toISOString(),
           id,
           title: readFrontmatterValue(markdown, "title") || id,
           description: nullableFrontmatterValue(markdown, "description"),
@@ -3254,7 +2858,7 @@ function hashBytes(value: Buffer): string {
  * contain a section listing actions.
  */
 function replayPlanFor(
-  entry: MarkdownEntry,
+  entry: Omit<MarkdownEntry, "revision">,
   sourceType: ComputerHistorySourceType,
   hasRawEvents: boolean,
 ): ComputerHistoryReplayPlan | null {

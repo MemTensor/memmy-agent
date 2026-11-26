@@ -127,7 +127,7 @@ function withoutCoveredSegments(histories: ComputerHistoryEntry[]): ComputerHist
   const now = Date.now();
   const coveredIds = new Set<string>();
   for (const entry of histories) {
-    if (entry.sourceType !== "rollup" || entry.summaryWindow !== "6h") continue;
+    if (entry.sourceType !== "rollup" || entry.summaryWindow !== "6h" || (entry.summaryStatus && entry.summaryStatus !== "ready")) continue;
     const start = new Date(entry.createdAt).getTime();
     if (Number.isNaN(start) || now < start + SIX_HOUR_MS) continue;
     for (const id of entry.coveredHistoryIds) coveredIds.add(id);
@@ -810,11 +810,12 @@ export function ComputerHistorySubPage(props: ComputerHistorySubPageProps) {
                           </Tooltip>
                         </div>
                       </div>
-                      {entry.description ? (
+                      {entry.summaryStatus === "pending" || entry.summaryStatus === "skipped" ? (
+                        <p className="ch-entry__summary text-text-ink/60" role="status">
+                          {t(entry.summaryStatus === "skipped" ? "computerHistory.summarySkipped" : "computerHistory.summaryPending")}
+                        </p>
+                      ) : entry.description ? (
                         <p className="ch-entry__summary"><Prose text={entry.description} /></p>
-                      ) : null}
-                      {entry.summaryStatus === "pending" ? (
-                        <p className="ch-entry__summary text-text-ink/60" role="status">{t("computerHistory.summaryPending")}</p>
                       ) : null}
                       {visibleApplications.length ? (
                         <ul className="ch-entry__apps">

@@ -399,7 +399,7 @@ describe("pinning raw events", () => {
 });
 
 describe("showing a window only once it is written", () => {
-  it("keeps a segment out of the timeline until the model has summarized it", () => {
+  it("shows a pending timeline entry until its L1 is available", () => {
     const instance = service();
     const directory = instance.snapshot().privacy.markdownDirectory;
     fs.mkdirSync(directory, { recursive: true });
@@ -411,7 +411,7 @@ describe("showing a window only once it is written", () => {
       '---\ntitle: "Computer History 2026-09-08T03-30-00Z"\nsource_type: captured\nsummary_state: pending\n---\n\n## Memory summary\n\n（尚未生成）\n',
       "utf8",
     );
-    expect(instance.snapshot().histories).toHaveLength(0);
+    expect(instance.snapshot().histories).toMatchObject([{ summaryStatus: "pending", description: null }]);
 
     fs.writeFileSync(
       file,

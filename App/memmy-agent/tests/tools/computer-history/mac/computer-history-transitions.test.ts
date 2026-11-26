@@ -341,30 +341,13 @@ describe("clearing the active recording", () => {
     expect(state.children).toHaveLength(1);
   });
 
-  it("invalidates an in-flight summary even when fresh recording reuses the same bucket", async () => {
-    const { events, history, markdown } = seedActive();
-    let finish!: (value: { content: string }) => void;
-    const model = new Promise<{ content: string }>((resolve) => { finish = resolve; });
-    const internals = service as unknown as {
-      llmRuntime: unknown;
-      writeSummaryWith(file: string, window: "10min", events: string): Promise<boolean>;
-    };
-    const chat = vi.fn().mockReturnValueOnce(model).mockResolvedValue({ content: JSON.stringify({
-      title: "Fresh activity", description: "New evidence", body: "New evidence",
-    }) });
-    internals.llmRuntime = () => ({ model: "stub", provider: { chatWithRetry: chat } });
-    const pending = internals.writeSummaryWith(history, "10min", events);
+  it("keeps a fresh recording in a cleared bucket pending", async () => {
+    const { history, markdown } = seedActive();
     const clear = service.clearHistories("all");
     state.children[0].exit();
     await clear;
-    // Even identical replacement content cannot let an older response commit.
     fs.writeFileSync(history, markdown);
-    expect(await internals.writeSummaryWith(history, "10min", events)).toBe(true);
-    expect(fs.readFileSync(history, "utf8")).toContain("Fresh activity");
-    finish({ content: JSON.stringify({ title: "Deleted activity", description: "Old evidence", body: "Old evidence" }) });
-    expect(await pending).toBe(false);
-    expect(fs.readFileSync(history, "utf8")).toContain("Fresh activity");
-    expect(fs.readFileSync(history, "utf8")).not.toContain("Deleted activity");
+    expect(service.snapshot().histories[0]).toMatchObject({ summaryStatus: "pending", description: null });
   });
 
   it("clears today's active record while keeping yesterday's history", async () => {

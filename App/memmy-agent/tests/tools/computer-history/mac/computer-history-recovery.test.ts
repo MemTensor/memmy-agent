@@ -8,9 +8,9 @@ import { applyNarrative } from "../../../../src/tools/computer-history/mac/summa
 const id = "2026-09-13T00-00-00Z";
 let root: string;
 const services: ComputerHistoryDemoService[] = [];
-const answer = { title: "Recovered decision", description: "LATE_DECISION_RELEASE_218", body: "## Memory summary\n\nLATE_DECISION_RELEASE_218" };
-const makeRuntime = (chat: (...args: unknown[]) => Promise<{ content: string }>) =>
-  (() => ({ model: "stub", provider: { chatWithRetry: chat } })) as unknown as Parameters<ComputerHistoryDemoService["setLlmRuntime"]>[0];
+function evidence(service: ComputerHistoryDemoService) {
+  return (service as unknown as { memoryEvidence(): Array<{ id: string; content: string }> }).memoryEvidence();
+}
 function makeService() {
   const service = new ComputerHistoryDemoService({
     recorderScript: path.join(root, "never-run.js"),
@@ -53,15 +53,13 @@ describe("interrupted segment recovery", () => {
   it("recovers raw-only evidence before the first live summary and does not repeat it", async () => {
     const segment = rawSegment();
     const service = makeService();
-    const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
-    service.setLlmRuntime(makeRuntime(chat));
-    expect(await service.backfillUnwrittenSummaries()).toBeGreaterThan(0);
+    expect(evidence(service)).toHaveLength(1);
     expect(service.snapshot().histories.find((entry) => entry.id === `${id}-10min-summary`)?.markdown).toContain("LATE_DECISION_RELEASE_218");
-    expect(JSON.stringify(chat.mock.calls)).toContain("LATE_DECISION_RELEASE_218");
+    expect(JSON.stringify(evidence(service))).toContain("LATE_DECISION_RELEASE_218");
     expect(fs.readFileSync(segment.historyFile, "utf8")).toContain("capture_end_reason: interrupted");
-    const count = chat.mock.calls.length;
-    await service.backfillUnwrittenSummaries();
-    expect(chat).toHaveBeenCalledTimes(count);
+    const mtime = fs.statSync(segment.historyFile).mtimeMs;
+    evidence(service);
+    expect(fs.statSync(segment.historyFile).mtimeMs).toBe(mtime);
   });
 
   it.each(["in_progress", "incomplete"])("replaces a legacy %s live account with the full recovered evidence", async (status) => {
@@ -70,26 +68,20 @@ describe("interrupted segment recovery", () => {
       title: "First minute", description: "Opened Notes", body: "## Memory summary\n\nOpened Notes.",
     }));
     const service = makeService();
-    const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
-    service.setLlmRuntime(makeRuntime(chat));
-    await service.backfillUnwrittenSummaries();
+    evidence(service);
     const history = service.snapshot().histories.find((entry) => entry.id === `${id}-10min-summary`)!;
-    expect(history.title).toBe(answer.title);
+    expect(history.summaryStatus).toBe("pending");
     expect(history.markdown).toContain("capture_complete: true");
     expect(history.markdown).toContain(`summary_input_bytes: ${fs.statSync(segment.eventsFile).size}`);
-    expect(JSON.stringify(chat.mock.calls)).toContain("LATE_DECISION_RELEASE_218");
+    expect(JSON.stringify(evidence(service))).toContain("LATE_DECISION_RELEASE_218");
   });
 
   it("recovers input appended after the last completed account", async () => {
     const segment = rawSegment();
     const service = makeService();
-    const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
-    service.setLlmRuntime(makeRuntime(chat));
-    await service.backfillUnwrittenSummaries();
-    const count = chat.mock.calls.length;
+    evidence(service);
     fs.appendFileSync(segment.eventsFile, JSON.stringify({ recordType: "human_event", eventType: "application_changed", timestamp: "2026-09-13T00:06:00Z", application: { name: "Safari", bundleId: "com.apple.Safari" }, details: {} }) + "\n");
-    await service.backfillUnwrittenSummaries();
-    expect(chat.mock.calls.length).toBeGreaterThan(count);
+    evidence(service);
     expect(fs.readFileSync(segment.historyFile, "utf8")).toContain(`summary_input_bytes: ${fs.statSync(segment.eventsFile).size}`);
   });
 
@@ -104,12 +96,9 @@ describe("interrupted segment recovery", () => {
       title: "First session only", description: "Opened Notes", body: "## Memory summary\n\nOpened Notes.",
     }));
     const service = makeService();
-    const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
-    service.setLlmRuntime(makeRuntime(chat));
-    await service.backfillUnwrittenSummaries();
-    expect(JSON.stringify(chat.mock.calls)).toContain("LATE_DECISION_RELEASE_218");
+    expect(JSON.stringify(evidence(service))).toContain("LATE_DECISION_RELEASE_218");
     expect(fs.readFileSync(segment.historyFile, "utf8")).toContain("capture_end_reason: interrupted");
-    expect(service.snapshot().histories.find((entry) => entry.id === `${id}-10min-summary`)?.title).toBe(answer.title);
+    expect(service.snapshot().histories.find((entry) => entry.id === `${id}-10min-summary`)?.summaryStatus).toBe("pending");
   });
 
   it("keeps compacted recovery evidence when raw retention expires before a model is available", async () => {
@@ -119,11 +108,8 @@ describe("interrupted segment recovery", () => {
     service.snapshot();
     expect(fs.existsSync(segment.eventsFile)).toBe(false);
     expect(fs.readFileSync(segment.historyFile, "utf8")).toContain("LATE_DECISION_RELEASE_218");
-    const chat = vi.fn<Parameters<typeof makeRuntime>[0]>(async () => ({ content: JSON.stringify(answer) }));
-    service.setLlmRuntime(makeRuntime(chat));
-    await service.backfillUnwrittenSummaries();
-    expect(JSON.stringify(chat.mock.calls)).toContain("LATE_DECISION_RELEASE_218");
-    expect(service.snapshot().histories.find((entry) => entry.id === `${id}-10min-summary`)?.title).toBe(answer.title);
+    expect(JSON.stringify(evidence(service))).toContain("LATE_DECISION_RELEASE_218");
+    expect(service.snapshot().histories.find((entry) => entry.id === `${id}-10min-summary`)?.summaryStatus).toBe("pending");
   });
 
   it("does not reset legacy retention age when recovery creates missing metadata", () => {
@@ -142,14 +128,11 @@ describe("interrupted segment recovery", () => {
     const segment = rawSegment();
     const service = makeService();
     (service as unknown as { segment: typeof segment | null }).segment = segment;
-    const chat = vi.fn(async () => ({ content: JSON.stringify(answer) }));
-    service.setLlmRuntime(makeRuntime(chat));
-    await service.backfillUnwrittenSummaries();
-    expect(chat).not.toHaveBeenCalled();
+    evidence(service);
     expect(fs.existsSync(segment.historyFile)).toBe(false);
     (service as unknown as { segment: null }).segment = null;
     await service.clearHistories("all");
-    await service.backfillUnwrittenSummaries();
+    evidence(service);
     expect(service.snapshot().histories).toHaveLength(0);
     expect(fs.existsSync(segment.directory)).toBe(false);
   });
