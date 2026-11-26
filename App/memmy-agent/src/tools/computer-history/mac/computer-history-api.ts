@@ -1,3 +1,4 @@
+import { CONTINUOUS_RECORDER_CAPABILITY, RecorderRotationDeclined, rotateRecorderOutput } from "../core/recorder-rotation.js";
 import { computerHistoryPermissionError } from "../../computer-use/mac-permission-settings.js";
 import { isMacNativeRuntimeSupported } from "../../computer-use/mac-native-runtime-support.js";
 import {
@@ -196,6 +197,7 @@ interface SegmentState {
   historyFile: string;
   output: string;
   stoppedByUser: boolean;
+  recorderStartedAtByte?: number;
 }
 
 /**
@@ -395,26 +397,27 @@ function segmentHasActivity(eventsFile: string): boolean {
   return rawHasEvidence(text);
 }
 
-function lastRecordedEvent(raw: string): Record<string, unknown> | null {
+function lastRecorderEvent(raw: string): Record<string, unknown> | null {
   for (const line of raw.trimEnd().split("\n").reverse()) {
     if (!line.trim()) continue;
     try {
       const record = JSON.parse(line);
-      if (record?.recordType === "human_event") return record;
+      // The browser bridge can append after the native writer emits its stop marker.
+      if (record?.recordType === "human_event" && record.eventType !== "browser_action") return record;
     } catch { return null; }
   }
   return null;
 }
 
 function recordingEnded(raw: string): boolean {
-  return lastRecordedEvent(raw)?.eventType === "recording_stopped";
+  return lastRecorderEvent(raw)?.eventType === "recording_stopped";
 }
 
 function recorderUserStopReason(file: string, startedAtByte: number): string | null {
   try {
     const raw = fs.readFileSync(file);
     if (raw.length <= startedAtByte) return null;
-    const last = lastRecordedEvent(raw.subarray(startedAtByte).toString("utf8"));
+    const last = lastRecorderEvent(raw.subarray(startedAtByte).toString("utf8"));
     const details = last?.details as { reason?: unknown } | undefined;
     const reason = String(details?.reason);
     return last?.eventType === "recording_stopped"
@@ -453,6 +456,7 @@ export class ComputerHistoryDemoService {
   private browserAuthoritySuspended = true;
   private browserAuthorityCleared = false;
   private publishBrowserAuthority: (() => void) | null = null;
+  private readonly browserInstanceId = crypto.randomUUID();
   private readonly browserEventIds = new Set<string>();
   private browserHistoryBridge: ReturnType<typeof connectBrowserHistoryBridge> | null = null;
   private readonly liveSummaryIntervalMs: number;
@@ -462,6 +466,10 @@ export class ComputerHistoryDemoService {
   private observationError: string | null = null;
   private rotationTimer: ReturnType<typeof setTimeout> | null = null;
   private recorderTransition: Promise<void> | null = null;
+  private recorderTransitionKind: "rotation" | "exclusive" = "exclusive";
+  private readonly recorderSegments = new WeakMap<ChildProcessWithoutNullStreams, SegmentState>();
+  private readonly checkpointTargets = new WeakMap<ChildProcessWithoutNullStreams, SegmentState>();
+  private readonly continuousRecorders = new WeakSet<ChildProcessWithoutNullStreams>();
   private readonly recorderChildren = new Set<ChildProcessWithoutNullStreams>();
   private readonly recorderExits = new Map<ChildProcessWithoutNullStreams, Promise<void>>();
   private recorderReconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -606,13 +614,15 @@ export class ComputerHistoryDemoService {
   /** Passive browser observation follows the ordinary History switch, independent of Agent chats. */
   getBrowserCaptureIntent(): BrowserHistoryCaptureIntent {
     const disabled = { enabled: false, generation: null, settings: null, captureText: false } as const;
-    if (this.shuttingDown || this.browserAuthoritySuspended || this.recorderTransition
+    if (this.shuttingDown || this.browserAuthoritySuspended
+      || (this.recorderTransition && this.recorderTransitionKind !== "rotation")
       || this.observationState !== "running" || !this.segment) return disabled;
     try {
       // Capture cannot use the settings store's UI-friendly fallback on a missing/corrupt file.
       const settings = parseObservationSettings(JSON.parse(fs.readFileSync(this.observationSettings.filePath, "utf8")));
       const policy = crypto.createHash("sha256").update(JSON.stringify(settings)).digest("hex").slice(0, 20);
-      return { enabled: true, generation: `${this.segment.id}:${this.captureHealthGeneration}:${policy}`,
+      // Keep sensors valid across file rotations; restart, clear and policy changes revoke them.
+      return { enabled: true, generation: `${this.browserInstanceId}:${this.captureHealthGeneration}:${policy}`,
         settings, captureText: true };
     } catch { return disabled; }
   }
@@ -1567,7 +1577,7 @@ export class ComputerHistoryDemoService {
   private spawnRecorder(segment: SegmentState): void {
     const recorder = this.recorderScript;
     if (!fs.existsSync(recorder)) throw new ComputerHistoryApiError(503, "recorder script is unavailable");
-    const startedAtByte = fs.existsSync(segment.eventsFile) ? fs.statSync(segment.eventsFile).size : 0;
+    segment.recorderStartedAtByte = fs.existsSync(segment.eventsFile) ? fs.statSync(segment.eventsFile).size : 0;
     segment.stoppedByUser = false;
     segment.output = "";
     const child = spawn(process.execPath, [
@@ -1584,10 +1594,14 @@ export class ComputerHistoryDemoService {
       // corroboration/veto rather than granting permission to unknown windows.
       ...(process.platform === "win32" ? ["--browser-authority", this.browserAuthorityPath] : []),
     ], {
-      env: process.env,
+      env: { ...process.env, MEMMY_HISTORY_CONTINUOUS_OUTPUT: "1" },
       stdio: ["pipe", "pipe", "pipe"],
     });
     segment.child = child;
+    this.recorderSegments.set(child, segment);
+    // A failed write reports via both its callback and the stream's error
+    // event. The former may finish the request before the latter is emitted.
+    child.stdin.on("error", () => { /* Pending writes handle their own error. */ });
     this.captureObserverStartedAt = Date.now();
     this.captureLastHeartbeatAt = null;
     // A normal segment rotation preserves a continuously healthy observer's
@@ -1605,7 +1619,7 @@ export class ComputerHistoryDemoService {
     const healthGeneration = this.captureHealthGeneration;
     child.stdout.on("data", (chunk: Buffer) => {
       const finalEventOnly = this.segment?.child !== child;
-      if (healthGeneration !== this.captureHealthGeneration || (this.segment !== segment && this.observationState === "running")
+      if (healthGeneration !== this.captureHealthGeneration || (this.segment !== this.recorderSegments.get(child) && this.observationState === "running")
         || (finalEventOnly && !this.captureHealthDrainingChildren.has(child))) return;
       // Bound incomplete/untrusted stdout lines. No rejected payload is logged
       // or copied to health state, where observed text or credentials could leak.
@@ -1615,7 +1629,8 @@ export class ComputerHistoryDemoService {
         if (piece.endsWith("\n")) {
           if (!discardHealthLine) {
             const line = healthBuffer.trimEnd();
-            if (line.startsWith(RECORDER_HEALTH_PREFIX)) this.ingestRecorderHealthLine(line, finalEventOnly);
+            if (line === CONTINUOUS_RECORDER_CAPABILITY) this.continuousRecorders.add(child);
+            else if (line.startsWith(RECORDER_HEALTH_PREFIX)) this.ingestRecorderHealthLine(line, finalEventOnly);
             else append(Buffer.from(healthBuffer));
           }
           healthBuffer = "";
@@ -1630,7 +1645,11 @@ export class ComputerHistoryDemoService {
       this.failObservation(error.message);
     });
     child.once("exit", (code) => {
-      const stopReason = recorderUserStopReason(segment.eventsFile, startedAtByte);
+      const segment = this.recorderSegments.get(child)!;
+      // A hotkey can close the writer in its new file while the parent still awaits a durable ACK.
+      const target = this.checkpointTargets.get(child);
+      const targetStop = target && recorderUserStopReason(target.eventsFile, target.recorderStartedAtByte!);
+      const stopReason = targetStop || recorderUserStopReason(segment.eventsFile, segment.recorderStartedAtByte ?? 0);
       const reason = code === 0 ? stopReason : null;
       // Preserve an explicit stop even when an overlapping pause/rotation has
       // already detached this child. Its own SIGTERM produces user_interrupt,
@@ -1641,6 +1660,7 @@ export class ComputerHistoryDemoService {
       // here means the recorder exited independently of an API transition.
       if (this.observationState !== "running") return;
       if (reason) {
+        if (target && targetStop) this.finalizeSegment(target);
         segment.child = null;
         // Use the same transition as the API: it closes the window once and
         // prepares narration without waiting for the model. A previous run's
@@ -1891,9 +1911,8 @@ export class ComputerHistoryDemoService {
     this.rotationTimer = null;
   }
 
-  private startRotationTimer(): void {
+  private startRotationTimer(delay = SEGMENT_DURATION_MS - Date.now() % SEGMENT_DURATION_MS): void {
     this.clearRotationTimer();
-    const delay = SEGMENT_DURATION_MS - Date.now() % SEGMENT_DURATION_MS;
     this.rotationTimer = setTimeout(() => {
       this.rotationTimer = null;
       if (this.observationState !== "running") return;
@@ -1901,10 +1920,11 @@ export class ComputerHistoryDemoService {
     }, delay);
   }
 
-  private trackRecorderTransition(operation: () => Promise<void>): Promise<void> {
+  private trackRecorderTransition(operation: () => Promise<void>, kind: "rotation" | "exclusive" = "exclusive"): Promise<void> {
     const pending = operation().finally(() => {
       if (this.recorderTransition === pending) this.recorderTransition = null;
     });
+    this.recorderTransitionKind = kind;
     this.recorderTransition = pending;
     return pending;
   }
@@ -2270,6 +2290,60 @@ export class ComputerHistoryDemoService {
     const previous = this.segment;
     if (!previous || this.recorderTransition || this.shuttingDown) return;
     void this.trackRecorderTransition(async () => {
+      const child = previous.child;
+      if (child && this.continuousRecorders.has(child)) {
+        if (this.segmentId(new Date()) === previous.id) {
+          this.startRotationTimer();
+          return;
+        }
+        let next: SegmentState;
+        try {
+          next = this.openSegment();
+          next.recorderStartedAtByte = fs.existsSync(next.eventsFile) ? fs.statSync(next.eventsFile).size : 0;
+        } catch {
+          this.startRotationTimer(2_000);
+          return;
+        }
+        this.checkpointTargets.set(child, next);
+        try {
+          await rotateRecorderOutput(child, { title: `Computer History ${next.id}`, eventsFile: next.eventsFile });
+        } catch (error) {
+          if (error instanceof RecorderRotationDeclined) {
+            // The writer explicitly kept the old file. Continue collecting
+            // there and retry without tearing down the native event stream.
+            if (previous.child === child && this.observationState === "running" && !this.shuttingDown) {
+              this.startRotationTimer(2_000);
+            }
+            return;
+          }
+          // An unconfirmed boundary may already have reached disk. Drain both
+          // possible destinations before allowing another writer to use either.
+          if (this.segment !== previous || previous.child !== child || child.exitCode !== null || child.signalCode !== null) return;
+          await this.detachRecorder(previous);
+          void this.finalizeSegment(previous);
+          if (previous.stoppedByUser) {
+            void this.finalizeSegment(next);
+            this.completeObservationStop();
+            return;
+          }
+          this.segment = next;
+          if (!this.shuttingDown && this.observationState === "running") {
+            this.spawnRecorder(next);
+            this.startRotationTimer();
+          }
+          return;
+        } finally {
+          this.checkpointTargets.delete(child);
+        }
+        if (this.segment !== previous || previous.child !== child) return;
+        previous.child = null;
+        next.child = child;
+        this.recorderSegments.set(child, next);
+        this.segment = next;
+        void this.finalizeSegment(previous);
+        if (this.observationState === "running" && !this.shuttingDown) this.startRotationTimer();
+        return;
+      }
       await this.detachRecorder(previous);
       // Not awaited: the entry already on the timeline stays right while the
       // model writes the fuller one, so nothing is held up waiting for it.
@@ -2287,7 +2361,7 @@ export class ComputerHistoryDemoService {
       } catch (error) {
         this.failObservation(error instanceof Error ? error.message : String(error));
       }
-    }).catch((error) => this.failObservation(error instanceof Error ? error.message : String(error)));
+    }, "rotation").catch((error) => this.failObservation(error instanceof Error ? error.message : String(error)));
   }
 
   startObservation(): ComputerHistorySnapshot {

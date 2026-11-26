@@ -396,3 +396,93 @@ test("a failed final authorization invalidates an already committed baseline", a
   assert.deepEqual(events.filter((event) => event.ax).map((event) => event.ax), [full, firstTree]);
   assert.equal(events.filter((event) => event.eventType === "mouse_click").length, 1);
 });
+
+test("assigns buffered events to exactly one file across consecutive writer checkpoints", async () => {
+  const ids = ["2026-11-25T01-00-00Z", "2026-11-25T01-10-00Z", "2026-11-25T01-20-00Z"];
+  const outputs = ids.map(id => {
+    const dir = path.join(directory, id);
+    fs.mkdirSync(dir);
+    return path.join(dir, "events.jsonl");
+  });
+  const control = new PassThrough();
+  const previous = Object.getOwnPropertyDescriptor(process, "stdin")!;
+  vi.stubEnv("MEMMY_HISTORY_CONTINUOUS_OUTPUT", "1");
+  Object.defineProperty(process, "stdin", { configurable: true, value: control });
+  helper.events = ["alpha", "bravo", "charlie"].map(text => ({ kind: "keyboard.text_input", app,
+    keyboard: { text }, timestamp: new Date().toISOString() }));
+  helper.afterEvent = index => {
+    if (index < 2) control.write(JSON.stringify({ kind: "rotate", id: `00000000-0000-0000-0000-00000000000${index}`,
+      title: ids[index + 1], eventsFile: outputs[index + 1] }) + "\n");
+  };
+  try {
+    await run(["node", "test", "--out", outputs[0], "--no-screenshots", "--capture-text"]);
+    for (const [index, output] of outputs.entries()) {
+      const rows = fs.readFileSync(output, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      assert.equal(rows.filter(row => row.recordType === "human_history_metadata").length, 1);
+      assert.deepEqual(rows.filter(row => row.eventType === "text_input").map(row => row.details.text),
+        [["alpha", "bravo", "charlie"][index]]);
+      if (index > 0) assert.equal(rows[1].details.checkpointId, `00000000-0000-0000-0000-00000000000${index - 1}`);
+    }
+  } finally {
+    Object.defineProperty(process, "stdin", previous);
+    control.destroy();
+    vi.unstubAllEnvs();
+  }
+});
+
+test.each([
+  { stage: "candidate sync", failedSyncs: [1], failRollback: false, switched: false },
+  { stage: "candidate sync and first rollback", failedSyncs: [1], failRollback: true, switched: false },
+  { stage: "old file sync", failedSyncs: [2], failRollback: false, switched: true },
+  { stage: "old file sync twice", failedSyncs: [2, 3], failRollback: false, switched: true },
+])("retries $stage without duplicating checkpoint records or losing events", async ({ failedSyncs, failRollback, switched }) => {
+  const outputs = ["2026-11-25T01-00-00Z", "2026-11-25T01-10-00Z"].map(id => {
+    const dir = path.join(directory, id);
+    fs.mkdirSync(dir);
+    return path.join(dir, "events.jsonl");
+  });
+  const existing = JSON.stringify({ recordType: "existing_evidence" }) + "\n";
+  fs.writeFileSync(outputs[1], existing);
+  const control = new PassThrough();
+  const previous = Object.getOwnPropertyDescriptor(process, "stdin")!;
+  vi.stubEnv("MEMMY_HISTORY_CONTINUOUS_OUTPUT", "1");
+  Object.defineProperty(process, "stdin", { configurable: true, value: control });
+  const fsync = fs.fsyncSync;
+  let syncCount = 0;
+  vi.spyOn(fs, "fsyncSync").mockImplementation(fd => {
+    if (failedSyncs.includes(++syncCount)) {
+      fs.appendFileSync(outputs[0], JSON.stringify({ recordType: "concurrent_browser_event" }) + "\n");
+      throw Object.assign(new Error("injected sync failure"), { code: "EIO" });
+    }
+    fsync(fd);
+  });
+  if (failRollback) vi.spyOn(fs, "truncateSync").mockImplementationOnce(() => { throw new Error("injected rollback failure"); });
+  const ids = [0, 1, 2].map(index => `00000000-0000-0000-0000-00000000000${index}`);
+  helper.events = ["alpha", "bravo", "charlie", "delta"].map(text => ({ kind: "keyboard.text_input", app,
+    keyboard: { text }, timestamp: new Date().toISOString() }));
+  helper.afterEvent = index => {
+    if (index < ids.length) control.write(JSON.stringify({ kind: "rotate", id: ids[index],
+      title: "next", eventsFile: outputs[1] }) + "\n");
+  };
+  try {
+    await run(["node", "test", "--out", outputs[0], "--no-screenshots", "--capture-text"]);
+    const results = vi.mocked(console.log).mock.calls.map(([line]) => String(line))
+      .filter(line => line.startsWith("[recorder-rotation] ")).map(line => JSON.parse(line.slice("[recorder-rotation] ".length)));
+    assert.deepEqual(results, ids.map((id, index) => index < failedSyncs.length
+      ? { id, complete: false, ...(switched ? { retrySync: true } : {}) } : { id, complete: true }));
+    const [old, next] = outputs.map(file => fs.readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line)));
+    assert.equal(old.filter(row => row.recordType === "concurrent_browser_event").length, failedSyncs.length);
+    assert.deepEqual(old.filter(row => row.eventType === "text_input").map(row => row.details.text), switched ? ["alpha"] : ["alpha", "bravo"]);
+    assert.equal(next.filter(row => row.eventType === "text_input").map(row => row.details.text).join(""), switched ? "bravocharliedelta" : "charliedelta");
+    assert.equal(next[0].recordType, "existing_evidence");
+    assert.equal(next.filter(row => row.recordType === "human_history_metadata").length, 1);
+    const committedId = switched ? ids[0] : ids[1];
+    assert.deepEqual(old.filter(row => row.eventType === "recording_stopped").map(row => row.details.checkpointId), [committedId]);
+    assert.equal(old.filter(row => row.eventType).at(-1).eventType, "recording_stopped");
+    assert.deepEqual(next.filter(row => row.eventType === "recording_started").map(row => row.details.checkpointId), [committedId]);
+  } finally {
+    Object.defineProperty(process, "stdin", previous);
+    control.destroy();
+    vi.unstubAllEnvs();
+  }
+});
