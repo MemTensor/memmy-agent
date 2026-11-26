@@ -83,9 +83,6 @@ export function PluginConversationRecording({ client, agentClient, config, plugi
     // The Agent owns the recording tool call, so it resumes the turn instead of the user.
     onPrompt(t("plugins.teachPermission.resumePrompt"));
   };
-  if (permissionAlert && agentClient) return <TeachModePermissionPrompt
-    client={agentClient}
-    onDismiss={() => void resumeAfterPermission(permissionAlert.plugin)} />;
   const selected = sessions.filter(item => item.plugin.id !== TEACH_MODE_PLUGIN_ID && item.session.conversationId === conversationId).sort((a, b) => Number(["starting", "recording", "finalizing"].includes(b.session.state)) - Number(["starting", "recording", "finalizing"].includes(a.session.state))
     || b.session.startedAt.localeCompare(a.session.startedAt))[0];
   const ongoing = selected && ["starting", "recording", "finalizing"].includes(selected.session.state);
@@ -119,6 +116,9 @@ export function PluginConversationRecording({ client, agentClient, config, plugi
     }
     finally { mutationEpoch.current++; busyRef.current = false; setBusy(false); setEndingAt(null); }
   }
+  if (permissionAlert && agentClient) return <TeachModePermissionPrompt
+    client={agentClient}
+    onDismiss={() => void resumeAfterPermission(permissionAlert.plugin)} />;
   if (!selected) return error || notice ? <div className="mx-4 my-2 text-sm" role={error ? "alert" : "status"}>{error ?? notice}</div> : null;
   const { session, presentation } = selected, recording = session.state === "recording";
   const elapsed = session.state === "starting" ? 0 : Math.max(0, Math.floor(((session.endedAt ? Date.parse(session.endedAt) : endingAt ?? now) - Date.parse(session.startedAt)) / 1_000));

@@ -78,6 +78,21 @@ it("does not restore the removed macOS permission card when the backend reports 
   expect(agentClient.checkComputerHistoryPermissions).not.toHaveBeenCalled();
   expect(onPrompt).not.toHaveBeenCalled();
 });
+it("keeps the conversation mounted when a permission alert appears and clears", async () => {
+  let permissionAlert: { required: string[] } | null = null;
+  const client = { invoke: vi.fn(async () => ({ event: { type: "result", output: { sessions: [], permissionAlert } } })) };
+  const agentClient = { checkComputerHistoryPermissions: vi.fn(async () => ({ supported: true, accessibility: false, inputMonitoring: false })) };
+  const render = () => root.render(<I18nProvider language="zh-CN"><PluginConversationRecording
+    client={client as any} agentClient={agentClient as any} plugins={[plugin]} conversationId="chat"
+    onPrompt={vi.fn()} /></I18nProvider>);
+  await act(async () => render());
+  permissionAlert = { required: ["accessibility"] };
+  await act(async () => window.dispatchEvent(new Event("memmy:plugins-changed")));
+  expect(agentClient.checkComputerHistoryPermissions).toHaveBeenCalled();
+  permissionAlert = null;
+  await act(async () => window.dispatchEvent(new Event("memmy:plugins-changed")));
+  expect(node.isConnected).toBe(true);
+});
 it("does not check macOS permissions on Windows, even with a stale alert", async () => {
   const { agentClient } = await fixture("win32", session, { required: ["accessibility"] });
   expect(node.querySelector(".teach-permission-card")).toBeNull();
