@@ -307,6 +307,51 @@ describe("memmy resume hook stop capture", () => {
     }
   }, 30000);
 
+  it("ends a SessionStart hook as soon as the memory service has answered", async () => {
+    // A budget timer left running keeps the hook process alive for the whole 3 seconds,
+    // and the host waits for that process before it starts the session.
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-lifecycle-prompt-exit-"));
+    const server = createServer((request: IncomingMessage, response: ServerResponse) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/api/v1/health") {
+        response.end(JSON.stringify({ features: { l3WorldModelProtocolVersions: [2] } }));
+        return;
+      }
+      if (request.url === "/api/v1/sessions/open") {
+        response.end(JSON.stringify({ sessionId: "memory-session", projectId: `ws_${"b".repeat(64)}` }));
+        return;
+      }
+      response.end(JSON.stringify({
+        sessionId: "memory-session",
+        projectId: `ws_${"b".repeat(64)}`,
+        memoryId: "l3-1",
+        memoryVersion: 7,
+        renderedContext: "Keep the package boundary stable.",
+        sourceMemoryIds: ["l1-1"],
+      }));
+    });
+    await listen(server);
+    try {
+      const port = (server.address() as { port: number }).port;
+      const hookScriptPath = installHookFixture(tempDir, "claude_code", "claude-code", `http://127.0.0.1:${port}`, runtimeAsset);
+      const startedAt = Date.now();
+      const result = await runHook(hookScriptPath, {
+        hook_event_name: "SessionStart",
+        session_id: "host-session",
+        source: "startup",
+        cwd: tempDir,
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toContain("Keep the package boundary stable.");
+      // The service answered at once, so the hook has no reason to wait out the budget.
+      expect(elapsedMs).toBeLessThan(2_000);
+    } finally {
+      await close(server);
+    }
+  }, 30000);
+
   it("sends a resume-only boundary on PostCompact without loading L3 or writing boundary state", async () => {
     tempDir = mkdtempSync(join(tmpdir(), "memmy-codex-l3-compact-"));
     const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];

@@ -186,10 +186,12 @@ async function openHookRuntimeSession(payload, transition) {
 
 /** 超过预算就当作没有这块内容，不让一次慢请求拖住整个会话启动。 */
 function withinBudget(promise, ms) {
-  return Promise.race([
-    promise,
-    new Promise((resolve) => setTimeout(() => resolve(null), ms))
-  ]);
+  let timer;
+  const budget = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  // A timer left pending keeps this process alive until it fires, and the host waits for the process.
+  return Promise.race([promise, budget]).finally(() => clearTimeout(timer));
 }
 
 async function handleL3LifecycleEvent(payload) {
