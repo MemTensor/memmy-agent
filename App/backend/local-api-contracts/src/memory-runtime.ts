@@ -1065,7 +1065,16 @@ export const ApiErrorCodeSchema = z.enum([
   "config_write_busy",
   "account_model_preset_conflict",
   "collab_quota_exceeded",
-  "plugin_entitlement_required"
+  "plugin_invalid",
+  "plugin_incompatible",
+  "plugin_adapter_unsupported",
+  "plugin_permission_denied",
+  "plugin_entitlement_required",
+  "plugin_activation_failed",
+  "plugin_runtime_error",
+  "plugin_timeout",
+  "plugin_unavailable",
+  "plugin_interaction_invalid"
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
 

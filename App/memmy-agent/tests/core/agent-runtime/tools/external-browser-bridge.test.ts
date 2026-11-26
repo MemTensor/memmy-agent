@@ -119,6 +119,41 @@ describe("external browser bridge", () => {
     expect(bridge.connectionDiagnostics().events.at(-1)).toMatchObject({ stage: 'disconnected', browser: 'chrome', closeCode: 1000 });
   });
 
+  it("does not treat the v1 completeness flag as support for document handoff", async () => {
+    const bridge = new ExternalBrowserBridge(); bridges.push(bridge);
+    const {port} = await bridge.start(0), socket = await connected(`ws://127.0.0.1:${port}/extension`, origin);
+    const ready = nextMessage(socket);
+    socket.send(JSON.stringify({type: "hello", browser: "edge", capabilities: ["teachingCapture/v1"]}));
+    const {connectionId} = await ready;
+    expect(bridge.listTeachingProfiles()[0]?.supported).toBe(false);
+    await expect(bridge.teachingCommand(connectionId, "session-a", "prepare")).rejects.toThrow("v2");
+  });
+  it("routes teaching commands and observations to the exact extension connection and expires them on disconnect", async () => {
+    const bridge = new ExternalBrowserBridge(); bridges.push(bridge);
+    const { port } = await bridge.start(0);
+    const first = await connected(`ws://127.0.0.1:${port}/extension`, origin);
+    const firstReady = nextMessage(first);
+    first.send(JSON.stringify({ type: "hello", browser: "chrome", capabilities: ["teachingCapture/v2"] }));
+    const personal = (await firstReady).connectionId;
+    const second = await connected(`ws://127.0.0.1:${port}/extension`, origin);
+    const secondReady = nextMessage(second);
+    second.send(JSON.stringify({ type: "hello", browser: "chrome", capabilities: ["teachingCapture/v2"] }));
+    const work = (await secondReady).connectionId;
+    expect(bridge.listTeachingProfiles().map(profile => profile.connectionId)).toEqual([personal, work]);
+    const observation = vi.fn(), off = bridge.subscribeTeaching(work, "session-a", observation);
+    const request = nextMessage(second), result = bridge.teachingCommand(work, "session-a", "prepare", {});
+    const command = await request;
+    expect(command).toMatchObject({ type: "teaching_command", sessionId: "session-a", action: "prepare" });
+    first.send(JSON.stringify({ type: "response", id: command.id, ok: true, result: { windowId: 999 } }));
+    first.send(JSON.stringify({ type: "teaching_event", sessionId: "session-a", kind: "event" }));
+    second.send(JSON.stringify({ type: "response", id: command.id, ok: true, result: { windowId: 20 } }));
+    expect(await result).toEqual({ windowId: 20 }); expect(observation).not.toHaveBeenCalled();
+    second.send(JSON.stringify({ type: "teaching_event", sessionId: "session-a", kind: "document", tabId: 8 }));
+    await vi.waitFor(() => expect(observation).toHaveBeenCalledOnce());
+    second.terminate();
+    await vi.waitFor(() => expect(observation).toHaveBeenLastCalledWith({ kind: "disconnected" }));
+    await expect(bridge.teachingCommand(work, "session-a", "start")).rejects.toThrow("disconnected"); off();
+  });
   it("tracks fresh history focus separately from persistent Computer Use claims", async () => {
     const bridge = new ExternalBrowserBridge(); bridges.push(bridge);
     const { port } = await bridge.start(0);

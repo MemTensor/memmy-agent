@@ -70,6 +70,61 @@ async function connect(
 }
 
 describe("plugin MCP bridge", () => {
+  it.each([true, false])("refreshes lifecycle tools only after their HTTP result, session=%s", async (session) => {
+    let state: InstalledPlugin["state"] = "active";
+    let lifecycleResponseFinished = false;
+    let responseFinishedBeforeRefresh = false;
+    const conversationPlugin = (): InstalledPlugin => ({ ...plugin, state, manifest: { ...plugin.manifest,
+      conversation: { recordingCapabilityId: "run", recordingSkillId: "teach-mode" } } });
+    const { service } = createPlugins();
+    service.list = () => [conversationPlugin()];
+    service.disable = vi.fn(async () => { state = "disabled"; return conversationPlugin(); });
+    service.enable = vi.fn(async () => { state = "active"; return conversationPlugin(); });
+    const app = Fastify();
+    app.addHook("preHandler", async (request, reply) => {
+      const body = request.body as { params?: { name?: string } } | undefined;
+      if (body?.params?.name === "plugin_manage") reply.raw.once("finish", () => { lifecycleResponseFinished = true; });
+    });
+    const refreshTools = vi.fn(async () => { responseFinishedBeforeRefresh = lifecycleResponseFinished; });
+    registerPluginMcpRoutes(app, { plugins: service, progressBus: createProgressBus(), mcpToken: "test-secret", refreshTools });
+    const url = await app.listen({ host: "127.0.0.1", port: 0 });
+    const transport = new StreamableHTTPClientTransport(new URL("/mcp/plugins", url), {
+      requestInit: { headers: { "x-memmy-mcp-token": "test-secret" } }
+    });
+    const client = new Client({ name: "lifecycle-test", version: "1" });
+    try {
+      if (session) await client.connect(transport);
+      for (const action of ["disable", "enable"] as const) {
+        lifecycleResponseFinished = false;
+        responseFinishedBeforeRefresh = false;
+        refreshTools.mockClear();
+        const params = { name: "plugin_manage", arguments: { plugin_id: plugin.id, action } };
+        if (session) {
+          await expect(client.callTool(params)).resolves.toMatchObject({
+            structuredContent: { state: action === "disable" ? "disabled" : "active", retainedUserData: true }
+          });
+        } else {
+          const response = await fetch(new URL("/mcp/plugins", url), { method: "POST",
+            headers: { "x-memmy-mcp-token": "test-secret", "content-type": "application/json", accept: "application/json, text/event-stream" },
+            body: JSON.stringify({ jsonrpc: "2.0", id: action, method: "tools/call", params }) });
+          expect(response.status).toBe(200);
+          const body = await response.text();
+          expect(body).toContain('"retainedUserData":true');
+          expect(body).not.toContain('"isError":true');
+        }
+        await vi.waitFor(() => expect(refreshTools).toHaveBeenCalledTimes(1));
+        expect(responseFinishedBeforeRefresh).toBe(true);
+      }
+      expect(service.disable).toHaveBeenCalledExactlyOnceWith(plugin.id);
+      expect(service.enable).toHaveBeenCalledExactlyOnceWith(plugin.id);
+      if (session) await expect(client.listTools()).resolves.toMatchObject({ tools: expect.any(Array) });
+    } finally {
+      if (session) await transport.terminateSession();
+      await client.close();
+      await app.close();
+    }
+  });
+
   it("wraps composed legacy tool schemas and unwraps their calls without weakening the original schema", async () => {
     const { service, invoke } = createPlugins();
     const legacy = structuredClone(plugin);
@@ -327,4 +382,16 @@ it.each(["plugin_skill_access_denied", "plugin_skill_unavailable", "plugin_skill
   expect(result.isError).toBe(true);
   expect(result._meta?.["memmy.dev/private-skill-error"]).toEqual({ code, retryable: code === "plugin_skill_unavailable" });
   expect(JSON.stringify(result)).not.toContain("PRIVATE-CONTENT-OR-CREDENTIAL-SENTINEL");
+});
+
+
+it("returns main and supporting skill files in the normal model file inventory", async () => {
+  const files = ["note/references/source.json", "note/references/teaching-gaps.json", "note/references/events.jsonl", "note/SKILL.md"];
+  const service: PluginMcpService = { list: () => [plugin], cancel: vi.fn(), async *invoke() {
+    for (const name of files) yield { type: "artifact", artifact: { id: name, name, mediaType: "text/plain", uri: "/preview", path: `/workspace/${name}`, role: "deliverable" } };
+    yield { type: "result", output: { saved: true, skillFile: "/workspace/note/SKILL.md" } };
+  } };
+  const client = await connect(service);
+  const result = await client.callTool({ name: capabilityToolName(plugin.id, "run"), arguments: {} });
+  expect(result.structuredContent).toMatchObject({ saved: true, publishedFiles: files.map(name => ({ name, path: `/workspace/${name}`, mediaType: "text/plain" })) });
 });

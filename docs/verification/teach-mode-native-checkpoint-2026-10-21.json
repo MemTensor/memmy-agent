@@ -1,0 +1,256 @@
+{
+  "date": "2026-10-21",
+  "baseCommit": "be206e34201e0616f72b9cab5e2a54b3d11c765c",
+  "target": "Jovianix/memmy-agent:pxlin/dev",
+  "cloudRegistry": null,
+  "productionBuild": "passed",
+  "changedFilesLint": "passed",
+  "relatedRegression": {
+    "passed": 762,
+    "failed": 0,
+    "skipped": 21,
+    "scope": [
+      "computer-history",
+      "plugin-host"
+    ]
+  },
+  "native": {
+    "toolchain": "MSVC 2022 x64 Release",
+    "binarySha256": "5d15301ff2bbb4e21fc551434d3dece9887d41fe103935dc3995af7b8878f6da",
+    "unitSuitesPassed": [
+      "unit",
+      "win.boundaries",
+      "win.metadata",
+      "task_video.media_integrity"
+    ],
+    "interactiveTests": [
+      {
+        "name": "integration.commit_pause",
+        "seconds": "1.26689"
+      },
+      {
+        "name": "integration.commit_control_flood",
+        "seconds": "0.530266"
+      },
+      {
+        "name": "integration.partial_baseline",
+        "seconds": "1.24326"
+      },
+      {
+        "name": "integration.observe_lifecycle",
+        "seconds": "5.2487"
+      },
+      {
+        "name": "integration.observe_checkpoint",
+        "seconds": "0.578967"
+      },
+      {
+        "name": "integration.observe_checkpoint_origin",
+        "seconds": "1.47872"
+      },
+      {
+        "name": "integration.observe_ui_hang_recovery",
+        "seconds": "3.88246"
+      },
+      {
+        "name": "integration.observe_eof",
+        "seconds": "0.0485452"
+      },
+      {
+        "name": "integration.output_flush_failure",
+        "seconds": "0.0464949"
+      },
+      {
+        "name": "integration.input_hooks_lifecycle",
+        "seconds": "2.05519"
+      },
+      {
+        "name": "integration.stop_hotkey",
+        "seconds": "0.163801"
+      }
+    ],
+    "captureOriginRegression": "Queued input predating a cutoff retains its original capture time when dequeued and lost after the cutoff; coalesced notifications preserve firstTickMs"
+  },
+  "windowsHost": {
+    "startedAt": "2026-10-21T08:27:28.536Z",
+    "finishedAt": "2026-10-21T08:27:41.186Z",
+    "runtime": "Memmy.exe Node v22.20.0",
+    "syntheticRecordingEventsInjected": false,
+    "fixtures": "Controlled Win32 UIA provider; actual production collector",
+    "sessions": [
+      {
+        "scenario": "healthy",
+        "id": "8d41ebd3-58d5-4c04-9706-8f29b86fd66c",
+        "state": "ready",
+        "availability": "available",
+        "eventCount": 1,
+        "eventsSha256": "e4047b7f3730bf7de8f2366ab31bd7677df841c35e81159873e8e96697bb3200",
+        "limitations": [
+          "foreground_events_and_accessibility_only",
+          "private_and_unverifiable_browsers_excluded",
+          "screenshots_and_audio_not_recorded"
+        ]
+      },
+      {
+        "scenario": "damaged",
+        "id": "8d52af94-492e-46ba-a5b2-0b4165308895",
+        "state": "ready",
+        "availability": "partial",
+        "eventCount": 2,
+        "eventsSha256": "1043b5d53f7051e190f4a5b070d073b9bc93926ddb74db0938bffbdd630def67",
+        "limitations": [
+          "foreground_events_and_accessibility_only",
+          "private_and_unverifiable_browsers_excluded",
+          "screenshots_and_audio_not_recorded",
+          "Capture coverage is incomplete (query_unavailable).",
+          "Capture coverage is incomplete for this fragment."
+        ]
+      },
+      {
+        "scenario": "recovered",
+        "id": "e82e193d-7a67-46fb-aa49-bcf29934ff39",
+        "state": "ready",
+        "availability": "available",
+        "eventCount": 1,
+        "eventsSha256": "59e2435ada028bb707dc6f2ab964dccd1596362053fd1f04c922765a2b9bcea2",
+        "limitations": [
+          "foreground_events_and_accessibility_only",
+          "private_and_unverifiable_browsers_excluded",
+          "screenshots_and_audio_not_recorded"
+        ]
+      }
+    ],
+    "durableMarkerCount": 11,
+    "durableGapCount": 2,
+    "markers": [
+      {
+        "recordingSequence": 3,
+        "checkpointId": "f5489be4-8317-4b04-8c46-f0fcc0c8a6c1",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 3,
+        "captureSequence": 1
+      },
+      {
+        "recordingSequence": 5,
+        "checkpointId": "606cb616-84ff-4766-82b2-c4ccfec7f605",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 5,
+        "captureSequence": 2
+      },
+      {
+        "recordingSequence": 6,
+        "checkpointId": "2029da37-6c26-4bb8-abe3-3305bfa94bb0",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 6,
+        "captureSequence": 3
+      },
+      {
+        "recordingSequence": 7,
+        "checkpointId": "db092310-0966-4b6b-a579-619bbdc2d872",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 7,
+        "captureSequence": 4
+      },
+      {
+        "recordingSequence": 9,
+        "checkpointId": "5855e03b-62ff-4c1a-8b2c-d8598668a229",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 10,
+        "captureSequence": 5
+      },
+      {
+        "recordingSequence": 12,
+        "checkpointId": "4e2c704a-85fe-42ea-ac18-c190465424a9",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 14,
+        "captureSequence": 6
+      },
+      {
+        "recordingSequence": 13,
+        "checkpointId": "ef22757c-b483-4703-81b4-656e4cc1ccf6",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 15,
+        "captureSequence": 7
+      },
+      {
+        "recordingSequence": 15,
+        "checkpointId": "19f235e9-6ea3-4c0a-8996-45894ae28405",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 17,
+        "captureSequence": 8
+      },
+      {
+        "recordingSequence": 16,
+        "checkpointId": "890f29d2-beef-4543-a329-f79fa43f923f",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 18,
+        "captureSequence": 9
+      },
+      {
+        "recordingSequence": 17,
+        "checkpointId": "b6c403e6-8dae-4a6b-a9f5-904090c0a517",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 19,
+        "captureSequence": 10
+      },
+      {
+        "recordingSequence": 19,
+        "checkpointId": "3a0d41e3-69b7-4b5b-b662-65b2827a5be7",
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 21,
+        "captureSequence": 11
+      }
+    ],
+    "gaps": [
+      {
+        "recordingSequence": 8,
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 8,
+        "code": "query_unavailable",
+        "from": "2026-10-21T08:27:32.684Z",
+        "through": "2026-10-21T08:27:33.731Z"
+      },
+      {
+        "recordingSequence": 10,
+        "nativeSessionId": "8d60ab8677d18467c5eea4ee6e87a375",
+        "nativeSequence": 11,
+        "code": "query_unavailable",
+        "from": "2026-10-21T08:27:33.735Z",
+        "through": "2026-10-21T08:27:34.985Z"
+      }
+    ],
+    "sealedSnapshotUnchanged": true,
+    "backgroundIntentAfterTeach": "running",
+    "originalHistoryBefore": "running",
+    "originalHistoryAfter": "running"
+  },
+  "preExistingChecks": {
+    "baseline": "be206e34",
+    "openadaptExportFailedCases": [
+      "text",
+      "overflow",
+      "unsupported"
+    ],
+    "fullTestTypecheckErrors": [
+      "runner-image-text-fallback.test.ts:117 TS2416",
+      "websocket-http-routes.test.ts:1283 TS18046"
+    ],
+    "baselineReproduced": true
+  },
+  "commandPipeCleanup": {
+    "reason": "Initial remote Host CI exposed an unhandled EPIPE while a cancelled command was receiving a Host-service response",
+    "initialRun": "https://github.com/Jovianix/memmy-agent/actions/runs/39566360339",
+    "fix": "Handle stdin stream errors as call failures; skip replies to terminated children",
+    "backendCompatibility": {
+      "passed": 183,
+      "skipped": 1
+    },
+    "backendTypecheck": "passed"
+  },
+  "hostCompatibilityCI": {
+    "commit": "c1de6c8af320c841d76cc6f39a6405b72abc0110",
+    "url": "https://github.com/Jovianix/memmy-agent/actions/runs/39567516921",
+    "linux": "success",
+    "windows": "success"
+  }
+}

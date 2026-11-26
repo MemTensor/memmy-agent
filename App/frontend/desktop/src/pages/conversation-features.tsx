@@ -14,6 +14,7 @@ import { PLUGIN_CHANGE_EVENT } from "../lib/plugin-change-event.js";
 import { answeredUnresolvedPluginInteraction, pendingPluginInteraction, pluginInteractionCompletedLabel, pluginInteractionWaitingLabel } from "../app/plugin-interaction-waiting-label.js";
 import { pendingAgentQuestion } from "./agent-question-card.js";
 import { PluginCapabilityHost, RecordingBarPortalContext, selectVisiblePluginCalls, isActiveLegalWorkflowCard } from "./plugin-capability-host.js";
+import { PluginConversationRecording } from "./plugin-conversation-recording.js";
 import { PluginArtifactPreviewPanel } from "./plugin-artifact-preview-panel.js";
 import { canUseAccountRecording, useRecordingEntry, RecordingEntryCard, type RecordingArchiveEntry } from "./recording-entry.js";
 import { localizeSlashCommands, type SlashCommandPaletteItem } from "./agent-command-palette.js";
@@ -205,7 +206,7 @@ export function useConversationFeatures(options: {
       }
     }, recordingAuthenticated);
 
-  const capabilityLabels = useMemo(() => buildPluginCapabilityLabels(plugins), [plugins]);
+  const capabilityLabels = useMemo(() => buildPluginCapabilityLabels(plugins, language), [plugins, language]);
   const targets = useMemo(() => plugins.filter((plugin) => plugin.state === "active" && plugin.eligibility?.canUse !== false)
     .flatMap((plugin) => (plugin.manifest.commands ?? [])
       // Older installed packages still map this shortcut to session-start.
@@ -311,7 +312,9 @@ export function useConversationFeatures(options: {
     {recording.compactOpen && !legalQuestionOwnsComposer ? <RecordingEntryCard session={recording.compactSession}
       onStart={() => { openRecording(); recording.session.start(); }}
       disabled={!clients?.asr || recording.compactBlocked} onClose={recording.closeCompact} /> : null}
-    {error?.conversationId === conversationId ? <div role="alert" className="text-sm text-red-600">{error.message}</div> : null}</>;
+    {error?.conversationId === conversationId ? <div role="alert" className="text-sm text-red-600">{error.message}</div> : null}
+    <PluginConversationRecording client={clients?.plugins} config={clients?.runtimeConfig}
+      plugins={plugins} conversationId={conversationId} onPrompt={text => options.onSend(text)} /></>;
   // Microphone owners stay mounted while navigation only moves/hides their control bar.
   const recorderGroups = new Map<string, PluginUiCall[]>();
   for (const call of ui?.calls ?? []) {
