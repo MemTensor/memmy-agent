@@ -27,6 +27,7 @@ export interface CloudHealth {
 }
 
 export interface GetModelCapabilityCatalogInput {
+  uuid: string;
   catalogVersion?: number;
 }
 

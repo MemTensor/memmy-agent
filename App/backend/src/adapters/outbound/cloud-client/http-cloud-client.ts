@@ -114,6 +114,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
 
   return {
     async getModelCapabilityCatalog(input: GetModelCapabilityCatalogInput): Promise<ModelCapabilityCatalogResult> {
+      if (!input.uuid?.trim()) throw new Error("Model catalog requires an account credential");
       if (input.catalogVersion !== undefined
         && (!Number.isSafeInteger(input.catalogVersion) || input.catalogVersion < 1)) {
         throw new Error("Invalid model catalog version");
@@ -123,6 +124,7 @@ export function createHttpCloudClient(options: CreateHttpCloudClientOptions = {}
       const response = await fetchImpl(`${baseUrl}/api/agent/model-config${query}`, {
         method: "GET",
         headers: {
+          authorization: `Bearer ${input.uuid}`,
           lang: "zh",
           "x-agent-region": normalizeAgentRegion(process.env.MEMMY_APP_EDITION)
         },

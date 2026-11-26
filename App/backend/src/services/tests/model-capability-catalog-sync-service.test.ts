@@ -16,10 +16,12 @@ describe("model capability catalog synchronization", () => {
   let directory: string;
   let filePath: string;
   const getModelCapabilityCatalog = vi.fn<CloudClient["getModelCapabilityCatalog"]>();
+  let credential: string | null;
   let services: ModelCapabilityCatalogSyncService[];
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), "memmy-catalog-sync-"));
     filePath = join(directory, "models.json");
+    credential = "test-account-credential";
     services = [];
     getModelCapabilityCatalog.mockReset().mockResolvedValue({ status: "updated", catalog });
   });
@@ -31,7 +33,7 @@ describe("model capability catalog synchronization", () => {
   });
   const service = () => {
     const sync = createModelCapabilityCatalogSyncService({
-      cloudClient: { getModelCapabilityCatalog }, filePath
+      cloudClient: { getModelCapabilityCatalog }, getCloudUuid: () => credential, filePath
     });
     services.push(sync);
     return sync;
@@ -41,7 +43,7 @@ describe("model capability catalog synchronization", () => {
     vi.useFakeTimers();
     const timers = vi.spyOn(globalThis, "setTimeout");
     const result = sync.sync();
-    for (const delay of [2_000, 4_000, 8_000]) {
+    for (const delay of [5_000, 10_000, 30_000]) {
       await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1));
       expect(timers).toHaveBeenLastCalledWith(expect.any(Function), delay);
       await vi.advanceTimersByTimeAsync(delay);
@@ -51,7 +53,7 @@ describe("model capability catalog synchronization", () => {
 
   it("requests and persists a full catalog when the file is missing", async () => {
     expect(await service().sync()).toEqual({ status: "updated", catalog });
-    expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({});
+    expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({ uuid: credential });
     expect(await readModelCapabilityCatalog(filePath)).toEqual(catalog);
   });
 
@@ -60,7 +62,7 @@ describe("model capability catalog synchronization", () => {
       expect(getModelCapabilityCatalog).toHaveBeenCalledOnce();
     });
     const sync = createModelCapabilityCatalogSyncService({
-      cloudClient: { getModelCapabilityCatalog }, filePath, onUpdated
+      cloudClient: { getModelCapabilityCatalog }, getCloudUuid: () => credential, filePath, onUpdated
     });
     services.push(sync);
     await sync.sync();
@@ -74,7 +76,7 @@ describe("model capability catalog synchronization", () => {
   it.each(["{", JSON.stringify({ ...catalog, catalogVersion: 0 })])("requests a full catalog when the local file is invalid", async (content) => {
     await writeFile(filePath, content);
     expect((await service().sync()).status).toBe("updated");
-    expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({});
+    expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({ uuid: credential });
     expect(await readModelCapabilityCatalog(filePath)).toEqual(catalog);
   });
 
@@ -83,7 +85,7 @@ describe("model capability catalog synchronization", () => {
     const before = await stat(filePath);
     getModelCapabilityCatalog.mockResolvedValueOnce({ status: "not-modified" });
     expect(await service().sync()).toEqual({ status: "not-modified", catalog });
-    expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({ catalogVersion: 21 });
+    expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({ uuid: credential, catalogVersion: 21 });
     const after = await stat(filePath);
     expect([after.ino, after.mtimeMs]).toEqual([before.ino, before.mtimeMs]);
   });
@@ -91,7 +93,7 @@ describe("model capability catalog synchronization", () => {
   it("replaces the whole catalog after a version change", async () => {
     await writeModelCapabilityCatalog({ ...catalog, catalogVersion: 20, models: {} }, filePath);
     expect(await service().sync()).toEqual({ status: "updated", catalog });
-    expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({ catalogVersion: 20 });
+    expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({ uuid: credential, catalogVersion: 20 });
     expect(await readModelCapabilityCatalog(filePath)).toEqual(catalog);
   });
 
@@ -131,16 +133,19 @@ describe("model capability catalog synchronization", () => {
     vi.useFakeTimers();
     const result = service().sync();
     await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1));
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(await result).toEqual({ status: "updated", catalog });
-    expect(getModelCapabilityCatalog).toHaveBeenNthCalledWith(2, {});
+    expect(getModelCapabilityCatalog).toHaveBeenNthCalledWith(2, { uuid: credential });
   });
 
-  it("synchronizes without any account dependency", async () => {
+  it("requires a credential without sending an anonymous request and can synchronize after login", async () => {
+    credential = null;
     const sync = service();
+    expect(await sync.sync()).toMatchObject({ status: "failed", reason: "unauthenticated", catalog: null });
+    expect(getModelCapabilityCatalog).not.toHaveBeenCalled();
+    credential = "new-account-credential";
     expect((await sync.sync()).status).toBe("updated");
-    expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({});
-    expect(await readModelCapabilityCatalog(filePath)).toEqual(catalog);
+    expect(getModelCapabilityCatalog).toHaveBeenCalledExactlyOnceWith({ uuid: credential });
   });
 
   it("merges simultaneous synchronization requests and permits a later refresh", async () => {
@@ -164,12 +169,12 @@ describe("model capability catalog synchronization", () => {
     const sync = service();
     const first = sync.sync();
     await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1));
-    expect(timers).toHaveBeenLastCalledWith(expect.any(Function), 2_000);
+    expect(timers).toHaveBeenLastCalledWith(expect.any(Function), 5_000);
     expect(sync.sync()).toBe(first);
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(5_000);
     await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1));
-    expect(timers).toHaveBeenLastCalledWith(expect.any(Function), 4_000);
-    await vi.advanceTimersByTimeAsync(4_000);
+    expect(timers).toHaveBeenLastCalledWith(expect.any(Function), 10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(await first).toEqual({ status: "updated", catalog });
     expect(getModelCapabilityCatalog).toHaveBeenCalledTimes(3);
     expect(vi.getTimerCount()).toBe(0);
