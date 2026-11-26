@@ -7,15 +7,18 @@ import { createEventsConnection } from "../api/events.js";
 import { notifyPluginChange } from "../lib/plugin-change-event.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { Button } from "../components/button.js";
+import { TeachModePermissionPrompt } from "./teach-mode-permission-prompt.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
 import { TEACH_MODE_PLUGIN_ID } from "../lib/teach-mode-plugin.js";
+import type { MemmyAgentClient } from "../api/memmy-agent-client.js";
 
-export function PluginConversationRecording({ client, config, plugins, conversationId: currentConversationId, onPrompt }: {
-  client?: PluginsClient; config?: RuntimeConfig; plugins: InstalledPlugin[]; conversationId: string | null; onPrompt: (text: string) => void;
+export function PluginConversationRecording({ client, agentClient, config, plugins, conversationId: currentConversationId, onPrompt }: {
+  client?: PluginsClient; agentClient?: MemmyAgentClient; config?: RuntimeConfig; plugins: InstalledPlugin[]; conversationId: string | null; onPrompt: (text: string) => void;
 }) {
   const { t } = useTranslation();
   const conversationId = currentConversationId?.replace(/^websocket:/, "") ?? null;
   const [sessions, setSessions] = useState<Array<{ plugin: InstalledPlugin; session: EventCaptureSession; presentation?: PluginConversationPresentation }>>([]);
+  const [permissionAlert, setPermissionAlert] = useState<{ plugin: InstalledPlugin; required: string[] } | null>(null);
   const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState(false), [notice, setNotice] = useState("");
   const [endingAt, setEndingAt] = useState<number | null>(null);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
@@ -40,11 +43,15 @@ export function PluginConversationRecording({ client, config, plugins, conversat
           const response = await client.invoke(plugin.id, plugin.manifest.conversation!.recordingCapabilityId,
             { conversationId, input: { action: "status" }, origin: "user", background: true });
           if (response.event.type === "error") { notifyPluginChange(); throw new Error(response.event.message); }
-          const output = response.event.type === "result" ? response.event.output as { sessions?: unknown[] } : {};
-          return { sessions: (output.sessions ?? []).map(raw => ({ plugin, session: EventCaptureSessionSchema.parse(raw), presentation: PluginConversationPresentationSchema.optional().parse((raw as { presentation?: unknown }).presentation) })) };
+          const output = response.event.type === "result" ? response.event.output as { sessions?: unknown[]; permissionAlert?: unknown } : {};
+          const alert = output.permissionAlert as { required?: unknown } | null | undefined;
+          return { sessions: (output.sessions ?? []).map(raw => ({ plugin, session: EventCaptureSessionSchema.parse(raw), presentation: PluginConversationPresentationSchema.optional().parse((raw as { presentation?: unknown }).presentation) })),
+            alert: alert && Array.isArray(alert.required)
+              ? { plugin, required: alert.required.filter((value): value is string => typeof value === "string") } : null };
         }));
         if (active && epoch === mutationEpoch.current) {
           setSessions(results.flatMap(result => result.sessions).filter(item => item.session.conversationId === conversationId));
+          setPermissionAlert(results.map(result => result.alert).find(Boolean) ?? null);
           lifecycleRefreshRef.current = false;
           setError(null);
         }
@@ -68,6 +75,17 @@ export function PluginConversationRecording({ client, config, plugins, conversat
     const changed = () => void refresh(); window.addEventListener("memmy:plugins-changed", changed);
     return () => { active = false; clearInterval(timer); connection?.close(); window.removeEventListener("memmy:plugins-changed", changed); };
   }, [client, config, conversationId, key]);
+  const resumeAfterPermission = async (plugin: InstalledPlugin) => {
+    setPermissionAlert(null);
+    if (!client || !conversationId) return;
+    await client.invoke(plugin.id, plugin.manifest.conversation!.recordingCapabilityId,
+      { conversationId, origin: "user", input: { action: "permission-alert", pending: false } }).catch(() => undefined);
+    // The Agent owns the recording tool call, so it resumes the turn instead of the user.
+    onPrompt(t("plugins.teachPermission.resumePrompt"));
+  };
+  if (permissionAlert && agentClient) return <TeachModePermissionPrompt
+    client={agentClient}
+    onDismiss={() => void resumeAfterPermission(permissionAlert.plugin)} />;
   const selected = sessions.filter(item => item.plugin.id !== TEACH_MODE_PLUGIN_ID && item.session.conversationId === conversationId).sort((a, b) => Number(["starting", "recording", "finalizing"].includes(b.session.state)) - Number(["starting", "recording", "finalizing"].includes(a.session.state))
     || b.session.startedAt.localeCompare(a.session.startedAt))[0];
   const ongoing = selected && ["starting", "recording", "finalizing"].includes(selected.session.state);
