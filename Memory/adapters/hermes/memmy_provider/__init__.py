@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -64,7 +65,7 @@ class MemmyProvider(MemoryProvider):
             query = user_content or self._query
             if not self._turn_id:
                 self.prefetch(query, session_id=session_id)
-            self._request(f"/turns/{self._turn_id}/complete", {"sessionId": self._session_id, "query": query, "answer": assistant_content or "", "status": "succeeded"}, timeout=10)
+            self._request(f"/turns/{urllib.parse.quote(self._turn_id, safe='')}/complete", {"sessionId": self._session_id, "query": query, "answer": assistant_content or "", "status": "succeeded"}, timeout=10)
         except Exception:
             pass
         finally:
@@ -74,7 +75,7 @@ class MemmyProvider(MemoryProvider):
         if not self._session_id:
             return
         try:
-            self._request(f"/sessions/{self._session_id}/close", {})
+            self._request(f"/sessions/{urllib.parse.quote(self._session_id, safe='')}/close", {})
         except Exception:
             pass
 
@@ -106,7 +107,7 @@ class MemmyProvider(MemoryProvider):
             if tool_name == "memos_search":
                 value = self._request("/memory/search", {"query": args.get("query", ""), "limit": args.get("maxResults", 10), "verbose": True})
             elif tool_name in ("memos_get", "memos_skill_get"):
-                value = self._request(f"/memory/{args.get('id', '')}", method="GET")
+                value = self._request(f"/memory/{urllib.parse.quote(str(args.get('id', '')), safe='')}", method="GET")
             elif tool_name == "memos_timeline":
                 value = self._request(f"/episodes/{args.get('episodeId', '')}", method="GET")
             elif tool_name == "memos_environment":
