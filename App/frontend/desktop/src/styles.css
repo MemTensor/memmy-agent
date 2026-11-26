@@ -1982,8 +1982,19 @@ body.memmy-thread-panel-fullscreen .sidebar-restore-button {
 }
 
 .sidebar-shell--windows-titlebar .memory-page-main .app-frame-page-content,
-.sidebar-shell--windows-titlebar .settings-page > .app-frame-page-content,
 .sidebar-shell--windows-titlebar .app-frame-main .tools-page-content {
+  padding-top: var(--app-frame-menu-padding-top);
+}
+
+/* Settings page lives outside .app-frame-main and must clear the native drag
+ * region on its own. Use the toolbar height plus a small buffer. */
+.sidebar-shell--windows-titlebar .settings-page > .app-frame-page-content {
+  padding-top: calc(var(--codex-toolbar-height) + 10px);
+}
+
+/* When settings is embedded inside the main app frame the frame's own
+ * topbar already clears the drag region; only the sidebar menu offset applies. */
+.sidebar-shell--windows-titlebar .app-frame-main .settings-page > .app-frame-page-content {
   padding-top: var(--app-frame-menu-padding-top);
 }
 
