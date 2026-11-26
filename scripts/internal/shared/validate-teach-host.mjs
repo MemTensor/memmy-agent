@@ -70,7 +70,6 @@ try {
   node("frontend-types", frontend, [tsc, "-p", "tsconfig.json", "--noEmit"]);
   node("agent-lint", agent, [path.join(agent, "node_modules/eslint/bin/eslint.js"),
     "src/tools/computer-history/**/*.ts", "tests/tools/computer-history/**/*.ts",
-    "src/tools/computer-recordings/**/*.ts", "tests/tools/computer-recordings/**/*.ts",
     "src/core/agent-runtime/task-activity.ts", "src/core/agent-runtime/plugin-update-lease.ts",
     "src/core/agent-runtime/loop.ts", "src/core/agent-runtime/subagent.ts",
     "tests/core/agent-runtime/task-activity.test.ts", "tests/core/agent-runtime/plugin-update-lease.test.ts",

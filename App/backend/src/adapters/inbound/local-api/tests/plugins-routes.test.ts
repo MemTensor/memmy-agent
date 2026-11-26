@@ -169,3 +169,31 @@ describe("plugin routes", () => {
     expect(plugins.install).not.toHaveBeenCalled();
   });
 });
+
+it("preserves artifact events in both invocation response and progress stream", async () => {
+  const service = createService();
+  const artifact = { type: "artifact" as const, artifact: { id: "skill", name: "SKILL.md",
+    uri: "/api/v1/plugins/example/artifacts/skill/preview", mediaType: "text/markdown" } };
+  service.invoke = async function* () { yield artifact; yield { type: "result", output: { saved: true } }; };
+  const published: unknown[] = [];
+  app = createApp(service, event => published.push(event));
+  const response = await app.inject({ method: "POST", url: `/api/v1/plugins/${plugin.id}/capabilities/run/invoke`,
+    payload: { conversationId: "chat", origin: "user", input: {} } });
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toMatchObject({ event: { type: "result", output: { saved: true } }, events: [artifact] });
+  expect(published).toContainEqual(expect.objectContaining({ event: artifact }));
+});
+
+it.each(["teach-mode", "other-plugin"])("rejects hidden mutations while preserving declared status for %s", async id => {
+  const service = createService();
+  service.get = vi.fn(() => ({ ...plugin, id, manifest: { ...plugin.manifest,
+    conversation: { recordingCapabilityId: "run", recordingSkillId: "capture" } } }));
+  const invoke = vi.spyOn(service, "invoke");
+  app = createApp(service);
+  const url = `/api/v1/plugins/${id}/capabilities/run/invoke`;
+  expect((await app.inject({ method: "POST", url, payload: { conversationId: "chat", origin: "user",
+    background: true, input: { action: "stop" } } })).statusCode).toBe(400);
+  expect(invoke).not.toHaveBeenCalled();
+  expect((await app.inject({ method: "POST", url, payload: { conversationId: "chat", origin: "user",
+    background: true, input: { action: "status" } } })).statusCode).toBe(200);
+});

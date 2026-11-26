@@ -11,16 +11,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import YAML from "yaml";
 import { formatOutput, runCommand } from "../src/cli/commands.js";
 import { renderSetupResult } from "../src/cli/render/index.js";
 
 const roots: string[] = [];
 const envBackup: Record<string, string | undefined> = {};
-
-// Each fixture chooses a temporary HOME; a host Codex override must not escape it.
-beforeEach(() => setEnv("CODEX_HOME", undefined));
 
 afterEach(() => {
   for (const [key, value] of Object.entries(envBackup)) {
@@ -859,10 +856,9 @@ function createAllAgentRoots(root: string): void {
   mkdirSync(join(root, ".hermes"), { recursive: true });
 }
 
-function setEnv(key: string, value: string | undefined): void {
+function setEnv(key: string, value: string): void {
   if (!(key in envBackup)) {
     envBackup[key] = process.env[key];
   }
-  if (value === undefined) delete process.env[key];
-  else process.env[key] = value;
+  process.env[key] = value;
 }

@@ -3,11 +3,11 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { EventCaptureSubscription, CaptureCheckpoint, CaptureRange } from "./core/event-capture-source.js";
-import { DEFAULT_OBSERVATION_SETTINGS, evaluateObservation, parseObservationSettings } from "./core/observation-settings.js";
-import { defaultSettingsFile } from "./core/settings-store.js";
-import { redactSensitive } from "./core/redaction.js";
+import { DEFAULT_OBSERVATION_SETTINGS, evaluateObservation, parseObservationSettings } from "./mac/observation-settings.js";
+import { defaultSettingsFile } from "./mac/settings-store.js";
+import { redactSensitive } from "./mac/redaction.js";
 import { sanitizeBrowserUrl } from "./browser-privacy.js";
-import { parseWindowsSettings } from "./win/settings.js";
+import { parseWindowsSettings } from "./teaching-windows-settings.js";
 
 export const BrowserCaptureRequestSchema = z.object({ name: z.enum(["chrome", "edge"]),
   connection_id: z.string().min(1).max(100).optional() }).strict();

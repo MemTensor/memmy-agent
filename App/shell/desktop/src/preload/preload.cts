@@ -122,7 +122,7 @@ interface MemmyPreloadApi {
   selectEmbeddedBrowserTab(tabId: number | null): void;
   setMenuBarIcon(enabled: boolean): Promise<DesktopMenuBarIconResult>;
   setComputerHistoryTrayIndicator(state: { enabled: boolean; recording: boolean }): void;
-  updateTeachingRecordingControls(state: { id: string; startedAt: string; state: 'starting' | 'recording' | 'finalizing'; conversationId: string; labels: { stop: string; discard: string; drag: string; confirmTitle?: string; confirmMessage?: string; confirmDiscard?: string; confirmCancel?: string } } | null): Promise<void>;
+  updateTeachingRecordingControls(state: { id: string; startedAt: string; state: 'starting' | 'recording' | 'finalizing'; conversationId: string; pluginId?: string; capabilityId?: string; labels: { stop: string; discard: string; drag: string; error?: string; confirmTitle?: string; confirmMessage?: string; confirmDiscard?: string; confirmCancel?: string } } | null): Promise<void>;
   onTeachingRecordingControlAction(callback: (action: { id: string; action: 'stop' | 'cancel' }) => void): () => void;
   onTeachingRecordingControlsVisibility(callback: (visible: boolean) => void): () => void;
   onMainWindowActionRequest(callback: (request: MainWindowActionRequest) => void): () => void;
@@ -524,7 +524,7 @@ const memmyPreloadApi: MemmyPreloadApi = {
     ipcRenderer.send("memmy:set-computer-history-tray-indicator", state);
   },
 
-  updateTeachingRecordingControls(state: { id: string; startedAt: string; state: 'starting' | 'recording' | 'finalizing'; conversationId: string; labels: { stop: string; discard: string; drag: string; confirmTitle?: string; confirmMessage?: string; confirmDiscard?: string; confirmCancel?: string } } | null): Promise<void> {
+  updateTeachingRecordingControls(state: { id: string; startedAt: string; state: 'starting' | 'recording' | 'finalizing'; conversationId: string; pluginId?: string; capabilityId?: string; labels: { stop: string; discard: string; drag: string; error?: string; confirmTitle?: string; confirmMessage?: string; confirmDiscard?: string; confirmCancel?: string } } | null): Promise<void> {
     return ipcRenderer.invoke('memmy:teaching-recording-controls:update', state);
   },
 

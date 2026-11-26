@@ -2,8 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { compactEventEvidence } from "../../../src/tools/computer-history/core/summary-writer.js";
-import { redactSensitive } from "../../../src/tools/computer-history/core/redaction.js";
+import { compactEventEvidence } from "../../../src/tools/computer-history/mac/summary-writer.js";
+import { redactSensitive } from "../../../src/tools/computer-history/mac/redaction.js";
 import { PluginEventSessions } from "../../../src/tools/plugin-host/event-sessions.js";
 import type { CaptureCheckpoint, EventCaptureSource } from "../../../src/tools/computer-history/core/event-capture-source.js";
 

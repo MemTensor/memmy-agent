@@ -3,8 +3,8 @@ import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { browserHistoryConfiguration, BROWSER_HISTORY_CONFIG_TTL_MS } from "../../../tools/computer-history/browser-history-bridge.js";
 import type { BrowserHistoryCaptureIntent, BrowserHistoryTrustedContext } from "../../../tools/computer-history/browser-semantic-history.js";
-import { redactSensitive } from "../../../tools/computer-history/core/redaction.js";
-import { DEFAULT_OBSERVATION_SETTINGS } from "../../../tools/computer-history/core/observation-settings.js";
+import { redactSensitive } from "../../../tools/computer-history/mac/redaction.js";
+import { DEFAULT_OBSERVATION_SETTINGS } from "../../../tools/computer-history/mac/observation-settings.js";
 
 // Derived from the public key in the packaged MV3 manifest. The private key is
 // not needed to load an unpacked extension and is deliberately not distributed.

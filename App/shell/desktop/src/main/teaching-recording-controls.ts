@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 export type TeachingRecordingControlState = { id: string; startedAt: string; state: 'starting' | 'recording' | 'finalizing';
   conversationId: string; pluginId?: string; capabilityId?: string; labels: { stop: string; discard: string; drag: string;
-    confirmTitle?: string; confirmMessage?: string; confirmDiscard?: string; confirmCancel?: string } };
+    error?: string; confirmTitle?: string; confirmMessage?: string; confirmDiscard?: string; confirmCancel?: string } };
 export type TeachingRecordingControlAction = { id: string; action: 'stop' | 'cancel' };
 
 const channel = 'memmy:teaching-recording-controls';
@@ -128,7 +128,7 @@ function validState(value: unknown): value is TeachingRecordingControlState {
     && Boolean(state.labels && typeof state.labels === 'object'
       && ['stop', 'discard', 'drag'].every(key => typeof (state.labels as Record<string, unknown>)[key] === 'string'
         && ((state.labels as Record<string, string>)[key]?.length ?? 0) <= 80)
-      && ['confirmTitle', 'confirmMessage', 'confirmDiscard', 'confirmCancel'].every(key => {
+      && ['error', 'confirmTitle', 'confirmMessage', 'confirmDiscard', 'confirmCancel'].every(key => {
         const label = (state.labels as Record<string, unknown>)[key];
         return label === undefined || (typeof label === 'string' && label.length <= 160);
       }));
@@ -257,9 +257,18 @@ async function invokeRecording(config: { baseUrl: string; localToken: string }, 
   return result.event.output as Record<string, unknown>;
 }
 
+/** Removes only Teach's panel and IPC wiring during desktop shutdown. */
+export function unregisterTeachingRecordingControls(): void {
+  dispose();
+  for (const name of ['update', 'ready']) ipcMain.removeHandler(`${channel}:${name}`);
+  for (const name of ['confirm', 'action']) ipcMain.removeAllListeners(`${channel}:${name}`);
+}
+
 export function registerTeachingRecordingControls(getMainWindow: () => BrowserWindow | null,
   getRuntimeConfig: () => { baseUrl: string; localToken: string } | null): void {
   let syncing = false, controlling = false;
+  let controlError: string | null = null;
+  let mutationEpoch = 0;
   const keepMainWindowVisible = () => {
     const main = getMainWindow();
     if (!main || main.isDestroyed()) return;
@@ -274,12 +283,14 @@ export function registerTeachingRecordingControls(getMainWindow: () => BrowserWi
     const session = current, config = getRuntimeConfig();
     if (!session || !config || syncing || controlling) return;
     syncing = true;
+    const epoch = mutationEpoch;
     try {
       const output = await invokeRecording(config, session.conversationId, { action: 'status' },
         { pluginId: session.pluginId, capabilityId: session.capabilityId });
-      if (current?.id !== session.id) return;
-      const match = Array.isArray(output.sessions) ? output.sessions.find(value =>
-        value && typeof value === 'object' && (value as { id?: unknown }).id === session.id) as { state?: string; startedAt?: string } | undefined : undefined;
+      if (current?.id !== session.id || epoch !== mutationEpoch) return;
+      const candidates = [output.active, ...(Array.isArray(output.sessions) ? output.sessions : [])];
+      const match = candidates.find(value => value && typeof value === 'object'
+        && (value as { id?: unknown }).id === session.id) as { state?: string; startedAt?: string } | undefined;
       if (!match || !['starting', 'recording', 'finalizing'].includes(match.state ?? '')) { dispose(); return; }
       if (match.state !== current.state || match.startedAt !== current.startedAt) {
         current = { ...current, state: match.state as TeachingRecordingControlState['state'],
@@ -300,7 +311,7 @@ export function registerTeachingRecordingControls(getMainWindow: () => BrowserWi
     // recording. The Host owns its terminal state; verify it independently.
     if (value === null) { void syncFromHost(); return; }
     if (!validState(value)) return;
-    if (current?.id !== value.id) dispose();
+    if (current?.id !== value.id) { dispose(); controlError = null; }
     current = value;
     keepMainWindowVisible();
     if (!panel) createPanel();
@@ -313,7 +324,7 @@ export function registerTeachingRecordingControls(getMainWindow: () => BrowserWi
   });
   ipcMain.on(`${channel}:confirm`, (event, open: unknown) => {
     if (!panel || event.sender !== panel.webContents || event.senderFrame !== panel.webContents.mainFrame) return;
-    setConfirming(open === true);
+    setConfirming(open === true || Boolean(controlError));
   });
   ipcMain.on(`${channel}:action`, (event, action: unknown) => {
     if (!panel || event.sender !== panel.webContents || event.senderFrame !== panel.webContents.mainFrame
@@ -324,14 +335,26 @@ export function registerTeachingRecordingControls(getMainWindow: () => BrowserWi
     const session = current, config = getRuntimeConfig();
     if (!config) return;
     controlling = true;
+    mutationEpoch++;
+    controlError = null;
+    panel.webContents.send(`${channel}:feedback`, { busy: true, error: null });
     void invokeRecording(config, session.conversationId,
       { action: value.action, session_id: session.id },
       { pluginId: session.pluginId, capabilityId: session.capabilityId }).then(output => {
         if (current?.id !== session.id) return;
-        if (!['starting', 'recording', 'finalizing'].includes(String(output.state))) { dispose(); return; }
+        if (!['starting', 'recording', 'finalizing', 'ready', 'cancelled', 'failed'].includes(String(output.state)))
+          throw new Error('Teach Mode returned an invalid recording state');
+        if (['ready', 'cancelled', 'failed'].includes(String(output.state))) { dispose(); return; }
         current = { ...current, state: output.state as TeachingRecordingControlState['state'] };
         panel?.webContents.send(`${channel}:state`, current);
-      }).catch(() => undefined).finally(() => { controlling = false; });
+      }).catch(() => {
+        if (current?.id !== session.id) return;
+        controlError = session.labels.error ?? 'Recording control failed. Please try again.';
+        setConfirming(true);
+      }).finally(() => {
+        controlling = false;
+        if (current?.id === session.id) panel?.webContents.send(`${channel}:feedback`, { busy: false, error: controlError });
+      });
   });
 }
 
@@ -347,18 +370,20 @@ function html(): string {
   .handle{-webkit-app-region:drag;cursor:grab;width:24px;border-left:.5px solid #ffffff26;display:flex;align-items:center;justify-content:center;user-select:none}.handle svg{width:10px;height:14px;stroke:#a0a0a0;fill:none;stroke-width:1.2;stroke-linecap:round}
   .confirm{display:none;width:276px;flex:none;padding:14px 14px 12px;border:1px solid #3b3b3b;border-radius:12px;background:#2f2f2f;box-shadow:0 4px 12px #0005}.confirm.open{display:block}
   .confirm h1{margin:0 0 4px;font-size:13px;font-weight:600;line-height:18px}.confirm p{margin:0 0 12px;font-size:12px;line-height:17px;color:#c8c8c8}
+  .error{display:none;width:276px;padding:10px;border-radius:8px;background:#2f2f2f;color:#ffb061;font-size:12px}.error.open{display:block}
   .actions{display:flex;justify-content:flex-end;gap:8px}.actions button{height:28px;padding:0 12px;border-radius:7px;font-size:12px;font-weight:500}
   .keep{background:#ffffff1f}.keep:hover{background:#ffffff2e}.drop{background:#e5484d}.drop:hover{background:#f05a5f}
-  </style></head><body><div id="confirm" class="confirm" role="alertdialog" aria-labelledby="confirm-title" aria-describedby="confirm-message"><h1 id="confirm-title">确定要丢弃这段录制吗？</h1><p id="confirm-message">录到的内容会被删除，无法恢复。</p><div class="actions"><button id="keep" class="keep">继续录制</button><button id="drop" class="drop">丢弃录制</button></div></div><div class="bar"><button id="end" class="end" title="录制完成（最长 30 分钟）" aria-label="录制完成"><span class="stop"></span><span id="time" class="time">0:00</span></button><button id="discard" class="discard" title="丢弃录制" aria-label="丢弃录制" aria-haspopup="dialog"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6.5 7l1 13h9l1-13M10 10v7M14 10v7"/></svg></button><div class="handle" title="拖动控制条" aria-label="拖动控制条"><svg viewBox="0 0 12 16"><path d="M2 4h8M2 8h8M2 12h8"/></svg></div></div><script>
-  const bridge=window.teachingRecordingControls,$=id=>document.getElementById(id),end=$('end'),discard=$('discard'),time=$('time'),confirmBox=$('confirm');let state=null;
+  </style></head><body><p id="error" class="error" role="alert"></p><div id="confirm" class="confirm" role="alertdialog" aria-labelledby="confirm-title" aria-describedby="confirm-message"><h1 id="confirm-title">确定要丢弃这段录制吗？</h1><p id="confirm-message">录到的内容会被删除，无法恢复。</p><div class="actions"><button id="keep" class="keep">继续录制</button><button id="drop" class="drop">丢弃录制</button></div></div><div class="bar"><button id="end" class="end" title="录制完成（最长 30 分钟）" aria-label="录制完成"><span class="stop"></span><span id="time" class="time">0:00</span></button><button id="discard" class="discard" title="丢弃录制" aria-label="丢弃录制" aria-haspopup="dialog"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6.5 7l1 13h9l1-13M10 10v7M14 10v7"/></svg></button><div class="handle" title="拖动控制条" aria-label="拖动控制条"><svg viewBox="0 0 12 16"><path d="M2 4h8M2 8h8M2 12h8"/></svg></div></div><script>
+  const bridge=window.teachingRecordingControls,$=id=>document.getElementById(id),end=$('end'),discard=$('discard'),time=$('time'),confirmBox=$('confirm');let state=null,busy=false;
   function setConfirm(open){if(confirmBox.classList.contains('open')===open)return;confirmBox.classList.toggle('open',open);discard.classList.toggle('active',open);bridge.confirm(open)}
-  function tick(){if(!state)return;const sec=state.state==='starting'?0:Math.max(0,Math.min(1800,Math.floor((Date.now()-Date.parse(state.startedAt))/1000)));const mm=String(Math.floor(sec/60)),ss=String(sec%60).padStart(2,'0');time.textContent=mm+':'+ss;time.classList.toggle('warning',sec>=1740);end.disabled=state.state!=='recording';discard.disabled=state.state==='finalizing'}
+  function tick(){if(!state)return;const sec=state.state==='starting'?0:Math.max(0,Math.min(1800,Math.floor((Date.now()-Date.parse(state.startedAt))/1000)));const mm=String(Math.floor(sec/60)),ss=String(sec%60).padStart(2,'0');time.textContent=mm+':'+ss;time.classList.toggle('warning',sec>=1740);end.disabled=busy||state.state!=='recording';discard.disabled=busy||state.state==='finalizing';$('drop').disabled=busy;$('keep').disabled=busy}
   end.onclick=()=>{if(state)bridge.action({id:state.id,action:'stop'})};
   discard.onclick=()=>{if(state)setConfirm(!confirmBox.classList.contains('open'))};
   $('keep').onclick=()=>setConfirm(false);
   $('drop').onclick=()=>{if(state)bridge.action({id:state.id,action:'cancel'})};
   document.addEventListener('keydown',event=>{if(event.key==='Escape')setConfirm(false)});
   function label(el,text){if(text){el.title=text;el.setAttribute('aria-label',text)}}
+  bridge.subscribeFeedback(next=>{busy=next.busy;if(next.error)setConfirm(false);$('error').textContent=next.error||'';$('error').classList.toggle('open',Boolean(next.error));tick()});
   bridge.subscribe(next=>{state=next;const l=next.labels;label(end,l.stop);label(discard,l.discard);label(document.querySelector('.handle'),l.drag);if(l.confirmTitle)$('confirm-title').textContent=l.confirmTitle;if(l.confirmMessage)$('confirm-message').textContent=l.confirmMessage;if(l.confirmDiscard)$('drop').textContent=l.confirmDiscard;if(l.confirmCancel)$('keep').textContent=l.confirmCancel;tick()});setInterval(tick,1000);
   </script></body></html>`;
 }

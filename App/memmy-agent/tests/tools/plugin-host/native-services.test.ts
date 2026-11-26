@@ -61,19 +61,28 @@ describe("identity-bound native plugin services", () => {
   });
 });
 
-it("reclaims capture owners after the backend heartbeat disappears while keeping a renewed owner", async () => {
+it("reclaims a capture owner after its backend heartbeat disappears and keeps an owner that renews", async () => {
+  // Only one recording may run at a time, so the two owners are checked one after another.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-owner-timeout-"));
   const stream = path.join(root, "events.jsonl"); fs.writeFileSync(stream, "");
   let now = 0, releases = 0;
   const service = createNativePluginServices({ dataRoot: root, platform: "win32", now: () => now, leaseTimeoutMs: 30,
     history: { acquireEventCapture: async () => ({ checkpoint: async () => ({ running: true, complete: true, limitations: [], streams: [{ id: "test", file: stream, size: 0 }] }), release: async () => { releases++; } }) } });
+  const start = (pluginId: string, conversationId: string) =>
+    service.invoke({ pluginId, service: "event-sessions", input: { action: "start", conversationId, goal: "Capture", consent: true } });
+  const ownerStatus = (pluginId: string) => service.invoke({ pluginId, service: "event-sessions", input: { action: "owner-status" } });
   try {
-    const a = await service.invoke({ pluginId: "fixture.a", service: "event-sessions", input: { action: "start", conversationId: "chat-a", goal: "Capture one", consent: true } });
-    await service.invoke({ pluginId: "fixture.b", service: "event-sessions", input: { action: "start", conversationId: "chat-b", goal: "Capture two", consent: true } });
-    now = 25; await service.invoke({ pluginId: "fixture.b", service: "event-sessions", input: { action: "owner-status" } });
+    const a = await start("fixture.a", "chat-a");
+    await expect(start("fixture.b", "chat-b")).rejects.toThrow("capture_busy");
     now = 40; await service.reconcile();
     expect(releases).toBe(1);
     expect(JSON.parse(fs.readFileSync(path.join(root, "fixture.a", "event-sessions", String(a.id), "session.json"), "utf8"))).toMatchObject({ state: "failed" });
-    expect(await service.invoke({ pluginId: "fixture.b", service: "event-sessions", input: { action: "owner-status" } })).toEqual({ busy: true });
+    expect(await ownerStatus("fixture.a")).toEqual({ busy: false });
+
+    await start("fixture.b", "chat-b");
+    now = 65; await ownerStatus("fixture.b");
+    now = 80; await service.reconcile();
+    expect(releases).toBe(1);
+    expect(await ownerStatus("fixture.b")).toEqual({ busy: true });
   } finally { await service.shutdown(); fs.rmSync(root, { recursive: true, force: true }); }
 });

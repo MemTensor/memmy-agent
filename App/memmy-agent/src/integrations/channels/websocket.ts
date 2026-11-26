@@ -3634,7 +3634,7 @@ export class WebSocketChannel extends BaseChannel {
           evidenceWorkspace = selected.context.cwd;
         }
         if (raw.service === "event-sessions" && raw.input?.action === "configuration") {
-          const selected = typeof raw.input.conversationId === "string" ? this.workspaceEnvironmentSession(raw.input.conversationId) : null;
+          const selected = typeof raw.input.conversationId === "string" ? this.workspaceEnvironmentSession(`websocket:${raw.input.conversationId.replace(/^websocket:/, "")}`) : null;
           const workspace = selected?.ok && selected.context.cwd ? selected.context.cwd : this.workspacePath;
           skills = new SkillsLoader(workspace).listSkills(false).map(({ name, path }) => ({ name, path }));
         }

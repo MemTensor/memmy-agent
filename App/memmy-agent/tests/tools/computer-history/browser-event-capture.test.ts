@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createBrowserCaptureProvider, type BrowserCaptureTransport } from "../../../src/tools/computer-history/browser-event-capture.js";
 import { PluginEventSessions } from "../../../src/tools/plugin-host/event-sessions.js";
-import { DEFAULT_OBSERVATION_SETTINGS } from "../../../src/tools/computer-history/core/observation-settings.js";
+import { DEFAULT_OBSERVATION_SETTINGS } from "../../../src/tools/computer-history/mac/observation-settings.js";
 
 const cleanups: Array<() => Promise<unknown> | unknown> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });

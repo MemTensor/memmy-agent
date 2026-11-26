@@ -126,7 +126,7 @@ enum MacOSAppAgentProxy {
         configuration.activates = false
         configuration.createsNewApplicationInstance = true
 
-        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, _ in }
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { @Sendable _, _ in }
 
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {

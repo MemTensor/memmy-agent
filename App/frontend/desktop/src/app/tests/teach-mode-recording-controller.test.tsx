@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EventCaptureSession, InstalledPlugin } from '@memmy/local-api-contracts';
+import { ApiRequestError } from '../../api/http.js';
 import { I18nProvider } from '../../i18n/i18n-provider.js';
 
 const context = vi.hoisted(() => ({ clients: null as any, state: null as any }));
@@ -83,4 +84,17 @@ describe('Teach Mode floating recording control', () => {
     expect(node.querySelector('.teach-recording-control')).not.toBeNull();
     expect(f.invoke).toHaveBeenLastCalledWith('teach-mode', 'recording', expect.objectContaining({ conversationId: 'chat-a' }));
   });
+});
+
+it.each(['plugin_unavailable', 'plugin_permission_denied'] as const)('withdraws the floating control and stops polling after %s', async code => {
+  const f = fixture(); await f.render(); await f.showFallback();
+  expect(node.querySelector('.teach-recording-control')).not.toBeNull();
+  context.clients.plugins.list.mockResolvedValue([]);
+  f.invoke.mockRejectedValue(new ApiRequestError('Plugin is not active', 409, code));
+  await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+  expect(node.querySelector('.teach-recording-control')).toBeNull();
+  expect(node.textContent).not.toContain('Plugin is not active');
+  const requests = f.invoke.mock.calls.length;
+  await act(async () => { await vi.advanceTimersByTimeAsync(4500); });
+  expect(f.invoke).toHaveBeenCalledTimes(requests);
 });

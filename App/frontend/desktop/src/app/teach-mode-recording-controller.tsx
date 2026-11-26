@@ -66,7 +66,7 @@ export function TeachModeRecordingController() {
     let mounted = true, pending = false;
     lifecycleRefreshRef.current = false;
     const refresh = async () => {
-      if (pending) return;
+      if (pending || busyRef.current) return;
       pending = true;
       const epoch = mutationEpochRef.current;
       try {
@@ -129,7 +129,7 @@ export function TeachModeRecordingController() {
         conversationId: session.conversationId,
         pluginId: active?.plugin.id,
         capabilityId: active?.plugin.manifest.conversation?.recordingCapabilityId,
-        labels: { stop: t('plugins.recording.floatingStop'), discard: t('plugins.recording.floatingDiscard'),
+        labels: { error: t('plugins.recording.controlFailed'), stop: t('plugins.recording.floatingStop'), discard: t('plugins.recording.floatingDiscard'),
           drag: t('plugins.recording.floatingDrag'), confirmTitle: t('plugins.recording.discardConfirmTitle'),
           confirmMessage: t('plugins.recording.discardConfirmMessage'), confirmDiscard: t('plugins.recording.discardConfirmAction'),
           confirmCancel: t('plugins.recording.discardConfirmCancel') } }
@@ -162,7 +162,7 @@ export function TeachModeRecordingController() {
       if (isPluginLifecycleError(cause)) { notifyPluginChange(); setError(null); }
       else setError(cause instanceof Error ? cause.message : String(cause));
     }
-    finally { busyRef.current = false; setBusy(false); }
+    finally { mutationEpochRef.current++; busyRef.current = false; setBusy(false); }
   }
 
   useEffect(() => window.memmy?.onTeachingRecordingControlAction?.(({ id, action }) => {

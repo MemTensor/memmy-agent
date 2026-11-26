@@ -8,7 +8,7 @@ import { Button } from "../../components/button.js";
 import { Modal } from "../../components/modal.js";
 import { readHistoryPermissionIntent, saveHistoryPermissionSetup } from "./computer-history-permission-state.js";
 
-const permissions: ComputerHistoryPermission[] = ["accessibility", "inputMonitoring"];
+const permissions: ComputerHistoryPermission[] = ["accessibility"];
 
 export function ComputerHistoryPermissionGuide(props: {
   client: MemmyAgentClient;
@@ -19,7 +19,6 @@ export function ComputerHistoryPermissionGuide(props: {
   const [status, setStatus] = useState<ComputerHistoryPermissions | null>(null);
   const [busy, setBusy] = useState(false);
   const [guiding, setGuiding] = useState(false);
-  const [inputMonitoringGuided, setInputMonitoringGuided] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const active = useRef(false);
@@ -78,8 +77,7 @@ export function ComputerHistoryPermissionGuide(props: {
       if (!mounted.current) return;
       // Keep status reads independent: this panel may stay open in Settings
       // while a focus event needs to refresh the newly granted permissions.
-      const granted = await window.memmy?.guideMemmyPermission?.(permission);
-      if (permission === "inputMonitoring" && granted && mounted.current) setInputMonitoringGuided(true);
+      await window.memmy?.guideMemmyPermission?.(permission);
     } catch (cause) {
       failed = true;
       if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
@@ -124,9 +122,9 @@ export function ComputerHistoryPermissionGuide(props: {
       const next = await props.client.checkComputerHistoryPermissions();
       if (!mounted.current) return;
       setStatus(next);
-      // The existing native process may not report input listening until the
-      // app is restarted, after the user has added Memmy in System Settings.
-      if (next.supported && next.accessibility && (next.inputMonitoring || inputMonitoringGuided)) {
+      // Accessibility is the only grant in this flow. The existing native
+      // process may not report input listening until the app is restarted.
+      if (next.supported && next.accessibility) {
         await window.memmy?.restartForComputerHistoryPermissions?.();
       }
     } catch (cause) {
@@ -134,7 +132,7 @@ export function ComputerHistoryPermissionGuide(props: {
     } finally { active.current = false; if (mounted.current) setBusy(false); }
   };
 
-  const authorized = status?.supported && status.accessibility && (status.inputMonitoring || inputMonitoringGuided);
+  const authorized = status?.supported && status.accessibility;
   const blocked = busy || guiding;
   return createPortal(<div className="ch-recording-confirmation"><Modal
     open
@@ -161,8 +159,6 @@ export function ComputerHistoryPermissionGuide(props: {
         <span>{t(permission === "accessibility" ? "computerHistory.permissions.accessibility" : "computerHistory.permissions.inputMonitoring")}</span>
         {!status ? <span role="status">{t("computerHistory.permissions.checking")}</span>
           : status[permission] ? <span className="ch__permission-granted" role="status"><Check size={16} aria-hidden="true" />{t("computerHistory.permissions.granted")}</span>
-          : permission === "inputMonitoring" && inputMonitoringGuided
-            ? <span className="ch__permission-granted" role="status">{t("computerHistory.permissions.pendingRestart")}</span>
           : <Button type="button" variant="primary" className="ch__permission-open" size="sm" disabled={blocked} onClick={() => void openPermission(permission)}>{t("computerHistory.permissions.open")}</Button>}
       </div>,
     )}</div>}

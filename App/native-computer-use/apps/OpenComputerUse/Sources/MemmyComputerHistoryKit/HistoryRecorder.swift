@@ -398,8 +398,8 @@ func accessibilityHit(at point: CGPoint, expectedPid: pid_t, expectedWindow: AXU
         let element = elementRef
   else { return nil }
   var pid: pid_t = 0
-  // A click that activates another app (or a minimized window in the Dock)
-  // must not attach that target's labels to the old foreground app.
+  // A click that activates another app (or a minimized private window in the
+  // Dock) must not attach that target's labels to the old foreground app.
   guard AXUIElementGetPid(element, &pid) == .success, pid == expectedPid,
         accessibilityString(element, kAXRoleAttribute as CFString) != "AXDockItem",
         accessibilityString(element, kAXSubroleAttribute as CFString) != "AXMinimizedWindowDockItem",
@@ -651,6 +651,121 @@ func enqueueEnrichment(key: String? = nil, _ capture: @escaping () -> Void) {
   }
 }
 
+// MARK: - Browser privacy evidence
+// These caches and the AX sampling clock are owned by enrichmentQueue.
+// A title marker can prove privacy, but an ordinary page title cannot prove
+// normal mode. Use native browser chrome only; never inspect page content or
+// bookmark names for privacy markers, or request Apple Events permission.
+let privateWindowTitleMarkers = [
+  "(incognito)", "(private)", "(inprivate)", "(无痕)", "（无痕）", "无痕模式",
+  "无痕浏览", "隐私浏览", "私密浏览", "(シークレット", "シークレット モード",
+  "(プライベート", "private browsing", "private browsing", "navegação privada",
+  "navigation privée", "navigazione privata", "navegación privada", "inkognito",
+  "incognito", "inprivate", "anonym", "privat", "privé", "privado", "prywat",
+  "privatno", "gizli", "súkrom", "частн", "инкогнито", "приват", "приватний",
+  "개인정보 보호", "시크릿", "プライベート",
+]
+
+func frontWindowIsPrivate(window: AXUIElement, bundleId: String, pageDetected: Bool = false) -> Bool? {
+  guard pageDetected || browserBundleIds.contains(bundleId) else { return false }
+  if let title = accessibilityString(window, kAXTitleAttribute as CFString),
+     privateWindowTitleMarkers.contains(where: { title.lowercased().contains($0.lowercased()) }) { return true }
+
+  let chromiumProfileBrowsers: Set<String> = [
+    "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev",
+    "com.google.Chrome.canary", "org.chromium.Chromium",
+  ]
+  let privateControlNames = ["incognito", "inprivate", "无痕", "无痕模式", "无痕浏览", "隐私浏览", "私密浏览", "private browsing", "シークレット", "シークレット モード"]
+  let addressNames: Set<String> = ["地址和搜索栏", "address and search bar", "網址和搜尋列", "地址與搜尋列"]
+  let excludedRoles: Set<String> = ["AXWebArea", "AXList", "AXOutline", "AXTable", "AXMenu", "AXRadioButton"]
+  var queue: [(AXUIElement, Int, AXUIElement?)] = [(window, 0, nil)]
+  var visited = 0
+  // Attribute observations are grouped by the actual AXToolbar identity. A
+  // bookmark named You cannot authorize its window because its toolbar has
+  // no browser address/search control. Never infer provenance from its name.
+  var toolbars: [AXUIElement] = []
+  var toolbarAddress: [Bool] = []
+  var toolbarNormal: [Bool] = []
+  var toolbarPrivate: [Bool] = []
+  var toolbarComplete: [Bool] = []
+  let deadline = Date().addingTimeInterval(0.15)
+  while !queue.isEmpty && visited < 120 && Date() < deadline {
+    let (current, queuedDepth, enclosingToolbar) = queue.removeFirst()
+    var depth = queuedDepth
+    visited += 1
+    AXUIElementSetMessagingTimeout(current, 0.03)
+    guard let role = accessibilityString(current, kAXRoleAttribute as CFString) else {
+      if let toolbar = enclosingToolbar,
+         let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) { toolbarComplete[index] = false }
+      continue
+    }
+    // Website controls, page/user lists and tab labels are never mode evidence.
+    if excludedRoles.contains(role) { continue }
+    var toolbar = enclosingToolbar
+    if role == "AXToolbar" {
+      toolbar = current
+      toolbars.append(current)
+      toolbarAddress.append(false); toolbarNormal.append(false); toolbarPrivate.append(false)
+      toolbarComplete.append(true)
+      // Completeness belongs to this native toolbar, independently of the
+      // window's page, bookmarks, or other chrome branches.
+      depth = 0
+    }
+    if let toolbar, let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) {
+      // Structural nodes need no labels. Avoid spending the small native AX
+      // budget on unrelated groups before the address/profile controls.
+      let labels = ["AXTextField", "AXComboBox", "AXButton"].contains(role)
+        ? [kAXTitleAttribute, kAXDescriptionAttribute].compactMap {
+            accessibilityString(current, $0 as CFString)?.lowercased()
+          } : []
+      if ["AXTextField", "AXComboBox"].contains(role),
+         labels.contains(where: { addressNames.contains($0) }) { toolbarAddress[index] = true }
+      if role == "AXButton" {
+        if labels.contains(where: { label in privateControlNames.contains(where: { marker in
+          label == marker || label.hasPrefix(marker + " (") || label.hasPrefix(marker + "（")
+        }) }) { toolbarPrivate[index] = true }
+        // Only verified Chrome native profile labels are positive normal-mode
+        // evidence. Named/custom profiles remain unknown rather than guessing.
+        if chromiumProfileBrowsers.contains(bundleId), labels.contains(where: { $0 == "您" || $0 == "you" }) {
+          toolbarNormal[index] = true
+        }
+      }
+    }
+    var childrenRef: CFTypeRef?
+    let result = copyAXAttribute(current, kAXChildrenAttribute as CFString, &childrenRef)
+    if result == .attributeUnsupported || result == .noValue { continue }
+    guard result == .success, let children = childrenRef as? [AXUIElement] else {
+      if let toolbar, let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) { toolbarComplete[index] = false }
+      continue
+    }
+    if depth >= 6 {
+      if !children.isEmpty, let toolbar,
+         let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) { toolbarComplete[index] = false }
+      continue
+    }
+    if children.count > 24, let toolbar,
+       let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) { toolbarComplete[index] = false }
+    let next = children.prefix(24).map { ($0, depth + 1, toolbar) }
+    // Finish the actual toolbar before visiting another window branch. A
+    // slow unrelated AX node cannot invalidate an already verified toolbar.
+    if toolbar != nil { queue.insert(contentsOf: next, at: 0) }
+    else { queue.append(contentsOf: next) }
+  }
+  // A deadline/node limit during this toolbar's scan still fails closed.
+  for (_, _, toolbar) in queue {
+    if let toolbar, let index = toolbars.firstIndex(where: { CFEqual($0, toolbar) }) { toolbarComplete[index] = false }
+  }
+  for index in toolbars.indices where toolbarAddress[index] && toolbarPrivate[index] { return true }
+  // SafariWindow?IsSecure alone does not establish browsing mode. Safari and
+  // unsupported/custom-profile windows stay unknown until a normal-mode
+  // signal can be verified. An incomplete candidate-toolbar scan cannot
+  // authorize normal capture.
+  let normalProfile = toolbars.indices.contains {
+    toolbarAddress[$0] && toolbarNormal[$0] && toolbarComplete[$0]
+  }
+  return normalProfile ? false : nil
+}
+
 struct FocusSnapshot {
   let element: AXUIElement?
   let pid: pid_t?
@@ -707,6 +822,12 @@ func emitEvent(kind: String, application: [String: Any]? = nil, expectedWindow: 
     let bundleId = source["bundleId"] as? String ?? ""
     let context = currentWindow(pid: pid, bundleId: bundleId)
     let window = context.payload
+    guard window["privateBrowsing"] as? Bool != true,
+          window["privateBrowsingUnknown"] as? Bool != true else {
+      if window["privateBrowsingUnknown"] as? Bool == true { emitRecorderDiagnostic(code: "privacy_unknown", count: 1) }
+      resetAXSamplingCache()
+      return
+    }
     if let expectedWindow {
       guard let actualWindow = context.element, CFEqual(expectedWindow, actualWindow),
             window["url"] as? String == expectedUrl else { return }
@@ -717,7 +838,9 @@ func emitEvent(kind: String, application: [String: Any]? = nil, expectedWindow: 
     ]
     // Read the URL from this event's actual window, including same-tab
     // navigation. Never reuse an earlier URL when the lookup fails.
-    if let element = context.element {
+    if let element = context.element,
+       window["privateBrowsing"] as? Bool != true,
+       window["privateBrowsingUnknown"] as? Bool != true {
       let windowKey = "\(pid):\(CFHash(element)):\(window["url"] as? String ?? "")"
       if let ax = axSnapshot(window: element, windowKey: windowKey, deduplicate: kind == "sampling.changed") {
         // Navigation during tree traversal must not attach the new page's
@@ -732,14 +855,16 @@ func emitEvent(kind: String, application: [String: Any]? = nil, expectedWindow: 
     }
     for (key, value) in extra { payload[key] = value }
     // AX reads can yield while another window of the same browser becomes
-    // active. PID/URL alone are insufficient.
+    // active, or its privacy evidence changes. PID/URL alone are insufficient.
     let latest = currentWindow(pid: pid, bundleId: bundleId)
     let sameWindow: Bool
     if let originalWindow = context.element, let latestWindow = latest.element {
       sameWindow = CFEqual(originalWindow, latestWindow)
     } else { sameWindow = context.element == nil && latest.element == nil }
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-          sameWindow, latest.payload["url"] as? String == window["url"] as? String else {
+          sameWindow, latest.payload["url"] as? String == window["url"] as? String,
+          latest.payload["privateBrowsing"] as? Bool != true,
+          latest.payload["privateBrowsingUnknown"] as? Bool != true else {
       resetAXSamplingCache()
       return
     }
@@ -758,16 +883,39 @@ func currentWindow(pid: pid_t, bundleId: String) -> (payload: [String: Any], ele
   var windowRef: CFTypeRef?
   let knownBrowser = browserBundleIds.contains(bundleId)
   if copyAXAttribute(app, kAXFocusedWindowAttribute as CFString, &windowRef) != .success {
+    // A browser's main window may be a different, normal window while its
+    // private window is foreground. Missing focus cannot authorize that fallback.
+    if knownBrowser {
+      resetAXSamplingCache(); emitRecorderDiagnostic(code: "privacy_unknown", count: 1)
+      return (["browser": true, "privateBrowsingUnknown": true], nil)
+    }
     _ = copyAXAttribute(app, kAXMainWindowAttribute as CFString, &windowRef)
   }
   var payload: [String: Any] = [:]
   if knownBrowser { payload["browser"] = true }
-  guard let window = axElement(windowRef) else { return (payload, nil) }
+  guard let window = axElement(windowRef) else {
+    if knownBrowser {
+      payload["privateBrowsingUnknown"] = true
+      resetAXSamplingCache(); emitRecorderDiagnostic(code: "privacy_unknown", count: 1)
+    }
+    return (payload, nil)
+  }
   if let title = accessibilityString(window, kAXTitleAttribute as CFString) { payload["title"] = title }
   let pageUrl = knownBrowser ? browserPage(window: window).url : quickPageUrl(window)
   if let pageUrl {
     payload["browser"] = true
     payload["url"] = pageUrl
+  }
+  let treatsAsBrowser = knownBrowser || pageUrl != nil
+  if treatsAsBrowser {
+    // The same AX window may change mode or expose controls only after load.
+    // Revalidate each event; never retain an earlier false classification.
+    if let isPrivate = frontWindowIsPrivate(window: window, bundleId: bundleId, pageDetected: pageUrl != nil) {
+      if isPrivate { payload["privateBrowsing"] = true; resetAXSamplingCache() }
+    } else {
+      payload["privateBrowsingUnknown"] = true
+      resetAXSamplingCache(); emitRecorderDiagnostic(code: "privacy_unknown", count: 1)
+    }
   }
   return (payload, window)
 }
@@ -802,6 +950,8 @@ func emitSelectionChanged(_ element: AXUIElement) {
     else { return }
     let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
     guard let window = context.element,
+          context.payload["privateBrowsing"] as? Bool != true,
+          context.payload["privateBrowsingUnknown"] as? Bool != true,
           elementBelongsToWindow(element, window: window, pid: pid),
           accessibilityString(element, kAXRoleAttribute as CFString) != "AXSecureTextField",
           accessibilityString(element, kAXSubroleAttribute as CFString) != "AXSecureTextField"
@@ -825,6 +975,8 @@ func emitSelectionChanged(_ element: AXUIElement) {
     guard !selection.isEmpty, !secureInputActive(),
           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
           let latestWindow = latest.element, CFEqual(window, latestWindow),
+          latest.payload["privateBrowsing"] as? Bool != true,
+          latest.payload["privateBrowsingUnknown"] as? Bool != true,
           elementBelongsToWindow(element, window: latestWindow, pid: pid)
     else { return }
     if target.isEmpty { target = ["role": "AXUnknown"] }
@@ -1134,7 +1286,9 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
             NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
       let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
       var target: [String: Any] = [:]
-      if let window = context.element {
+      if let window = context.element,
+         context.payload["privateBrowsing"] as? Bool != true,
+         context.payload["privateBrowsingUnknown"] as? Bool != true {
         target = resolveTarget(at: point, pid: pid, window: window)
         if type == .leftMouseDown { dragOrigin = (point, target, pid, window, context.payload["url"] as? String) }
       } else if type == .leftMouseDown { dragOrigin = nil }
@@ -1161,7 +1315,9 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
             NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
       let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
       guard let window = context.element, CFEqual(window, origin.window),
-            context.payload["url"] as? String == origin.url else { return }
+            context.payload["url"] as? String == origin.url,
+            context.payload["privateBrowsing"] as? Bool != true,
+            context.payload["privateBrowsingUnknown"] as? Bool != true else { return }
       let dx = point.x - origin.point.x
       let dy = point.y - origin.point.y
       // Anything under a few points is a click that wobbled, not a drag.
@@ -1188,7 +1344,22 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
       guard !excludesUnconsentedWeChat(application), let pid = application["pid"] as? pid_t,
             NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
       let context = currentWindow(pid: pid, bundleId: application["bundleId"] as? String ?? "")
+      guard context.payload["privateBrowsing"] as? Bool != true,
+            context.payload["privateBrowsingUnknown"] as? Bool != true else { return }
+      // Raw keys captured in a private window must not become public merely
+      // because enrichment runs after another window of the same app activates.
+      let browser = context.payload["browser"] as? Bool == true
+      if browser {
+        guard let window = context.element, let element = focus.element,
+              focusSnapshotIsCurrent(focus, pid: pid),
+              elementBelongsToWindow(element, window: window, pid: pid) else { return }
+      }
       let target = keyboardTarget(snapshot: focus, pid: pid, window: context.element)
+      if browser {
+        guard let window = context.element, let element = focus.element,
+              focusSnapshotIsCurrent(focus, pid: pid),
+              elementBelongsToWindow(element, window: window, pid: pid) else { return }
+      }
       guard let classified = classifiedKeyboard(keyCode: keyCode, text: text, modifiers: modifiers, secure: secure),
             let kind = classified["kind"] as? String,
             var keyboard = classified["keyboard"] as? [String: Any]

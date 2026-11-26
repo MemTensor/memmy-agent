@@ -2,31 +2,30 @@ import { useEffect, useRef, useState } from "react";
 import { LoaderCircle, Square, Video, X } from "lucide-react";
 import { EventCaptureSessionSchema, PluginConversationPresentationSchema, type PluginConversationPresentation, type EventCaptureSession, type InstalledPlugin, type RuntimeConfig } from "@memmy/local-api-contracts";
 import type { PluginsClient } from "../api/plugins-client.js";
-import type { MemmyAgentClient } from "../api/memmy-agent-client.js";
 import { ApiRequestError } from "../api/http.js";
 import { createEventsConnection } from "../api/events.js";
 import { notifyPluginChange } from "../lib/plugin-change-event.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { Button } from "../components/button.js";
 import { ConfirmDialog } from "../components/confirm-dialog.js";
-import { TeachModePermissionPrompt } from "./teach-mode-permission-prompt.js";
 import { TEACH_MODE_PLUGIN_ID } from "../lib/teach-mode-plugin.js";
 
-export function PluginConversationRecording({ client, agentClient, config, plugins, conversationId: currentConversationId, onPrompt }: {
-  client?: PluginsClient; agentClient?: MemmyAgentClient; config?: RuntimeConfig; plugins: InstalledPlugin[]; conversationId: string | null; onPrompt: (text: string) => void;
+export function PluginConversationRecording({ client, config, plugins, conversationId: currentConversationId, onPrompt }: {
+  client?: PluginsClient; config?: RuntimeConfig; plugins: InstalledPlugin[]; conversationId: string | null; onPrompt: (text: string) => void;
 }) {
   const { t } = useTranslation();
   const conversationId = currentConversationId?.replace(/^websocket:/, "") ?? null;
   const [sessions, setSessions] = useState<Array<{ plugin: InstalledPlugin; session: EventCaptureSession; presentation?: PluginConversationPresentation }>>([]);
-  const [permissionAlert, setPermissionAlert] = useState<{ plugin: InstalledPlugin; required: string[] } | null>(null);
   const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState(false), [notice, setNotice] = useState("");
   const [endingAt, setEndingAt] = useState<number | null>(null);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [now, setNow] = useState(Date.now());
   /** Set once per failure so a disabled plugin triggers one list refresh, not one per poll tick. */
   const lifecycleRefreshRef = useRef(false);
+  const mutationEpoch = useRef(0);
+  const busyRef = useRef(false);
   const key = plugins.filter(p => p.state === "active" && p.manifest.conversation).map(p => `${p.id}:${p.version}`).join("|");
-  useEffect(() => { setNotice(""); }, [conversationId]);
+  useEffect(() => { setNotice(""); setConfirmingDiscard(false); }, [conversationId]);
   useEffect(() => {
     let active = true, pending = false;
     lifecycleRefreshRef.current = false;
@@ -34,21 +33,18 @@ export function PluginConversationRecording({ client, agentClient, config, plugi
     if (!conversationId || !client || !key) return;
     const owners = plugins.filter(p => p.state === "active" && p.manifest.conversation);
     const refresh = async () => {
-      if (pending) return; pending = true;
+      if (pending || busyRef.current) return; pending = true;
+      const epoch = mutationEpoch.current;
       try {
         const results = await Promise.all(owners.map(async plugin => {
           const response = await client.invoke(plugin.id, plugin.manifest.conversation!.recordingCapabilityId,
             { conversationId, input: { action: "status" }, origin: "user", background: true });
           if (response.event.type === "error") { notifyPluginChange(); throw new Error(response.event.message); }
-          const output = response.event.type === "result" ? response.event.output as { sessions?: unknown[]; permissionAlert?: unknown } : {};
-          const alert = output.permissionAlert as { required?: unknown } | null | undefined;
-          return { sessions: (output.sessions ?? []).map(raw => ({ plugin, session: EventCaptureSessionSchema.parse(raw), presentation: PluginConversationPresentationSchema.optional().parse((raw as { presentation?: unknown }).presentation) })),
-            alert: alert && Array.isArray(alert.required)
-              ? { plugin, required: alert.required.filter((value): value is string => typeof value === "string") } : null };
+          const output = response.event.type === "result" ? response.event.output as { sessions?: unknown[] } : {};
+          return { sessions: (output.sessions ?? []).map(raw => ({ plugin, session: EventCaptureSessionSchema.parse(raw), presentation: PluginConversationPresentationSchema.optional().parse((raw as { presentation?: unknown }).presentation) })) };
         }));
-        if (active) {
+        if (active && epoch === mutationEpoch.current) {
           setSessions(results.flatMap(result => result.sessions).filter(item => item.session.conversationId === conversationId));
-          setPermissionAlert(results.map(result => result.alert).find(Boolean) ?? null);
           lifecycleRefreshRef.current = false;
           setError(null);
         }
@@ -82,7 +78,8 @@ export function PluginConversationRecording({ client, agentClient, config, plugi
     return () => clearInterval(timer);
   }, [selected?.session.id, ongoing]);
   async function control(action: "stop" | "cancel" | "disable") {
-    if (!selected || !client || !conversationId || busy) return;
+    if (!selected || !client || !conversationId || busyRef.current) return;
+    mutationEpoch.current++; busyRef.current = true;
     setBusy(true); setEndingAt(Date.now()); setError(null);
     try {
       if (action === "disable") {
@@ -102,17 +99,8 @@ export function PluginConversationRecording({ client, agentClient, config, plugi
       if (isPluginLifecycleError(reason)) notifyPluginChange();
       else setError(reason instanceof Error ? reason.message : String(reason));
     }
-    finally { setBusy(false); setEndingAt(null); }
+    finally { mutationEpoch.current++; busyRef.current = false; setBusy(false); setEndingAt(null); }
   }
-  const clearPermissionAlert = async (plugin: InstalledPlugin) => {
-    setPermissionAlert(null);
-    if (!client || !conversationId) return;
-    await client.invoke(plugin.id, plugin.manifest.conversation!.recordingCapabilityId,
-      { conversationId, origin: "user", input: { action: "dismiss-permission" } }).catch(() => undefined);
-  };
-  if (permissionAlert && agentClient && client) return <TeachModePermissionPrompt
-    client={agentClient}
-    onDismiss={() => void clearPermissionAlert(permissionAlert.plugin)} />;
   if (!selected) return error || notice ? <div className="mx-4 my-2 text-sm" role={error ? "alert" : "status"}>{error ?? notice}</div> : null;
   const { session, presentation } = selected, recording = session.state === "recording";
   const elapsed = session.state === "starting" ? 0 : Math.max(0, Math.floor(((session.endedAt ? Date.parse(session.endedAt) : endingAt ?? now) - Date.parse(session.startedAt)) / 1_000));

@@ -4,7 +4,8 @@ import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
 
-const appDataRoot = process.env.MEMMY_APP_DB_PATH ? path.dirname(process.env.MEMMY_APP_DB_PATH)
+const appDatabase = process.env.MEMMY_APP_DATABASE ?? process.env.MEMMY_APP_DB_PATH;
+const appDataRoot = appDatabase ? path.dirname(appDatabase)
   : process.platform === "darwin" ? path.join(os.homedir(), "Library", "Application Support", "Memmy")
   : process.platform === "win32" ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Memmy")
   : path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "Memmy");

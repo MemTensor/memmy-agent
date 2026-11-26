@@ -96,7 +96,6 @@ type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type RetrievalTimeFilter = NonNullable<RetrievalQueryExtract["timeFilter"]>;
 
 const RETRIEVAL_QUERY_EXTRACT_TIMEOUT_MS = 60_000;
-const TURN_START_QUERY_EXTRACT_TIMEOUT_MS = 3_000;
 
 const RETRIEVAL_FILTER_TIMEOUT_MS = 30_000;
 
@@ -1969,8 +1968,7 @@ export class RetrievalService {
         })
       : [];
     const queryExtract = candidateCount > 0 && !onboardingFirstReportHit
-      ? await this.extractRetrievalQuery(retrievalQuery, timeZone, queryExtractHistory,
-          retrievalMode === "turn_start" ? TURN_START_QUERY_EXTRACT_TIMEOUT_MS : RETRIEVAL_QUERY_EXTRACT_TIMEOUT_MS)
+      ? await this.extractRetrievalQuery(retrievalQuery, timeZone, queryExtractHistory)
       : null;
     const queryVectorText = queryExtract?.queryVecText?.trim() || retrievalQuery;
     const timeFilter = semanticLayers.includes("L1") ? queryExtract?.timeFilter : undefined;
@@ -2750,8 +2748,7 @@ export class RetrievalService {
   private async extractRetrievalQuery(
     rawQuery: string,
     timeZone: string,
-    history: readonly QueryExtractHistoryTurn[] = [],
-    timeoutMs = RETRIEVAL_QUERY_EXTRACT_TIMEOUT_MS
+    history: readonly QueryExtractHistoryTurn[] = []
   ): Promise<RetrievalQueryExtract | null> {
     const raw = rawQuery.trim();
     if (!raw || !this.deps.llm.isConfigured()) return null;
@@ -2775,8 +2772,7 @@ export class RetrievalService {
           operation: `retrieval.${RETRIEVAL_QUERY_EXTRACT_PROMPT.id}.v${RETRIEVAL_QUERY_EXTRACT_PROMPT.version}`,
           thinkingMode: "disabled",
           temperature: 0,
-          timeoutMs,
-          deadlineMs: Date.now() + timeoutMs,
+          timeoutMs: RETRIEVAL_QUERY_EXTRACT_TIMEOUT_MS,
           maxRetries: 0,
           maxTokens: 320,
           jsonMode: true

@@ -1,13 +1,12 @@
 import crypto from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import type { RecorderLaunch } from "./platform-driver.js";
 import { recorderRotationRequest, recorderRotationResult } from "./recorder-checkpoint.js";
 
 /** Only current managed recorders advertise this; older CLIs keep their restart path. */
 export const CONTINUOUS_RECORDER_CAPABILITY = '[recorder-capabilities] {"continuousOutput":true}';
 
 export function rotateRecorderOutput(child: ChildProcessWithoutNullStreams,
-  input: Pick<RecorderLaunch, "eventsFile" | "title">, timeoutMs = 12_000): Promise<void> {
+  input: { eventsFile: string; title: string }, timeoutMs = 12_000): Promise<void> {
   const command = recorderRotationRequest.parse({ kind: "rotate", id: crypto.randomUUID(), ...input });
   return new Promise((resolve, reject) => {
     let buffer = "", discard = false, done = false;

@@ -133,7 +133,7 @@ declare global {
       takeInviteLinks?(): Promise<string[]>;
       setMenuBarIcon(enabled: boolean): Promise<{ enabled: boolean }>;
       setComputerHistoryTrayIndicator?(state: { enabled: boolean; recording: boolean }): void;
-      updateTeachingRecordingControls?(state: { id: string; startedAt: string; state: 'starting' | 'recording' | 'finalizing'; conversationId: string; labels: { stop: string; discard: string; drag: string; confirmTitle?: string; confirmMessage?: string; confirmDiscard?: string; confirmCancel?: string } } | null): Promise<void>;
+      updateTeachingRecordingControls?(state: { id: string; startedAt: string; state: 'starting' | 'recording' | 'finalizing'; conversationId: string; pluginId?: string; capabilityId?: string; labels: { stop: string; discard: string; drag: string; error?: string; confirmTitle?: string; confirmMessage?: string; confirmDiscard?: string; confirmCancel?: string } } | null): Promise<void>;
       onTeachingRecordingControlAction?(callback: (action: { id: string; action: 'stop' | 'cancel' }) => void): () => void;
       onTeachingRecordingControlsVisibility?(callback: (visible: boolean) => void): () => void;
       onMainWindowActionRequest(

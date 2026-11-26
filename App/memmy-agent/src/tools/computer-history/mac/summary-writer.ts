@@ -1,3 +1,4 @@
+import { recordingCheckpointRecord, recordingGapRecord } from "../core/recorder-checkpoint.js";
 import type { LLMRuntimeResolver } from "../../../utils/llm-runtime.js";
 import type { MemmyOutputLanguage } from "../../../memmy-memory/discovery.js";
 import { normalizeOutputLanguage } from "@memmy/local-api-contracts";
@@ -612,6 +613,10 @@ export function compactEventEvidence(
     try {
       const event = JSON.parse(line);
       if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error("invalid event");
+      if (event.recordType === "human_event" && ["recording_checkpoint", "recording_gap"].includes(event.eventType)) {
+        if (retain) (event.eventType === "recording_checkpoint" ? recordingCheckpointRecord : recordingGapRecord).parse(event);
+        continue;
+      }
       if (event.recordType === "capture_health") {
         const signal = captureHealthSignal(event);
         if (!signal) throw new Error("invalid capture health");

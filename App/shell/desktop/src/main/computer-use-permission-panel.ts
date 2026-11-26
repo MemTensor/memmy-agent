@@ -62,9 +62,7 @@ export function showComputerUsePermissionPanel(parent: BrowserWindow, initial: P
   // user grants the permission.  The Codex accessory remains available with
   // that Settings window, so keep the independent panel in the same window
   // collection instead of letting it disappear with Memmy's Space.
-  // skipTransformProcessType keeps this from switching Memmy itself to
-  // UIElementApplication, which hides the window and the Dock icon mid-guide.
-  window.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+  window.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true });
   let state = initial, wasAway = false;
   // The owned gateway supplies this path. The renderer can only request a drag;
   // it cannot select a file or replace the helper with another installed copy.

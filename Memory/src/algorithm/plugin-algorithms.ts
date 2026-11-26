@@ -716,24 +716,16 @@ export async function classifyTurnRelationWithLlm(
 
   const llm = options.llm;
   if (!options.disableLlm && llm?.isConfigured()) {
-    // Classification and optional arbitration share one interactive deadline.
-    // Pass it to the transport too: racing only the Promise left 180s HTTP
-    // calls and retries running after the caller had already fallen back.
-    const deadline = Date.now() + (options.timeoutMs ?? 6000);
     try {
-      const budget = deadline - Date.now();
-      if (budget <= 0) throw new Error("relation classifier timeout");
       const result = await relationWithTimeout(
-        callRelationLlm(llm, input, budget),
-        budget
+        callRelationLlm(llm, input),
+        options.timeoutMs ?? 6000
       );
       if (result.relation === "new_task" && (result.confidence ?? 0) < RELATION_ARBITRATION_THRESHOLD) {
         try {
-          const remaining = deadline - Date.now();
-          if (remaining <= 0) throw new Error("relation classifier timeout");
           const arbitration = await relationWithTimeout(
-            callRelationArbitration(llm, input, remaining),
-            remaining
+            callRelationArbitration(llm, input),
+            options.timeoutMs ?? 6000
           );
           if (arbitration !== "new_task") {
             return {
@@ -886,8 +878,7 @@ Reply JSON ONLY: {"relation":"follow_up"|"new_task","reason":"..."}`;
 
 async function callRelationLlm(
   llm: LlmClient,
-  input: TurnRelationInput,
-  timeoutMs: number
+  input: TurnRelationInput
 ): Promise<TurnRelationDecision> {
   const value = await llm.completeJson<Record<string, unknown>>(
     [
@@ -896,9 +887,6 @@ async function callRelationLlm(
     ],
     {
       operation: "relation.classify.v1",
-      timeoutMs,
-      deadlineMs: Date.now() + timeoutMs,
-      maxRetries: 0,
       thinkingMode: "disabled",
       temperature: llm.config.temperature,
       maxTokens: MEMORY_SUMMARY_MAX_TOKENS
@@ -927,8 +915,7 @@ async function callRelationLlm(
 
 async function callRelationArbitration(
   llm: LlmClient,
-  input: TurnRelationInput,
-  timeoutMs: number
+  input: TurnRelationInput
 ): Promise<"follow_up" | "new_task"> {
   const value = await llm.completeJson<Record<string, unknown>>(
     [
@@ -937,9 +924,6 @@ async function callRelationArbitration(
     ],
     {
       operation: "relation.arbitration.v1",
-      timeoutMs,
-      deadlineMs: Date.now() + timeoutMs,
-      maxRetries: 0,
       thinkingMode: "disabled",
       temperature: llm.config.temperature,
       maxTokens: MEMORY_SUMMARY_MAX_TOKENS

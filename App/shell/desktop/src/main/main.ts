@@ -1,7 +1,7 @@
+import { registerTeachingRecordingControls, unregisterTeachingRecordingControls } from "./teaching-recording-controls.js";
+import { bundledCliInstallDecision, HOMEBREW_CLI_BIN_DIRECTORY, MEMMY_CLI_LAUNCHER_MARKER, PACKAGED_MAC_CLI_COMMANDS, SYSTEM_CLI_BIN_DIRECTORY, USER_CLI_SHELL_PROFILES, memmyCliAppCandidates, renderMemmyCliLauncher } from './cli-auto-install.js';
 import { createMacDmgUpdateInstallScript, createMacDmgUpdateStageScript, type MacUpdateValidationOptions } from './mac-update-scripts.js';
 import { createDesktopScreenCapture } from './desktop-screen-capture.js';
-import { createRecordingMediaProxy } from "./recording-media-proxy.js";
-import { registerTeachingRecordingControls } from "./teaching-recording-controls.js";
 import { compareVersionSegments, parseUpdatePackageVersion } from './version-compare.js';
 import { captureMemmyScreen, computerUseApp, memmyPermissionSnapshot, resolveComputerUseBinary, runHelperCommand } from './memmy-screen-permission.js';
 import { desktopSaveFileName } from './save-file-name.js';
@@ -59,7 +59,7 @@ import type {
   DesktopUpdateMode,
   MicrophoneAccessStatus
 } from "@memmy/desktop-interface";
-import { app, protocol, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, systemPreferences, Tray, type Event as ElectronEvent, type FileFilter, type IpcMainEvent, type MenuItemConstructorOptions, type Rectangle, type WebContents } from "electron";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -158,7 +158,7 @@ import {
   type WindowsDataLayout
 } from "./windows-data-layout.js";
 import { assertWindowsRuntimeOwnership } from "./windows-runtime-ownership.js";
-import { createWindowsUpdateLauncherFile } from "./windows-update-launcher.js";
+import { createWindowsUpdateLauncherFile, waitForWindowsUpdateLauncher } from "./windows-update-launcher.js";
 import { createWindowsUpdateVerificationScript, validateWindowsUpdateInstaller, windowsUpdatePowerShellExecutable, windowsUpdatePowerShellFile, type WindowsUpdateVerification } from "./windows-update-validation.js";
 import { applyLocalTestProfileEnvironment, prepareLocalTestProfile,
   readExecutableSigningTeamIdentifier, type LocalTestProfile } from './local-test-profile.js';
@@ -169,20 +169,16 @@ import {
 } from "./windows-cli-path.js";
 import {
   getWindowsLaunchAtLogin,
+  repairWindowsLaunchAtLogin,
   setWindowsLaunchAtLogin,
   type WindowsLaunchAtLoginEnvironment
 } from "./windows-launch-at-login.js";
 import { resolveComputerHistoryMarkdownPath } from "./computer-history-markdown.js";
-import { stopComputerHistoryBeforeExit } from "./computer-history-exit.js";
-import { stopTaskRecordingBeforeExit } from "./task-recording-exit.js";
-import { writeQuitDiagnostic, type QuitDiagnostic } from "./quit-diagnostics.js";
 import { composeRecordingMenuBarBitmap } from "./menu-bar-recording-indicator.js";
 import { runApprovedEmbeddedUpload } from './browser-embedded-upload-access.js';
 import { createPIPTrayRecovery } from './computer-use-pip-tray.js';
 import { attachRendererRecovery, rendererRecoveryUrl, type RendererRecoveryDiagnostic } from './renderer-recovery.js';
 import { findInviteLink, INVITE_LINK_CHANNEL, INVITE_LINK_SCHEME, parseInviteLink, TAKE_INVITE_LINKS_CHANNEL } from './invite-link.js';
-
-protocol.registerSchemesAsPrivileged([{ scheme: "memmy-recording", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
 
 let mainWindow: BrowserWindow | null = null;
 let memmyPermissionOnboarding: ReturnType<typeof createComputerUseOnboarding> | null = null;
@@ -350,16 +346,6 @@ let isQuitCleanupInProgress = false;
 let isQuitCleanupComplete = false;
 let stopMemoryServiceForCurrentQuit = false;
 let quitCleanupForceExitTimer: ReturnType<typeof setTimeout> | null = null;
-interface QuitCleanupContext {
-  id: string;
-  startedAt: number;
-  stopMemory: boolean;
-  services: ManagedRuntimeServices | null;
-  servicesClose: Promise<void> | null;
-  phase: string;
-  outcome: "pending" | "complete" | "failed" | "forced";
-}
-let quitCleanupContext: QuitCleanupContext | null = null;
 let areIpcHandlersRegistered = false;
 let isBootReady = false;
 let bootStage = "pending";
@@ -874,14 +860,8 @@ async function boot(): Promise<void> {
         : undefined
     });
     if (isQuitting) {
-      const lateServices = runtimeServices;
+      await runtimeServices.close({ stopMemory: stopMemoryServiceForCurrentQuit });
       runtimeServices = null;
-      if (quitCleanupContext) {
-        quitCleanupContext.services = lateServices;
-        await closeRuntimeForQuit(quitCleanupContext);
-      } else {
-        await lateServices.close({ stopMemory: stopMemoryServiceForCurrentQuit });
-      }
       return;
     }
     const embeddedBrowserSession = session.fromPartition('persist:memmy-browser');
@@ -998,6 +978,9 @@ function configureAppIdentity(): void {
       throw error;
     }
   }
+  // 开发态并排跑两个实例（例如一个账号当发起方、另一个当执行方）时，各自的 userData 必须分开：
+  // Electron 的单实例锁挂在 userData 上，共用一个目录的话第二个进程只会把第一个窗口拉到前台。
+  // 只认开发态的这个开关，打包后的应用仍然用固定的数据目录。
   const devProfile = app.isPackaged ? null : process.env.MEMMY_DEV_PROFILE_DIR?.trim() || null;
   const userDataPath = devProfile
     ? join(devProfile, "userData")
@@ -1008,6 +991,7 @@ function configureAppIdentity(): void {
   }
   app.setPath("userData", userDataPath);
   if (devProfile) {
+    // 会话、日志、临时目录一并放进这个 profile：两个实例互不干扰。
     app.setPath("sessionData", join(devProfile, "sessionData"));
     app.setPath("logs", join(devProfile, "logs"));
     app.setPath("temp", join(devProfile, "temp"));
@@ -1078,31 +1062,169 @@ function readCurrentDesktopEditionManifest(): string | null {
 /**
  * Installs the bundled CLI into the user's PATH.
  *
- * A drag-and-drop DMG cannot run scripts automatically when dragged into
- * Applications, so we create user-level symlinks the first time the app launches
- * from /Applications. Failures are only logged and do not affect GUI startup.
+ * On macOS the command is a small script, not a symlink to the running bundle. Opening Memmy from
+ * the disk image still installs it: the script uses that copy while the image is mounted, then
+ * `/Applications` after the person drags Memmy there. A symlink would become "command not found"
+ * as soon as the image is ejected.
  *
  * @returns Resolves once installation completes.
  */
 async function installBundledCliIfNeeded(): Promise<void> {
-  if (!app.isPackaged || localTestProfile || !isInstalledApplicationsApp()) {
+  if (!app.isPackaged || localTestProfile) {
+    return;
+  }
+  if (process.platform === "darwin") {
+    await installPackagedMacCliLaunchers();
+    return;
+  }
+  if (resolveCliInstallStrategy(
+    process.platform,
+    app.isPackaged,
+    Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)
+  ) === "packaged-windows") {
+    await installPackagedWindowsCliOnBoot();
     return;
   }
 
-  try {
-    const cliDirectory = join(process.resourcesPath, "cli");
-    const memoryCli = join(cliDirectory, "memmy-memory");
-    const memmyCli = join(cliDirectory, "memmy");
-    await Promise.all([access(memoryCli), access(memmyCli)]);
+  const bundlePath = resolveCurrentAppBundlePath();
+  const decision = bundledCliInstallDecision(bundlePath);
+  if (decision !== "install") {
+    await writePackagedStartupLog(`boot:cli-skipped:${decision}:${bundlePath}`);
+    return;
+  }
 
+  const cliDirectory = join(process.resourcesPath, "cli");
+  const commands = [
+    ["memmy-memory", join(cliDirectory, "memmy-memory")],
+    ["memmy", join(cliDirectory, "memmy")],
+    ["memmy-project", join(cliDirectory, "memmy-project")]
+  ] as const;
+  const installed: string[] = [];
+  const skipped: string[] = [];
+
+  try {
     const binDirectory = await resolveCliInstallDirectory();
     await mkdir(binDirectory, { recursive: true });
-    await installSymlink(memoryCli, join(binDirectory, "memmy-memory"));
-    await installSymlink(memmyCli, join(binDirectory, "memmy"));
+    for (const [name, source] of commands) {
+      try {
+        await access(source);
+        const userLink = await installSymlink(source, join(binDirectory, name));
+        const systemLink = await installSystemBinSymlink(source, name);
+        installed.push(`${name}:${userLink}${systemLink === "skipped" ? "" : `+${systemLink}`}`);
+      } catch (error) {
+        skipped.push(`${name}:${formatStartupError(error)}`);
+      }
+    }
     await ensureUserPathIncludes(binDirectory);
+    await writePackagedStartupLog(`boot:cli-installed:${installed.join(",") || "none"};skipped:${skipped.join("|") || "none"}`);
   } catch (error) {
     console.warn("Memmy CLI auto-install skipped:", error);
+    await writePackagedStartupLog(`boot:cli-failed\n${formatStartupError(error)}`);
   }
+}
+
+async function installPackagedWindowsCliOnBoot(): Promise<void> {
+  try {
+    const result = await installPackagedWindowsCliTools(process.resourcesPath);
+    await writePackagedStartupLog(`boot:cli-installed:windows:${result.binDirectory};pathUpdated:${result.pathUpdated}`);
+  } catch (error) {
+    console.warn("Memmy CLI auto-install skipped:", error);
+    await writePackagedStartupLog(`boot:cli-failed:windows\n${formatStartupError(error)}`);
+  }
+}
+
+async function installPackagedMacCliLaunchers(): Promise<void> {
+  const bundlePath = resolveCurrentAppBundlePath();
+  const decision = bundledCliInstallDecision(bundlePath);
+  try {
+    const outcome = await installPackagedMacCliCommands([...PACKAGED_MAC_CLI_COMMANDS], bundlePath);
+    let profiles = "unchanged";
+    try {
+      const profilePaths = await ensureDirectoryOnUserPath(
+        outcome.binDirectory,
+        "# Memmy CLI PATH",
+        'export PATH="$HOME/.local/bin:$PATH"'
+      );
+      profiles = profilePaths.join(",") || "unchanged";
+    } catch (error) {
+      profiles = `failed:${formatStartupError(error)}`;
+    }
+    const installed = outcome.installed.map((entry) => entry.name).join(",") || "none";
+    await writePackagedStartupLog(`boot:cli-installed:${decision}:${bundlePath}:${installed};skipped:${outcome.skipped.join("|") || "none"};profiles:${profiles}`);
+  } catch (error) {
+    console.warn("Memmy CLI auto-install skipped:", error);
+    await writePackagedStartupLog(`boot:cli-failed:${decision}:${bundlePath}\n${formatStartupError(error)}`);
+  }
+}
+
+/**
+ * Installs Mac CLI commands as scripts under ~/.local/bin.
+ *
+ * The script looks up Memmy.app when it runs. A symlink to the copy that is open now would break
+ * after the person ejects the disk image, or after macOS deletes a translocated copy, and zsh then
+ * reports "command not found".
+ */
+async function installPackagedMacCliCommands(
+  names: readonly string[],
+  bundlePath = resolveCurrentAppBundlePath()
+): Promise<CliInstallResult & { skipped: string[] }> {
+  const appPaths = memmyCliAppCandidates(bundlePath, homedir());
+  const binDirectory = join(homedir(), ".local", "bin");
+  await mkdir(binDirectory, { recursive: true });
+  const installed: CliInstallResult["installed"] = [];
+  const skipped: string[] = [];
+
+  for (const name of names) {
+    try {
+      const target = join(binDirectory, name);
+      const wrote = await writeUserCliLauncher(target, renderMemmyCliLauncher(name, appPaths));
+      if (wrote === "installed") {
+        const source = target;
+        await installSystemBinSymlink(source, name);
+        await installBinDirectorySymlink(HOMEBREW_CLI_BIN_DIRECTORY, source, name);
+      }
+      installed.push({ name, source: target, target });
+    } catch (error) {
+      skipped.push(`${name}:${formatStartupError(error)}`);
+    }
+  }
+
+  if (installed.length === 0 && skipped.length > 0) {
+    throw new Error(skipped.join("\n"));
+  }
+
+  return {
+    ok: true,
+    binDirectory,
+    installed,
+    pathUpdated: false,
+    profilePaths: [],
+    skipped
+  };
+}
+
+async function writeUserCliLauncher(target: string, contents: string): Promise<"installed" | "kept-file"> {
+  try {
+    const current = await lstat(target);
+    if (!current.isSymbolicLink()) {
+      if (!current.isFile()) return "kept-file";
+      const text = await readFile(target, "utf8");
+      if (!text.includes(MEMMY_CLI_LAUNCHER_MARKER)) return "kept-file";
+    }
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+  }
+
+  const temporary = join(dirname(target), `.${basename(target)}.${process.pid}.tmp`);
+  try {
+    await writeFile(temporary, contents, { mode: 0o755 });
+    await chmod(temporary, 0o755);
+    await rename(temporary, target);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+  return "installed";
 }
 
 async function installCliTools(): Promise<CliInstallResult> {
@@ -1112,6 +1234,24 @@ async function installCliTools(): Promise<CliInstallResult> {
     Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore)
   ) === "packaged-windows") {
     return installPackagedWindowsCliTools(process.resourcesPath);
+  }
+
+  if (app.isPackaged && process.platform === "darwin") {
+    const outcome = await installPackagedMacCliCommands([...PACKAGED_MAC_CLI_COMMANDS]);
+    const { skipped, ...result } = outcome;
+    if (skipped.length > 0) {
+      throw new Error(skipped.join("\n"));
+    }
+    const profilePaths = await ensureDirectoryOnUserPath(
+      result.binDirectory,
+      "# Memmy CLI PATH",
+      'export PATH="$HOME/.local/bin:$PATH"'
+    );
+    return {
+      ...result,
+      pathUpdated: profilePaths.length > 0,
+      profilePaths
+    };
   }
 
   const binDirectory = join(homedir(), ".local", "bin");
@@ -1142,14 +1282,17 @@ function resolveCliToolEntries(): Array<{ name: string; source: string }> {
   if (app.isPackaged) {
     const cliDirectory = join(process.resourcesPath, "cli");
     return [
-      { name: "memmy-memory", source: join(cliDirectory, "memmy-memory") }
+      { name: "memmy-memory", source: join(cliDirectory, "memmy-memory") },
+      { name: "memmy-project", source: join(cliDirectory, "memmy-project") }
     ];
   }
 
   const rootDirectory = resolveDevelopmentRoot();
   const memoryCli = join(rootDirectory, "Memory", "dist", "src", "cli", "index.js");
+  const projectCli = join(rootDirectory, "App", "backend", "dist", "src", "cli", "memmy-project.js");
   return [
-    { name: "memmy-memory", source: memoryCli }
+    { name: "memmy-memory", source: memoryCli },
+    { name: "memmy-project", source: projectCli }
   ];
 }
 
@@ -1224,11 +1367,11 @@ async function resolveCliInstallDirectory(): Promise<string> {
  * @param target The command path under the user's PATH.
  * @returns Resolves once done.
  */
-async function installSymlink(source: string, target: string): Promise<void> {
+async function installSymlink(source: string, target: string): Promise<"installed" | "kept-file"> {
   try {
     const stat = await lstat(target);
     if (!stat.isSymbolicLink()) {
-      return;
+      return "kept-file";
     }
     await unlink(target);
   } catch (error) {
@@ -1238,6 +1381,7 @@ async function installSymlink(source: string, target: string): Promise<void> {
   }
 
   await symlink(source, target);
+  return "installed";
 }
 
 async function ensureUserPathIncludes(binDirectory: string): Promise<void> {
@@ -1247,10 +1391,31 @@ async function ensureUserPathIncludes(binDirectory: string): Promise<void> {
 
   const marker = "# Memmy CLI PATH";
   const line = 'export PATH="$HOME/.local/bin:$PATH"';
-  await Promise.all([
-    ensureShellProfileIncludesPath(join(homedir(), ".zshrc"), marker, line),
-    ensureShellProfileIncludesPath(join(homedir(), ".bash_profile"), marker, line)
-  ]);
+  await Promise.all(USER_CLI_SHELL_PROFILES.map((name) => (
+    ensureShellProfileIncludesPath(join(homedir(), name), marker, line)
+  )));
+}
+
+/**
+ * Links one command into /usr/local/bin when that directory is writable. It is already on the
+ * PATH of a Dock-launched app, which never reads ~/.zshrc.
+ */
+async function installSystemBinSymlink(source: string, name: string): Promise<"installed" | "kept-file" | "skipped"> {
+  return installBinDirectorySymlink(SYSTEM_CLI_BIN_DIRECTORY, source, name);
+}
+
+/** Links one command into a directory that is already on PATH, when that directory is writable. */
+async function installBinDirectorySymlink(
+  directory: string,
+  source: string,
+  name: string
+): Promise<"installed" | "kept-file" | "skipped"> {
+  try {
+    await access(directory, fsConstants.W_OK);
+  } catch {
+    return "skipped";
+  }
+  return installSymlink(source, join(directory, name));
 }
 
 async function ensureDirectoryOnUserPath(binDirectory: string, marker: string, line: string): Promise<string[]> {
@@ -1258,10 +1423,7 @@ async function ensureDirectoryOnUserPath(binDirectory: string, marker: string, l
     return [];
   }
 
-  const profilePaths = [
-    join(homedir(), ".zshrc"),
-    join(homedir(), ".bash_profile")
-  ];
+  const profilePaths = USER_CLI_SHELL_PROFILES.map((name) => join(homedir(), name));
   const results = await Promise.all(profilePaths.map(async (profilePath) => ({
     profilePath,
     changed: await ensureShellProfileIncludesPath(profilePath, marker, line)
@@ -1521,6 +1683,7 @@ function registerIpcHandlers(): void {
     rendererReadyWebContentsIds.add(senderId);
     rendererReadyWaiters.get(senderId)?.(true);
     rendererRecoveries.get(senderId)?.markReady();
+    // 界面已能收邀请：把启动前排队的那几条发出去。
     flushPendingInviteCodes(event.sender);
   });
   ipcMain.handle(TAKE_INVITE_LINKS_CHANNEL, (event) => {
@@ -3411,7 +3574,7 @@ async function installWindowsUpdateInBackground(
   const updatesDirectory = resolveUpdatesDirectory();
   await mkdir(updatesDirectory, { recursive: true });
   const helperPath = join(updatesDirectory, `install-win-update-${Date.now()}.ps1`);
-  const launcherPath = join(updatesDirectory, `launch-win-update-${Date.now()}.vbs`);
+  const launcherPath = join(updatesDirectory, `launch-win-update-${Date.now()}.ps1`);
   const logPath = join(updatesDirectory, "win-update-install.log");
   if (options.showUpdatePrompt) {
     await writeWindowsUpdatePromptLanguage(resolveWindowsUpdatePromptLanguageFromAppSettings());
@@ -3439,15 +3602,25 @@ async function installWindowsUpdateInBackground(
   ]));
   await appendFile(logPath, `[${new Date().toISOString()}] queued Memmy Windows update helper "${helperPath}"\n`).catch(() => undefined);
 
-  const helper = spawn("wscript.exe", [launcherPath], {
+  const helper = spawn(windowsUpdatePowerShellExecutable(), [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-WindowStyle",
+    "Hidden",
+    "-File",
+    launcherPath
+  ], {
     detached: true,
     stdio: "ignore",
     windowsHide: true
   });
-  helper.once("error", (error) => {
-    void appendFile(logPath, `[${new Date().toISOString()}] failed to start Memmy Windows update helper: ${String(error)}\n`).catch(() => undefined);
-  });
-  helper.unref();
+  try {
+    await waitForWindowsUpdateLauncher(helper);
+  } catch (error) {
+    await appendFile(logPath, `[${new Date().toISOString()}] failed to start Memmy Windows update helper: ${String(error)}; launcher log: ${launcherPath}.log\n`).catch(() => undefined);
+    throw error;
+  }
   isManagedUpdateInstallerRunning = true;
   if (options.quitCurrentApp) {
     scheduleQuitForManualUpdateInstall();
@@ -4558,9 +4731,6 @@ function createMainWindow(target: RendererRouteTarget | null = null): BrowserWin
     ...resolveFullWindowChromeOptions(process.platform),
     ...resolveFullWindowSize(screen.getPrimaryDisplay().workArea),
     ...(windowsTaskbarIconPath ? { icon: windowsTaskbarIconPath } : {}),
-    // On Windows, keep the splash until Chromium has actually painted a frame.
-    // HTML load completion can precede painting with the title-bar overlay.
-    show: process.platform !== "win32",
     // webPreferences: the renderer's security isolation and preload configuration.
     webPreferences: { ...createWebPreferences(), webviewTag: true }
   });
@@ -4600,15 +4770,10 @@ function createMainWindow(target: RendererRouteTarget | null = null): BrowserWin
   };
   mainWindowWithMinimize.on("minimize", handleMainWindowMinimize);
 
-  targetMainWindow.once("ready-to-show", () => {
-    if (isQuitting || targetMainWindow.isDestroyed()) return;
-    if (process.platform === "win32") targetMainWindow.show();
-    closeSplashWindow("main-ready-to-show");
-  });
-  if (process.platform !== "win32") {
-    targetMainWindow.webContents.once("did-finish-load", () => closeSplashWindow("main-did-finish-load"));
-  }
   void targetMainWindow.loadURL(resolveRendererUrl("full", target)).catch(handleRendererLoadFailure);
+  // The main window takes over from the splash when its renderer is ready.
+  targetMainWindow.once("ready-to-show", () => closeSplashWindow("main-ready-to-show"));
+  targetMainWindow.webContents.once("did-finish-load", () => closeSplashWindow("main-did-finish-load"));
 
   targetMainWindow.on("closed", () => {
     mainWindow = null;
@@ -5380,15 +5545,36 @@ function activateMainWindow(): void {
   triggerAgentSourceAutoInject("activate_main_window");
 }
 
+/**
+ * 邀请链接（memmy://invite/<code>）：浏览器落地页靠它直接拉起 Memmy 并弹出「加入项目」。
+ *
+ * <p>链接有三条来路：macOS 的 open-url、Windows/Linux 的 second-instance 命令行、以及
+ * 冷启动时就写在 argv 里的情况。三条路都只把邀请码交给界面，界面自己再向云端预览项目。</p>
+ */
+
+/** 冷启动时链接比界面先到：先排队，界面报到后一起发。 */
 const pendingInviteCodes: string[] = [];
 
+/**
+ * 记下一个待发的邀请码，重复的不记两次。
+ *
+ * @param code 已校验过的邀请码。
+ */
 function queueInviteCode(code: string): void {
   if (!pendingInviteCodes.includes(code)) pendingInviteCodes.push(code);
 }
 
+/**
+ * 把邀请码交给界面；应用或界面还没就绪就先记下。
+ *
+ * @param code 已校验过的邀请码。
+ */
 function deliverInviteCode(code: string): void {
   if (isQuitting) return;
-  if (!isBootReady) { queueInviteCode(code); return; }
+  if (!isBootReady) {
+    queueInviteCode(code);
+    return;
+  }
   activateMainWindow();
   const target = mainWindow;
   if (!target || target.isDestroyed() || !rendererReadyWebContentsIds.has(target.webContents.id)) {
@@ -5398,19 +5584,38 @@ function deliverInviteCode(code: string): void {
   target.webContents.send(INVITE_LINK_CHANNEL, code);
 }
 
+/**
+ * 读一条深链接：不是邀请链接就安静忽略。
+ *
+ * @param raw 命令行参数或 open-url 给出的原始链接。
+ */
 function acceptInviteLink(raw: unknown): void {
   const code = parseInviteLink(raw);
   if (code) deliverInviteCode(code);
 }
 
+/**
+ * 把排队中的邀请发给刚就绪的界面。
+ *
+ * @param target 刚报到的渲染进程。
+ */
 function flushPendingInviteCodes(target: WebContents): void {
   if (!pendingInviteCodes.length) return;
   for (const code of pendingInviteCodes.splice(0)) target.send(INVITE_LINK_CHANNEL, code);
 }
 
+/**
+ * 注册 memmy:// 协议。
+ *
+ * <p>打包后由 electron-builder 写进 Info.plist / 注册表；开发态要手动指到 Electron 本体与本次入口，
+ * 否则浏览器唤起的是另一个 Electron 应用。</p>
+ */
 function registerInviteProtocolClient(): void {
   try {
-    if (app.isPackaged) { app.setAsDefaultProtocolClient(INVITE_LINK_SCHEME); return; }
+    if (app.isPackaged) {
+      app.setAsDefaultProtocolClient(INVITE_LINK_SCHEME);
+      return;
+    }
     const entry = process.argv[1] ? resolve(process.argv[1]) : undefined;
     app.setAsDefaultProtocolClient(INVITE_LINK_SCHEME, process.execPath, entry ? [entry] : []);
   } catch (error) {
@@ -5812,6 +6017,8 @@ const MACOS_PERMISSION_RELAUNCH_ARG = '--memmy-permission-relaunch';
 const wasMacPermissionRelaunch = process.platform === 'darwin' && process.argv.includes(MACOS_PERMISSION_RELAUNCH_ARG);
 const appProcessStartedAt = Date.now();
 
+// 邀请链接（memmy://invite/<code>）的三条来路：macOS 的 open-url、冷启动的 argv（在获得单实例锁后读）、
+// Windows/Linux 的 second-instance（在它的监听里读）。open-url 必须在 ready 之前就注册。
 registerInviteProtocolClient();
 app.on("open-url", (event, url) => {
   event.preventDefault();
@@ -5870,6 +6077,7 @@ app.on("second-instance", (_event, argv) => {
     return;
   }
 
+  // Windows 与 Linux 把 memmy://invite/... 当作参数交给已经在跑的实例；链接不该被下面的防抖吃掉。
   const inviteCode = findInviteLink(argv);
   if (inviteCode) deliverInviteCode(inviteCode);
 
@@ -5953,7 +6161,6 @@ app.on("child-process-gone", (_event, details) => {
 });
 
 app.whenReady().then(async () => {
-  protocol.handle("memmy-recording", createRecordingMediaProxy(() => runtimeServices?.agentGateway ?? null));
   if (!(await waitForSingleInstanceLock())) {
     // An instance is already running: this instance exits directly, to avoid a second instance
     // contending for the fixed ports (memory 18960 / agent gateway) and causing a startup failure.
@@ -5961,6 +6168,7 @@ app.whenReady().then(async () => {
     return;
   }
 
+  // 冷启动时链接就在 argv 里（Windows / Linux）：这时界面还没起来，先排进待发队列，界面报到后一起发。
   const launchInviteCode = findInviteLink(process.argv);
   if (launchInviteCode) queueInviteCode(launchInviteCode);
 
@@ -5968,6 +6176,12 @@ app.whenReady().then(async () => {
   if (windowsUpgradeLockPath && existsSync(windowsUpgradeLockPath)) {
     app.exit(0);
     return;
+  }
+
+  try {
+    repairWindowsLaunchAtLogin(app, currentWindowsLaunchAtLoginEnvironment());
+  } catch (error) {
+    void writePackagedStartupLog(`windows-login-item-repair-failed:${formatStartupError(error)}`);
   }
 
   installMacQuitEventObserver();
@@ -6166,30 +6380,15 @@ app.on("before-quit", (event) => {
 
   isQuitCleanupInProgress = true;
   stopMemoryServiceForCurrentQuit = readStopMemoryServiceOnExitSetting();
-  const quit: QuitCleanupContext = {
-    id: randomUUID(), startedAt: Date.now(), stopMemory: stopMemoryServiceForCurrentQuit,
-    services: runtimeServices, servicesClose: null, phase: "preparing", outcome: "pending"
-  };
-  quitCleanupContext = quit;
-  recordQuitDiagnostic(quit, "start");
   void writePackagedStartupLog("quit:cleanup-start");
   armQuitCleanupForceExitTimer();
   void cleanupBeforeQuit()
-    .catch((error: unknown) => {
-      if (quit.outcome !== "pending") return;
-      quit.outcome = "failed";
-      recordQuitDiagnostic(quit, "cleanup-failed");
+    .catch(async (error: unknown) => {
       console.warn("quit cleanup failed:", error);
-      void writePackagedStartupLog(`quit:cleanup-failed\n${formatStartupError(error)}`);
-      forceQuitCleanup(quit);
+      await writePackagedStartupLog(`quit:cleanup-failed\n${formatStartupError(error)}`);
     })
     .finally(() => {
-      if (quit.outcome === "forced") return;
       clearQuitCleanupForceExitTimer();
-      if (quit.outcome === "pending") {
-        quit.outcome = "complete";
-        recordQuitDiagnostic(quit, "cleanup-complete");
-      }
       isQuitCleanupComplete = true;
       isQuitCleanupInProgress = false;
       if (process.platform === 'darwin') {
@@ -6223,74 +6422,26 @@ function relaunchAfterQuitCleanupIfRequested(): void {
   app.relaunch({ args });
 }
 
-function armQuitCleanupForceExitTimer(timeoutMs = APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS): void {
+function armQuitCleanupForceExitTimer(): void {
   clearQuitCleanupForceExitTimer();
-  const quit = quitCleanupContext;
+  // cleanupBeforeQuit clears the global while its asynchronous service close is pending.
+  const services = runtimeServices;
   quitCleanupForceExitTimer = setTimeout(() => {
-    if (quit) forceQuitCleanup(quit);
-  }, timeoutMs);
-  quitCleanupForceExitTimer.unref?.();
-}
-
-function forceQuitCleanup(quit: QuitCleanupContext): void {
-  if (quit.outcome === "complete" || quit.outcome === "forced") return;
-  quit.outcome = "forced";
-  clearQuitCleanupForceExitTimer();
-  recordQuitDiagnostic(quit, "force-start");
-  console.warn("quit cleanup timed out; forcing app exit");
-  try {
-    // Keep ownership even after the normal path detaches the global reference.
-    quit.services?.terminateSync({ stopMemory: quit.stopMemory });
-    recordQuitDiagnostic(quit, "force-complete");
-  } catch {
-    recordQuitDiagnostic(quit, "force-failed");
-  } finally {
+    console.warn("quit cleanup timed out; forcing app exit");
+    // Apply the same service-lifecycle choice when graceful cleanup times out.
+    try {
+      services?.terminateSync({ stopMemory: stopMemoryServiceForCurrentQuit });
+    } catch (error) {
+      console.warn("Failed to terminate runtime services during forced quit:", error);
+    }
     if (process.platform === 'darwin') {
       stopComputerUseAgentsOnExitSync(app.isPackaged, process.resourcesPath,
         process.env.MEMMY_DEV_COMPUTER_USE_BINARY);
     }
     relaunchAfterQuitCleanupIfRequested();
     app.exit(0);
-  }
-}
-
-function recordQuitDiagnostic(quit: QuitCleanupContext, event: QuitDiagnostic["event"]): void {
-  if (!app.isPackaged) return;
-  writeQuitDiagnostic(join(app.getPath("userData"), "quit-lifecycle.jsonl"), {
-    schemaVersion: 1, quitId: quit.id, pid: process.pid, timestamp: new Date().toISOString(),
-    elapsedMs: Date.now() - quit.startedAt, stopMemory: quit.stopMemory, phase: quit.phase, event
-  });
-}
-
-async function closeRuntimeForQuit(quit: QuitCleanupContext): Promise<void> {
-  const services = quit.services;
-  if (!services) return;
-  if (quit.outcome !== "pending") {
-    // Startup may materialize a service after shutdown has already settled.
-    services.terminateSync({ stopMemory: quit.stopMemory });
-    return;
-  }
-  if (!quit.servicesClose) {
-    quit.servicesClose = (async () => {
-      if (process.platform === "win32" || process.platform === "darwin") {
-        quit.phase = "history-stop";
-        try { await stopTaskRecordingBeforeExit(services.agentGateway, () => armQuitCleanupForceExitTimer(30_000)); } catch { /* sealed parts recover on next startup */ }
-      }
-      if (process.platform === "win32") {
-        try {
-          await stopComputerHistoryBeforeExit(services.agentGateway);
-          if (quit.outcome === "pending") recordQuitDiagnostic(quit, "history-stopped");
-        } catch {
-          if (quit.outcome === "pending") recordQuitDiagnostic(quit, "history-stop-failed");
-        }
-      }
-      if (quit.outcome !== "pending") return;
-      quit.phase = "services-close";
-      await services.close({ stopMemory: quit.stopMemory });
-      if (quit.outcome === "pending") recordQuitDiagnostic(quit, "services-closed");
-    })();
-  }
-  await quit.servicesClose;
+  }, APP_QUIT_CLEANUP_FORCE_EXIT_DELAY_MS);
+  quitCleanupForceExitTimer.unref?.();
 }
 
 function hideAppShellForQuit(): void {
@@ -6401,9 +6552,10 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeListener("memmy:stop-pet-window-drag", handleStopPetWindowDrag);
   ipcMain.removeListener("memmy:update-pet-window-layout", handleUpdatePetWindowLayout);
   ipcMain.removeListener("memmy:analytics-client-id", handleAnalyticsClientId);
+  unregisterTeachingRecordingControls();
   areIpcHandlersRegistered = false;
   destroyMenuBarTray();
-  const quit = quitCleanupContext!;
+  const services = runtimeServices;
   runtimeServices = null;
   memoryServiceControl = null;
   const backend = localBackend;
@@ -6421,12 +6573,12 @@ async function cleanupBeforeQuit(): Promise<void> {
       })
     : Promise.resolve();
   try {
-    await traceQuitCleanup("runtime-services", () => closeRuntimeForQuit(quit));
+    await traceQuitCleanup("runtime-services", async () => {
+      await services?.close({ stopMemory: stopMemoryServiceForCurrentQuit });
+    });
   } finally {
     await nativeAgentShutdown;
   }
-  if (quit.outcome !== "pending") return;
-  quit.phase = "backend-close";
   browserSidebarBridge?.dispose();
   browserSidebarBridge = null;
   embeddedBrowserDriver.dispose();
@@ -6435,11 +6587,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   computerUseSurfaceWindows?.dispose();
   computerUseSurfaceWindows = null;
   await traceQuitCleanup("backend", async () => backend?.close());
-  if (quit.outcome !== "pending") return;
-  quit.phase = "renderer-close";
   await traceQuitCleanup("renderer", stopPackagedRendererServer);
-  if (quit.outcome !== "pending") return;
-  quit.phase = "analytics";
   await traceQuitCleanup("analytics", sendAppExitEventBeforeQuit);
 }
 

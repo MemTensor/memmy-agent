@@ -38,6 +38,15 @@ function deepMerge(base: Record<string, any>, override: Record<string, any>): Re
   return merged;
 }
 
+function headerGet(headers: any, name: string): any {
+  if (!headers) return null;
+  if (typeof headers.get === "function") return headers.get(name) ?? headers.get(name.toLowerCase());
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === name.toLowerCase()) return value;
+  }
+  return null;
+}
+
 function nextOrNull<T>(iterator: Iterator<T>): T | null {
   const next = iterator.next();
   return next.done ? null : next.value;
@@ -325,8 +334,8 @@ export class BedrockProvider extends LLMProvider {
     toolChoice?: string | Record<string, any> | null;
   }): Record<string, any> {
     const modelId = BedrockProvider.stripPrefix(args.model ?? this.defaultModel);
-    const [system, convertedMessages] = this.convertMessages(LLMProvider.sanitizeEmptyContent(args.messages));
-    const messages = convertedMessages.length ? convertedMessages : [{ role: "user", content: [{ text: "(empty)" }] }];
+    let [system, messages] = this.convertMessages(LLMProvider.sanitizeEmptyContent(args.messages));
+    if (!messages.length) messages = [{ role: "user", content: [{ text: "(empty)" }] }];
 
     const kwargs: Record<string, any> = {
       modelId,

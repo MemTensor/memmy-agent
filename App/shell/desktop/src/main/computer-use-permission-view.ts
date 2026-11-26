@@ -16,7 +16,7 @@ button:focus-visible,[draggable=true]:focus-visible{outline:3px solid #1685ee;ou
 .back{position:absolute;left:36px;top:112px;width:58px;height:58px;border:0;border-radius:50%;background:#dedede;color:#444;display:grid;place-items:center;padding:0}
 .back:hover{background:#d3d3d3}.back svg{width:21px;height:28px}
 .tile{position:absolute;left:128px;right:20px;top:99px;height:84px;padding:12px 15px;border:1px solid #dcdae0;border-radius:12px;background:#f6f6f6;display:flex;align-items:center;gap:14px;user-select:none;cursor:grab;text-align:left}
-    .tile:active{cursor:grabbing}.tile[aria-disabled=true]{cursor:default}.tile:hover{background:#f8f8f8}.tile[hidden]{display:none}
+.tile:active{cursor:grabbing}.tile[aria-disabled=true]{cursor:default}.tile:hover{background:#f8f8f8}
 .tile img{flex:none;width:54px;height:54px;object-fit:contain;pointer-events:none}
 .tile strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:27px;line-height:34px;font-weight:400;color:#343434}
 .aftercare{position:absolute;left:128px;right:20px;bottom:10px;height:27px;display:flex;align-items:center;gap:12px;color:#666;font-size:13px}
@@ -38,9 +38,8 @@ const labels={accessibility:'辅助功能',screenRecording:'屏幕录制',inputM
 function render(){if(!state)return;
   const required=state.requiredPermission;
   ready=!state.permissions.failure&&state.permissions[required]==='granted';
-  el('settings').textContent=ready?'权限已开启，无需拖动；点击“完成”返回 Memmy':'将 Memmy 拖入上方列表，允许'+labels[required];
+  el('settings').textContent=ready?'Memmy 的权限已就绪，可以继续':'将 Memmy 拖入上方列表，允许'+labels[required];
   el('settings').disabled=state.busy||ready||state.permissions.failure==='helperPauseFailed';
-  el('helper-drag').hidden=ready;
   el('helper-drag').draggable=Boolean(state.canDragHelper&&!ready);
   el('helper-drag').setAttribute('aria-disabled',String(!state.canDragHelper||ready));
   if(state.helperIcon){el('helper-icon').src=state.helperIcon;el('helper-icon').hidden=false;}

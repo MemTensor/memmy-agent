@@ -23,6 +23,9 @@ describe("plugin file inventory", () => {
     const reminder = continuation({ finalContent: "全部产物已交付", messages });
     expect(reminder).toContain("message(media=[absolute paths])");
     expect(reminder).toContain("choose the files needed for that outcome");
+    // A message call ends what the user sees this turn, so the reminder asks for the whole reply there.
+    expect(reminder).toContain("write your complete reply to the user in its content");
+    expect(reminder).not.toContain("brief note");
     expect(reminder).not.toContain("memmy-logo.png");
     expect(continuation({ finalContent: "已完成", messages })).toBeNull();
     expect(createArtifactDeliveryContinuation(() => ["/workspace/review.pdf"])(

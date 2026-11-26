@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ windows: [] as any[], handles: new Map<string, (...args: any[]) => unknown>(), main: null as any,
   cursor: { x: 200, y: 200 },
@@ -31,7 +31,7 @@ vi.mock('electron', async () => {
     loadURL() { return Promise.resolve(); }
     destroy() { this.destroyed = true; this.emit('closed'); }
   }
-  const ipcMain = Object.assign(new EventEmitter(), { handle: (name: string, handler: (...args: any[]) => unknown) => mocks.handles.set(name, handler) });
+  const ipcMain = Object.assign(new EventEmitter(), { removeHandler: (name: string) => mocks.handles.delete(name), handle: (name: string, handler: (...args: any[]) => unknown) => mocks.handles.set(name, handler) });
   const displayEvents = new EventEmitter();
   mocks.displayEvents = displayEvents;
   const inside = (display: { workArea: { x: number; y: number; width: number; height: number } }, point: { x: number; y: number }) =>
@@ -46,7 +46,7 @@ vi.mock('electron', async () => {
     removeListener: (name: string, listener: (...args: any[]) => void) => displayEvents.removeListener(name, listener) } };
 });
 import { ipcMain } from 'electron';
-import { recordingBarFocusable, registerTeachingRecordingControls, resolveFollowDecision } from '../src/main/teaching-recording-controls.js';
+import { recordingBarFocusable, registerTeachingRecordingControls, resolveFollowDecision, unregisterTeachingRecordingControls } from '../src/main/teaching-recording-controls.js';
 
 const channel = 'memmy:teaching-recording-controls';
 const session = { id: 'ba1142db-f861-4dca-8bff-f602d492d8db', conversationId: 'chat-a',
@@ -62,6 +62,8 @@ beforeEach(() => {
     restore: vi.fn(function (this: any) { this.minimized = false; this.visible = true; }),
     showInactive: vi.fn(function (this: any) { this.visible = true; }) };
 });
+
+afterEach(() => unregisterTeachingRecordingControls());
 
 describe('independent Teach Mode panel', () => {
   it('lets the clicked bar take key status only on macOS', () => {
@@ -95,6 +97,21 @@ describe('independent Teach Mode panel', () => {
       { id: session.id, action: 'stop' });
     await vi.waitFor(() => expect(panel.destroyed).toBe(true));
     expect(fetcher.mock.calls.some(([, init]) => JSON.parse(String(init.body)).input.action === 'stop')).toBe(true);
+    vi.unstubAllGlobals();
+  });
+  it('reports a failed stop and leaves the control available for retry', async () => {
+    const fetcher = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ ok: true,
+      json: async () => ({ event: { type: 'result', output: { ...session, state: 'ready' } } }) });
+    vi.stubGlobal('fetch', fetcher);
+    registerTeachingRecordingControls(() => mocks.main, () => ({ baseUrl: 'http://127.0.0.1:19000', localToken: 'test' }));
+    mocks.handles.get(`${channel}:update`)!({ sender: mocks.main.webContents, senderFrame: mocks.main.webContents.mainFrame }, session);
+    const panel = mocks.windows.at(-1)!, from = { sender: panel.webContents, senderFrame: panel.webContents.mainFrame };
+    ipcMain.emit(`${channel}:action`, from, { id: session.id, action: 'stop' });
+    await vi.waitFor(() => expect(panel.webContents.send).toHaveBeenCalledWith(`${channel}:feedback`,
+      { busy: false, error: expect.stringContaining('try again') }));
+    expect(panel.destroyed).toBe(false);
+    ipcMain.emit(`${channel}:action`, from, { id: session.id, action: 'stop' });
+    await vi.waitFor(() => expect(panel.destroyed).toBe(true));
     vi.unstubAllGlobals();
   });
   it('asks before discarding and restores the bar when the user keeps recording', async () => {

@@ -23,7 +23,6 @@ export * from "./cloud-service.js";
 export * from "./desktop-runtime-manifest.js";
 export * from "./plugin.js";
 export * from "./event-capture.js";
-export * from "./computer-recordings.js";
 export * from "./computer-use-surface.js";
 export * from "./browser-profile-control.js";
 export * from "./embedded-browser-control.js";
