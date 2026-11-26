@@ -98,7 +98,8 @@ function summary(id: string) {
 }
 
 describe("Computer History native event stream reconnect", () => {
-  it.each([streamDisconnect, initialConnectionClosed, windowsStreamDisconnect])("rechecks permissions and resumes the same stream after %s", async (message) => {
+  it.each([streamDisconnect, initialConnectionClosed, windowsStreamDisconnect])("resumes the same stream with Input Monitoring off after %s", async (message) => {
+    permissionReader.mockResolvedValue({ ...granted, inputMonitoring: false });
     const started = service.startObservation().observation;
     appendActivity("Before reconnect");
     const before = fs.readFileSync(eventsFile(), "utf8");
@@ -175,8 +176,8 @@ describe("Computer History native event stream reconnect", () => {
     expect(service.snapshot().observation.state).toBe(action === "pause" ? "paused" : "stopped");
   });
 
-  it.each(["accessibility", "inputMonitoring"] as const)("stops and closes existing evidence when %s was revoked", async (permission) => {
-    permissionReader.mockResolvedValue({ ...granted, [permission]: false });
+  it("stops and closes existing evidence when Accessibility was revoked", async () => {
+    permissionReader.mockResolvedValue({ ...granted, accessibility: false });
     const id = service.startObservation().observation.segmentId!;
     appendActivity("Permission revoked fixture");
     disconnect();

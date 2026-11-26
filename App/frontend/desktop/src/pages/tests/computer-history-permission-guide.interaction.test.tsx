@@ -208,17 +208,12 @@ describe("Computer History permission dialog", () => {
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(onStart).toHaveBeenCalledOnce();
   });
-  it.each([false, true])("waits for listening after restart without losing the pending enable action (StrictMode=%s)", async (strict) => {
+  it.each([false, true])("resumes the pending action after restart with Input Monitoring off (StrictMode=%s)", async (strict) => {
     saveHistoryPermissionSetup("start", "previous-app");
     const { client, onStart } = await render(accessibilityGranted, strict);
-    expect(onStart).not.toHaveBeenCalled();
-    expect(readHistoryPermissionIntent()?.sessionId).toBe("previous-app");
-    expect(dialog().querySelector('[role="alert"]')).toBeNull();
-    expect(dialog().textContent).toContain("退出并重启");
-    expect(dialog().textContent).not.toContain("重试");
-    client.checkComputerHistoryPermissions.mockResolvedValue(granted);
-    await act(async () => window.dispatchEvent(new Event("focus")));
     expect(onStart).toHaveBeenCalledOnce();
+    expect(client.openComputerHistoryPermission).not.toHaveBeenCalled();
+    expect(window.memmy!.restartForComputerHistoryPermissions).not.toHaveBeenCalled();
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(onStart).toHaveBeenCalledOnce();
   });

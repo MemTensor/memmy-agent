@@ -11,7 +11,7 @@ export const ComputerHistoryPermissionsSchema = z.object({
 export type ComputerHistoryPermissions = z.infer<typeof ComputerHistoryPermissionsSchema>;
 export type ComputerHistoryPermission = "accessibility" | "inputMonitoring";
 export function historyPermissionsReady(status?: ComputerHistoryPermissions): boolean {
-  return !!status?.supported && (status.platform === "windows" ? status.ready === true : status.accessibility && status.inputMonitoring);
+  return !!status?.supported && (status.platform === "windows" ? status.ready === true : status.accessibility);
 }
 const WindowsSelectorSchema = z.object({ controlType: z.enum(["Edit", "Document"]), automationId: z.string() }).strict();
 const WindowsDocumentSelectorSchema = z.union([WindowsSelectorSchema,

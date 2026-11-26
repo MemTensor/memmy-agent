@@ -808,10 +808,10 @@ describe("ComputerHistorySubPage", () => {
     expect(client.startComputerHistoryObservation).toHaveBeenCalledOnce();
   });
 
-  it("restores setup after app restart and automatically turns recording on after fresh permission checks", async () => {
+  it("restores setup and turns recording on after an app restart with Input Monitoring off", async () => {
     saveHistoryPermissionSetup("start", "old-process");
     window.memmy = { getComputerHistoryPermissionSessionId: vi.fn().mockResolvedValue("new-process") } as unknown as NonNullable<Window["memmy"]>;
-    const ready = { supported: true, accessibility: true, inputMonitoring: true };
+    const ready = { supported: true, accessibility: true, inputMonitoring: false };
     const client = await renderWith(snapshot(), {
       checkComputerHistoryPermissions: vi.fn().mockResolvedValue(ready),
       openComputerHistoryPermission: vi.fn(),

@@ -1218,10 +1218,10 @@ var inputMonitoringWasReady: Bool?
 
 func historySamplingTick(expectedSession: UInt64? = nil) {
   if let expectedSession {
-    guard eventTap != nil, recorderSession() == expectedSession else { return }
+    guard historySamplingTimer != nil, recorderSession() == expectedSession else { return }
   }
   emitRecorderDiagnostic(code: "heartbeat")
-  let inputMonitoring = CGPreflightListenEventAccess()
+  let inputMonitoring = eventTap != nil && CGPreflightListenEventAccess()
   if inputMonitoring {
     if inputMonitoringWasReady != true { emitRecorderDiagnostic(code: "input_monitoring_ready", minimumInterval: 0) }
   } else {
@@ -1240,24 +1240,13 @@ func historySamplingTick(expectedSession: UInt64? = nil) {
 }
 
 public func startHistoryRecorder(output: @escaping (String) -> Void) throws {
-  guard eventTap == nil else { throw NSError(domain: "MemmyComputerHistory", code: 1,
+  guard historySamplingTimer == nil else { throw NSError(domain: "MemmyComputerHistory", code: 1,
     userInfo: [NSLocalizedDescriptionKey: "Computer History is already recording."]) }
-  guard CGPreflightListenEventAccess() else {
+  guard AXIsProcessTrusted() else {
     throw NSError(domain: "MemmyComputerHistory", code: 2,
-      userInfo: [NSLocalizedDescriptionKey: "Input Monitoring permission is required for Memmy Computer Use."])
+      userInfo: [NSLocalizedDescriptionKey: "missing macOS permission: Accessibility."])
   }
   enrichmentQueue.setSpecific(key: enrichmentQueueKey, value: true)
-  guard let tap = CGEvent.tapCreate(
-    tap: .cgSessionEventTap,
-    place: .headInsertEventTap,
-    options: .listenOnly,
-    eventsOfInterest: CGEventMask(eventMask),
-    callback: callback,
-    userInfo: nil
-  ) else {
-    throw NSError(domain: "MemmyComputerHistory", code: 2,
-      userInfo: [NSLocalizedDescriptionKey: "Unable to create the event tap. Grant Input Monitoring to Memmy Computer Use and restart it."])
-  }
   emitLock.lock()
   historySessionId &+= 1
   historyNativeSessionId = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
@@ -1271,7 +1260,6 @@ public func startHistoryRecorder(output: @escaping (String) -> Void) throws {
   pendingDiagnostics.removeAll(); pendingDiagnosticOrder.removeAll()
   diagnosticLock.unlock()
   samplingLock.lock(); lastScrollSampleAt = nil; samplingLock.unlock()
-  eventTap = tap
   historyWorkspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
     forName: NSWorkspace.didActivateApplicationNotification,
     object: nil,
@@ -1282,10 +1270,21 @@ public func startHistoryRecorder(output: @escaping (String) -> Void) throws {
     if !isSeparatelyAuthorizedSource(payload), let pid = payload["pid"] as? pid_t { observeApplication(pid: pid) }
     emitEvent(kind: "window.changed", application: payload, extra: [:])
   }
-  let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-  historyRunLoopSource = source
-  CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-  CGEvent.tapEnable(tap: tap, enable: true)
+  // Window and AX sampling work even when macOS disallows global input events.
+  if CGPreflightListenEventAccess(), let tap = CGEvent.tapCreate(
+    tap: .cgSessionEventTap,
+    place: .headInsertEventTap,
+    options: .listenOnly,
+    eventsOfInterest: CGEventMask(eventMask),
+    callback: callback,
+    userInfo: nil
+  ) {
+    eventTap = tap
+    let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+    historyRunLoopSource = source
+    CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+    CGEvent.tapEnable(tap: tap, enable: true)
+  }
   if !isSeparatelyAuthorizedSource(applicationPayload()), let pid = applicationPayload()["pid"] as? pid_t {
     observeApplication(pid: pid)
   }
@@ -1298,11 +1297,11 @@ public func startHistoryRecorder(output: @escaping (String) -> Void) throws {
 }
 
 public func stopHistoryRecorder() {
-  guard let tap = eventTap else { return }
-  historySamplingTimer?.invalidate(); historySamplingTimer = nil
+  guard let timer = historySamplingTimer else { return }
+  timer.invalidate(); historySamplingTimer = nil
   inputMonitoringWasReady = nil
   enrichmentScheduler.cancelPending()
-  CGEvent.tapEnable(tap: tap, enable: false)
+  if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
   if let source = historyRunLoopSource {
     CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
     historyRunLoopSource = nil
