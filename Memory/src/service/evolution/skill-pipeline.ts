@@ -87,9 +87,13 @@ export interface SkillPipelineDeps {
  namespaceIdFromMemory(memory:MemoryRow):string;
 }
 
-export class SkillPipeline {
+export type SkillPolicyDeps = Pick<SkillPipelineDeps, "repos" | "namespaceIdFromMemory" | "enqueueJob"> & {
+  config: { algorithm: Pick<MemmyConfig["algorithm"], "capture" | "skill"> };
+};
+
+export class SkillPipeline<D extends SkillPolicyDeps = SkillPipelineDeps> {
  private readonly skillCrystallizationRuns=new Map<string,number>();
- constructor(private readonly deps:SkillPipelineDeps){}
+ constructor(private readonly deps:D){}
 
   /** A revised source invalidates derived content, but never deletes its steps or provenance. */
   suspendForPolicyRevision(policyId: string, at: string): void {
@@ -252,7 +256,7 @@ export class SkillPipeline {
   }
 
   /** Repair existing text immediately, without claiming the revised workflow has succeeded. */
-  private async reviseDependentSkill(job: EvolutionJobRecord): Promise<void> {
+  private async reviseDependentSkill(this: SkillPipeline, job: EvolutionJobRecord): Promise<void> {
     const source = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
     const policy = source ? policyMetaFromMemory(source) : null;
     const row = typeof job.payload.skillId === "string" ? this.deps.repos.memories.get(job.payload.skillId) : undefined;
@@ -334,7 +338,7 @@ export class SkillPipeline {
     });
   }
 
-  async crystallizeSkill(job: EvolutionJobRecord): Promise<void> {
+  async crystallizeSkill(this: SkillPipeline, job: EvolutionJobRecord): Promise<void> {
     if (job.payload.reason === "l2.content_revised") {
       await this.reviseDependentSkill(job);
       return;
@@ -798,6 +802,7 @@ export class SkillPipeline {
   }
 
   findExistingSkillForPolicy(
+    this: SkillPipeline,
     policy: PolicyMeta
   ): NonNullable<ReturnType<typeof skillMetaFromMemory>> | null {
     const candidates = this.mutableSkillsForPolicy(policy);
@@ -837,6 +842,7 @@ export class SkillPipeline {
   }
 
   private consolidateCompatibleSkillsForPolicy(
+    this: SkillPipeline,
     policy: PolicyMeta,
     at: string,
     targetSkillId?: string,
@@ -917,7 +923,7 @@ export class SkillPipeline {
     return { blocked: false, skill: skillMetaFromMemory(saved), aliases, original: canonical.memory };
   }
 
-  private commitSkillMergeAliases(saved: MemoryRow, aliases: SkillMeta[], at: string): void {
+  private commitSkillMergeAliases(this: SkillPipeline, saved: MemoryRow, aliases: SkillMeta[], at: string): void {
     for (const alias of aliases) {
       const aliasInternal = alias.memory.properties.internal_info;
       const aliasSkill = isRecord(aliasInternal.skill) ? aliasInternal.skill : {};
@@ -962,6 +968,7 @@ export class SkillPipeline {
   }
 
   private skillGenerationContext(
+    this: SkillPipeline,
     policy: PolicyMeta,
     evidenceTraces: TraceMeta[],
     counterExamples: TraceMeta[],
@@ -1183,7 +1190,7 @@ export class SkillPipeline {
     return `${policy.id}:${l2ContentRevision(policy.memory)}:${skillId ?? "new"}`;
   }
 
-  private gatherSkillEvidence(policy: PolicyMeta): TraceMeta[] {
+  private gatherSkillEvidence(this: SkillPipeline, policy: PolicyMeta): TraceMeta[] {
     const byId = new Map<string, TraceMeta>();
     const episodeIds = new Set(policy.sourceEpisodeIds);
     const failureEpisodeIds = new Set(
@@ -1229,7 +1236,7 @@ export class SkillPipeline {
     return episode.rewardDetail.skipped === true;
   }
 
-  private gatherSkillCounterExamples(policy: PolicyMeta): TraceMeta[] {
+  private gatherSkillCounterExamples(this: SkillPipeline, policy: PolicyMeta): TraceMeta[] {
     if (policy.sourceEpisodeIds.length === 0) return [];
     const episodeIds = new Set(policy.sourceEpisodeIds);
     return this.deps.repos.memories
@@ -1368,6 +1375,7 @@ export class SkillPipeline {
   }
 
   private async enhanceSkillDraft(
+    this: SkillPipeline,
     policy: PolicyMeta,
     fallback: SkillDraft,
     evidenceTraces: TraceMeta[],

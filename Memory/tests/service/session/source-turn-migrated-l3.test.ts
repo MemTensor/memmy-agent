@@ -62,10 +62,13 @@ describe("migrated native history entering L3", () => {
     await originalService.stop();
     originalDb.close();
 
-    // Construction converts the durable old command through migrateLegacyCaptures.
+    // Startup admits the service before converting old commands. A native replay waits for its original capture.
     const db = new MemoryDb({ path: dbPath });
     const service = fixture.createTestMemoryService({ ...options, db });
     const repos = new Repositories(db.db);
+    expect(db.db.prepare("SELECT COUNT(*) FROM evolution_jobs WHERE job_type='capture_replay'").pluck().get()).toBe(1);
+    const repeated = await service.completeSourceTurn(migratedRequest);
+    expect(repeated.status).toBe("existing");
     expect(db.db.prepare(`SELECT COUNT(*) AS n FROM evolution_jobs WHERE job_type = 'capture_replay'`).get())
       .toEqual({ n: 0 });
     const ledger = () => db.db.prepare(`SELECT * FROM source_turn_captures ORDER BY turn_id`).all() as Array<{

@@ -660,7 +660,7 @@ export class PanelReadModel {
         const item = userMemoryPanelItem(memory); return {...item, metadata: {...item.metadata, fullContentAvailable:true}};
       })};
     }
-    const visible=panelVisibleMemoryIds(this.deps.repos.db,ids);
+    const visible = panelVisibleMemoryIds(this.deps.repos.db, ids, input.layer === "Skill");
     return {items: this.displayItems(this.deps.repos.memories.getManyForPanel(ids.filter(id=>visible.has(id))),!input.namespace?.userId)};
   }
 

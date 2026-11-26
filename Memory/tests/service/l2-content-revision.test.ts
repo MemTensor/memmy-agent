@@ -2,7 +2,7 @@ import { traceMetaFromMemory } from "../../src/algorithm/plugin-algorithms.js";
 import type { EvolutionJobRecord } from "../../src/storage/repositories.js";
 import { MemoryDb } from "../../src/storage/db.js";
 import { Repositories } from "../../src/storage/repositories.js";
-import { SkillPipeline } from "../../src/service/evolution/skill-pipeline.js";
+import { SkillPipeline, type SkillPipelineDeps } from "../../src/service/evolution/skill-pipeline.js";
 import { DEFAULT_MEMMY_CONFIG } from "../../src/config/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { revisedL2Memory, l2ContentRevision, l2SupportRelation } from "../../src/service/evolution/l2-content-revision.js";
@@ -69,7 +69,7 @@ describe("revision persistence and dependants", () => {
           skill: { name: id, status: "active", source_policy_ids: [...sources], procedure_json: { steps: [{ title: "Keep me" }] } } } } });
     }
     const pipeline = new SkillPipeline({ repos, config: DEFAULT_MEMMY_CONFIG,
-      namespaceIdFromMemory: () => "test", enqueueJob: () => ({}) } as unknown as ConstructorParameters<typeof SkillPipeline>[0]);
+      namespaceIdFromMemory: () => "test", enqueueJob: () => ({}) } as unknown as SkillPipelineDeps);
     pipeline.suspendForPolicyRevision("p", base.updatedAt);
     expect(repos.memories.get("derived")).toMatchObject({ status: "archived", memoryValue: "original steps",
       properties: { internal_info: { skill: { status: "suspended", source_policy_ids: ["p"],
@@ -110,7 +110,7 @@ describe("revision persistence and dependants", () => {
           summary: "Compare unrounded totals and verify export totals", preconditions: [], parameters: [],
           steps: [{ title: "Compare totals", body: "Compare unrounded totals before export" }, { title: "Verify totals", body: "Verify export totals" }],
           tools: ["inspect_totals"], examples: [], tags: [], changed_sections: ["steps"] };
-      } } } as unknown as ConstructorParameters<typeof SkillPipeline>[0]);
+      } } } as unknown as SkillPipelineDeps);
     pipeline.suspendForPolicyRevision("p", base.updatedAt);
     expect(jobs).toHaveLength(1);
     if (scenario === "failure") {

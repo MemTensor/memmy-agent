@@ -1,3 +1,5 @@
+import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
+import { isBusy } from "../../storage/fts-maintenance.js";
 import type { EvolutionJobRecord, Repositories } from "../../storage/repositories.js";
 import { retrievalDocumentForMemory, retrievalDocumentIsCurrent, retrievalDocumentSourceHash } from "../../algorithm/plugin-algorithms.js";
 import {
@@ -36,6 +38,14 @@ import { sanitizeMemmyProtocolText } from "../../utils/memmy-context-tags.js";
 import { normalizeAgentIdKey } from "../../utils/agent-source-id.js";
 import { frontmatterBoolean, frontmatterString, parseSkillFrontmatter } from "@memmy/agent-source-core";
 import { importedSkillInfoFields, importedSkillInternalFields, memoryAddKey, skillInternalFields, type ImportedSkillMemoryAddOptions } from "./memory-import-pipeline.js";
+
+const migrationLogger = createMemoryLogger("agent-skill-library");
+
+type StartupSkillGroup = { sourceAgentId: string; sourceSkillId: string };
+
+function startupGroupKey({ sourceAgentId, sourceSkillId }: StartupSkillGroup): string {
+  return JSON.stringify([sourceAgentId, sourceSkillId]);
+}
 
 /** One SKILL.md found in the source Agent's skill directories. */
 export interface AgentSkillReconcileSkill {
@@ -126,6 +136,8 @@ export interface AgentSkillLibraryDeps {
   namespaceIdFromMemory(memory: MemoryRow): string;
 }
 
+export type SkillMaintenanceDeps = Omit<AgentSkillLibraryDeps, "resolveUserId" | "buildMemory">;
+
 const RECONCILE_SOURCE = "agent_skill.reconcile";
 const SKILL_VECTOR_FIELDS = ["vec", "vec_summary", "vec_action"] as const;
 
@@ -135,10 +147,10 @@ const SKILL_VECTOR_FIELDS = ["vec", "vec_summary", "vec_action"] as const;
  * each content version is its own record (the key carries the content hash)
  * and exactly one version is current.
  */
-export class AgentSkillLibrary {
-  constructor(private readonly deps: AgentSkillLibraryDeps) {}
+export class AgentSkillLibrary<Deps extends SkillMaintenanceDeps = AgentSkillLibraryDeps> {
+  constructor(private readonly deps: Deps) {}
 
-  reconcile(request: AgentSkillReconcileRequest): AgentSkillReconcileResult {
+  reconcile(this: AgentSkillLibrary, request: AgentSkillReconcileRequest): AgentSkillReconcileResult {
     request = { ...request, skills: request.skills.map(normalizeSkillObservation) };
     const sourceAgentId = normalizeAgentIdKey(request.sourceAgentId);
     const userId = this.deps.resolveUserId(request);
@@ -325,6 +337,18 @@ export class AgentSkillLibrary {
     this.deps.repos.runtime.setKv(key, inventory, at);
   }
 
+  *startupMaintenance(pageSize: number, enableMemoryAdd: () => boolean) {
+    const failedGroups = new Set<string>();
+    const migration = yield* this.migrateLegacyRecords(this.deps.nowIso(), pageSize, failedGroups);
+    if (migration.migrated) migrationLogger.info("agent_skill.legacy_migrated", migration);
+    yield;
+    yield* this.deps.repos.runtime.repairImportedSkillResponseCopies(pageSize);
+    if (enableMemoryAdd()) {
+      const upgraded = yield* this.upgradeRetrievalRepresentation(pageSize, enableMemoryAdd, failedGroups);
+      if (upgraded) migrationLogger.info("agent_skill.retrieval_text_upgraded", { upgraded });
+    }
+  }
+
   /**
    * Brings imported Skill records written before source reconciliation up to
    * the current state version, using only what is stored. Facts that need the
@@ -332,57 +356,88 @@ export class AgentSkillLibrary {
    * are settled by the next scan. Runs at startup; records that already carry
    * the version are skipped, so it can be repeated safely.
    */
-  migrateLegacyRecords(at: string, limit: number): { migrated: number; scrubbedDeleted: number } {
+  private *migrateLegacyRecords(at: string, limit: number, failed: Set<string>) {
     let migrated = 0;
     let scrubbedDeleted = 0;
-    this.deps.repos.transaction(() => {
-      migrated += this.repairLegacyManualSkills(at, limit);
-      migrated += this.repairLegacySourceFacts(at, limit);
-      for (;;) {
-        const legacy = this.deps.repos.memories.listImportedSkillsBelowStateVersion(IMPORTED_SKILL_STATE_VERSION, Math.max(1, limit));
-        if (legacy.length === 0) break;
-        const before = migrated;
-        const bySource = new Map<string, MemoryRow[]>();
-        for (const memory of legacy) {
-          const sourceAgentId = normalizeAgentIdKey(String(memory.properties.internal_info.source_agent_id ?? ""));
-          bySource.set(sourceAgentId, [...(bySource.get(sourceAgentId) ?? []), memory]);
-        }
-        for (const [sourceAgentId, records] of bySource) {
-          this.seedInstallations(sourceAgentId, at);
-          this.recordConnection({ sourceAgentId, complete: false, skills: [] }, at);
-          const pending = new Set(records.map((memory) => memory.id));
-          // Versions already migrated still count when choosing the current one.
-          const groups = groupBySourceIdentity(this.deps.repos.memories.listImportedSkillsForSource(sourceAgentId));
-          for (const versions of groups.values()) {
-            if (!versions.some(version => pending.has(version.id))) continue;
-            const current = currentImportedSkillVersion(versions);
-            // A source's versions share user intent. Repair the whole legacy
-            // group before a later batch can observe its already-rewritten rows.
-            for (const version of versions) {
-              if (Number(version.properties.internal_info.import_state_version ?? 0) >= IMPORTED_SKILL_STATE_VERSION) continue;
-              if (isDeleted(version)) {
-                const deletedCurrent = !isUnverifiedLegacySkillCollision(version) && importedSkillArchiveReason(version) !== "source_missing"
-                  && version.properties.internal_info.source_state !== "source_missing"
-                  && !isHistoricalImportedSkill(version, versions);
-                const repaired = withImportFields(withImportedSkillRawHash(version), { import_state_version: IMPORTED_SKILL_STATE_VERSION,
-                  deleted_current: deletedCurrent }, version.updatedAt);
-                if (!isHistoricalImportedSkill(version, versions)) {
-                  delete repaired.properties.internal_info.superseded_by_skill_id;
-                  if (importedSkillArchiveReason(version) === "superseded") delete repaired.properties.internal_info.archive_reason;
-                }
-                this.deps.repos.memories.rewriteDeletedRow(stripBody(repaired, version.updatedAt));
-                this.deps.repos.runtime.scrubImportedSkillCopies(version.id);
-                scrubbedDeleted += 1;
-              } else {
-                this.migrateLiveRecord(version, current, this.isDisconnected(sourceAgentId), versions);
-              }
-              migrated += 1;
-            }
+    const seen = new Set<string>();
+    // Old manual rows can be false successors of genuine file versions. Detach them first.
+    for (const phase of ["manual", "state"] as const) {
+      for (const group of this.startupGroups(phase, limit, seen)) {
+        if (group) {
+          const result = yield* this.updateStartupGroup(phase, group, () => this.migrateGroup(at, group));
+          if (result) {
+            migrated += result.migrated;
+            scrubbedDeleted += result.scrubbedDeleted;
+          } else {
+            failed.add(startupGroupKey(group));
           }
         }
-        if (migrated === before) throw new Error("imported Skill migration made no progress");
+        yield;
       }
-    });
+    }
+    return { migrated, scrubbedDeleted };
+  }
+
+  private *startupGroups(phase: "manual" | "state" | "retrieval", limit: number, seen = new Set<string>()) {
+    const version = phase === "retrieval" ? IMPORTED_SKILL_RETRIEVAL_VERSION : IMPORTED_SKILL_STATE_VERSION;
+    let cursor = 0;
+    for (;;) {
+      const page = this.deps.repos.memories.listStartupSkillGroups(cursor, limit, version, phase);
+      if (!page.length) return;
+      for (const group of page) {
+        const key = startupGroupKey(group);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        yield group;
+      }
+      cursor = page[page.length - 1]!.cursor;
+      // Even pages consisting entirely of previously visited groups must yield.
+      yield undefined;
+    }
+  }
+
+  private *updateStartupGroup<T>(phase: string, group: StartupSkillGroup, update: () => T) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return this.deps.repos.transaction(update);
+      } catch (error) {
+        migrationLogger.error("startup.group_failed", { phase, sourceAgentId: group.sourceAgentId,
+          sourceSkillId: group.sourceSkillId, attempt, ...memoryErrorFields(error) });
+        if (!isBusy(error) || attempt >= 3) return;
+        yield;
+      }
+    }
+  }
+
+  private migrateGroup(at: string, { sourceAgentId, sourceSkillId }: StartupSkillGroup) {
+    let migrated = this.repairLegacyManualSkillsInTransaction(at, 200, sourceAgentId, sourceSkillId);
+    migrated += this.repairLegacySourceFacts(at, 200, sourceAgentId, sourceSkillId);
+    let scrubbedDeleted = 0;
+    const versions = this.deps.repos.memories.listImportedSkillsForSource(sourceAgentId, { sourceSkillId });
+    const pending = versions.filter(v => Number(v.properties.internal_info.import_state_version ?? 0) < IMPORTED_SKILL_STATE_VERSION);
+    if (!pending.length) return { migrated, scrubbedDeleted };
+    this.seedInstallations(sourceAgentId, at);
+    this.recordConnection({ sourceAgentId, complete: false, skills: [] }, at);
+    const current = currentImportedSkillVersion(versions);
+    for (const version of pending) {
+      if (isDeleted(version)) {
+        const deletedCurrent = !isUnverifiedLegacySkillCollision(version) && importedSkillArchiveReason(version) !== "source_missing"
+          && version.properties.internal_info.source_state !== "source_missing"
+          && !isHistoricalImportedSkill(version, versions);
+        const repaired = withImportFields(withImportedSkillRawHash(version), { import_state_version: IMPORTED_SKILL_STATE_VERSION,
+          deleted_current: deletedCurrent }, version.updatedAt);
+        if (!isHistoricalImportedSkill(version, versions)) {
+          delete repaired.properties.internal_info.superseded_by_skill_id;
+          if (importedSkillArchiveReason(version) === "superseded") delete repaired.properties.internal_info.archive_reason;
+        }
+        this.deps.repos.memories.rewriteDeletedRow(stripBody(repaired, version.updatedAt));
+        this.deps.repos.runtime.scrubImportedSkillCopies(version.id);
+        scrubbedDeleted += 1;
+      } else {
+        this.migrateLiveRecord(version, current, this.isDisconnected(sourceAgentId), versions);
+      }
+      migrated++;
+    }
     return { migrated, scrubbedDeleted };
   }
 
@@ -393,20 +448,30 @@ export class AgentSkillLibrary {
    * restoreRetrievalRepresentation can put them back. Startup's retrieval
    * index repair re-embeds the records whose retrieval text changed.
    */
-  upgradeRetrievalRepresentation(limit: number): number {
+  *upgradeRetrievalRepresentation(limit: number, enableMemoryAdd: () => boolean, failed: ReadonlySet<string> = new Set()) {
     let upgraded = 0;
-    this.deps.repos.transaction(() => {
-      for (;;) {
-        const batch = this.deps.repos.memories.listImportedSkillsByRetrievalVersion(IMPORTED_SKILL_RETRIEVAL_VERSION, "below", Math.max(1, limit));
-        if (batch.length === 0) break;
-        for (const memory of batch) {
-          const next = applyRetrievalRepresentation(withImportedSkillRawHash(memory), memory);
-          const saved = this.deps.repos.memories.updateMaintenance(next);
-          this.reconcileSkillIndex(saved, this.deps.nowIso());
-          upgraded += 1;
-        }
+    for (const group of this.startupGroups("retrieval", limit, new Set(failed))) {
+      if (!enableMemoryAdd()) break;
+      if (group) {
+        const count = yield* this.updateStartupGroup("retrieval", group, () => {
+          // A retry is a new transaction and must observe a configuration reload.
+          if (!enableMemoryAdd()) return 0;
+          const versions = this.deps.repos.memories.listImportedSkillsForSource(group.sourceAgentId, { sourceSkillId: group.sourceSkillId });
+          if (versions.some(v => Number(v.properties.internal_info.import_state_version ?? 0) < IMPORTED_SKILL_STATE_VERSION)) return 0;
+          let updated = 0;
+          for (const memory of versions) {
+            if (isDeleted(memory) || Number(memory.properties.internal_info.retrieval_representation_version ?? 0) >= IMPORTED_SKILL_RETRIEVAL_VERSION) continue;
+            const next = applyRetrievalRepresentation(withImportedSkillRawHash(memory), memory);
+            const saved = this.deps.repos.memories.updateMaintenance(next);
+            this.reconcileSkillIndex(saved, this.deps.nowIso());
+            updated++;
+          }
+          return updated;
+        });
+        upgraded += count ?? 0;
       }
-    });
+      yield;
+    }
     return upgraded;
   }
 
@@ -442,14 +507,14 @@ export class AgentSkillLibrary {
     return this.deps.repos.transaction(() => this.repairLegacyManualSkillsInTransaction(at, limit, sourceAgentId));
   }
 
-  private repairLegacyManualSkillsInTransaction(at: string, limit: number, sourceAgentId?: string): number {
+  private repairLegacyManualSkillsInTransaction(at: string, limit: number, sourceAgentId?: string, sourceSkillId?: string): number {
     let repaired = 0;
     const batchSize = Math.max(1, limit);
     // Repaired rows leave the read-only query, so the paging offset
     // advances only for genuine source rows that remain in that query.
     let offset = 0;
     for (;;) {
-      const batch = this.deps.repos.memories.listLegacyReadOnlySkills(batchSize, offset, sourceAgentId);
+      const batch = this.deps.repos.memories.listLegacyReadOnlySkills(batchSize, offset, sourceAgentId, sourceSkillId);
       if (batch.length === 0) break;
       for (const memory of batch) {
         if (hasImportedSkillSourceEvidence(memory)) { offset += 1; continue; }
@@ -514,13 +579,13 @@ export class AgentSkillLibrary {
   }
 
   /** Persist the same collision history projection used by cold readers. */
-  private repairLegacySourceFacts(at: string, limit: number, sourceAgentId?: string): number {
+  private repairLegacySourceFacts(at: string, limit: number, sourceAgentId?: string, sourceSkillId?: string): number {
     let repaired = 0;
     const inventories = new Map<string, AgentSkillInstallations>();
     const batchSize = Math.max(1, limit);
     let cursor: { createdAt: string; id: string } | undefined;
     for (;;) {
-      const batch = this.deps.repos.memories.listImportedSkillsWithLegacyCollisionHistory(batchSize, cursor, sourceAgentId);
+      const batch = this.deps.repos.memories.listImportedSkillsWithLegacyCollisionHistory(batchSize, cursor, sourceAgentId, sourceSkillId);
       if (batch.length === 0) break;
       const last = batch.at(-1)!;
       cursor = { createdAt: last.createdAt, id: last.id };
@@ -553,8 +618,7 @@ export class AgentSkillLibrary {
           resolved = withImportFields(resolved, { source_state: "source_review_pending" }, resolved.updatedAt);
         }
         if (isDeleted(resolved)) {
-          const versions = this.deps.repos.memories.listImportedSkillsForSource(source)
-            .filter(version => importedSkillSourceIdentity(version) === importedSkillSourceIdentity(resolved))
+          const versions = this.deps.repos.memories.listImportedSkillsForSource(source, { sourceSkillId: importedSkillSourceIdentity(resolved) })
             .map(version => version.id === resolved.id ? resolved : this.deps.repos.memories.resolveLegacyImportedSkillVersion(version));
           const inventory = inventories.get(source);
           const preserveContentScope = resolved.properties.internal_info.deleted_current === false
@@ -840,14 +904,14 @@ export class AgentSkillLibrary {
   }
 
   /** Adapts memory.add's key, namespace and caller metadata to a source observation. */
-  upsertMemoryAdd(memory: MemoryRow, at: string, options: ImportedSkillMemoryAddOptions = {}): { memory: MemoryRow; created: boolean; previous?: MemoryRow } {
+  upsertMemoryAdd(this: AgentSkillLibrary, memory: MemoryRow, at: string, options: ImportedSkillMemoryAddOptions = {}): { memory: MemoryRow; created: boolean; previous?: MemoryRow } {
     return this.deps.repos.transaction(() => {
       this.prepareSource(String(memory.properties.internal_info.source_agent_id ?? ""), at);
       return this.upsertPreparedMemoryAdd(memory, at, options);
     });
   }
 
-  private upsertPreparedMemoryAdd(memory: MemoryRow, at: string, options: ImportedSkillMemoryAddOptions): { memory: MemoryRow; created: boolean; previous?: MemoryRow } {
+  private upsertPreparedMemoryAdd(this: AgentSkillLibrary, memory: MemoryRow, at: string, options: ImportedSkillMemoryAddOptions): { memory: MemoryRow; created: boolean; previous?: MemoryRow } {
     const internal = memory.properties.internal_info;
     const sourceAgentId = normalizeAgentIdKey(String(internal.source_agent_id));
     let all = this.deps.repos.memories.listImportedSkillsForSource(sourceAgentId);
@@ -928,6 +992,7 @@ export class AgentSkillLibrary {
   }
 
   private reconcileSkill(
+    this: AgentSkillLibrary,
     sourceAgentId: string,
     userId: string,
     skill: AgentSkillReconcileSkill,
@@ -941,6 +1006,7 @@ export class AgentSkillLibrary {
   }
 
   private observeSkill(
+    this: AgentSkillLibrary,
     sourceAgentId: string,
     userId: string,
     skill: AgentSkillReconcileSkill,
@@ -1126,6 +1192,7 @@ export class AgentSkillLibrary {
   }
 
   private reconcileRegistrations(
+    this: AgentSkillLibrary,
     sourceAgentId: string,
     userId: string,
     registrations: readonly AgentSkillReconcileRegistration[],

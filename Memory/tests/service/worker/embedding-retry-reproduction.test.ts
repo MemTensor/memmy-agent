@@ -85,7 +85,7 @@ describe("v1.2.6 embedding retry reproduction", () => {
   it("finds an orphan while idle without another request or timed job", async () => {
     const { db, service } = createTestService();
     const repos = new Repositories(db.db);
-    vi.spyOn(service, "reconcileWorkerStartup").mockImplementation(() => ({} as ReturnType<typeof service.reconcileWorkerStartup>));
+    vi.spyOn(service, "reconcileWorkerStartupInBackground").mockResolvedValue({} as ReturnType<typeof service.reconcileWorkerStartup>);
     vi.spyOn(service, "nextWorkerRunAt").mockReturnValue(undefined);
     const run = vi.spyOn(service, "runWorkerOnce");
     const server = createMemoryHttpServer({
@@ -207,7 +207,7 @@ describe("v1.2.6 embedding retry reproduction", () => {
     expect(await service.embeddingMaintenanceStats()).toMatchObject({
       totalSlots: 63, ready: 60, missing: 3, needsRepair: 3
     });
-    vi.spyOn(service, "reconcileWorkerStartup").mockImplementation(() => ({} as ReturnType<typeof service.reconcileWorkerStartup>));
+    vi.spyOn(service, "reconcileWorkerStartupInBackground").mockResolvedValue({} as ReturnType<typeof service.reconcileWorkerStartup>);
     vi.spyOn(service, "runWorkerOnce").mockResolvedValue({
       leased: 0, succeeded: 0, failed: 0, jobs: [],
       embeddingRetries: { leased: 0, succeeded: 0, failed: 0, items: [] },

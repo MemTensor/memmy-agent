@@ -642,6 +642,9 @@ const statements = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
+  // rowid breaks timestamp ties in this small partial index, including after interruption.
+  `CREATE INDEX IF NOT EXISTS idx_legacy_capture_order ON evolution_jobs(created_at)
+    WHERE job_type = 'capture_replay'`,
   `CREATE INDEX IF NOT EXISTS idx_evolution_jobs_status_created
     ON evolution_jobs (status, created_at ASC)`,
   `CREATE INDEX IF NOT EXISTS idx_evolution_jobs_target

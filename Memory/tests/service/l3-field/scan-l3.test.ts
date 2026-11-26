@@ -665,6 +665,30 @@ describe("scanned sessions enter L3", () => {
     expect(repos.db.prepare(`SELECT COUNT(*) AS n FROM l3_unit_batches`).get()).toEqual({ n: 0 });
   });
 
+  it("resumes a long closed session on its next complete raw-turn batch after startup is interrupted", async () => {
+    const { service, repos, project } = setup();
+    for (let i = 0; i < 43; i++) await service.completeSourceTurn(sourceTurn("agent_source_scan", "long-session", i, project));
+    const id = sessionOf(repos, "long-session").id;
+    repos.db.prepare("UPDATE sessions SET status='closed' WHERE id=?").run(id);
+    // Two adjacent traces of the twentieth raw turn must stay in the same batch.
+    repos.db.prepare(`UPDATE l3_world_model_input_traces SET raw_turn_id=(SELECT raw_turn_id
+      FROM l3_world_model_input_traces WHERE session_id=? AND trace_seq=20) WHERE session_id=? AND trace_seq=21`).run(id, id);
+    const ranges = () => repos.db.prepare(`SELECT start_trace_seq, end_trace_seq FROM l3_unit_batches
+      WHERE session_id=? ORDER BY scope_seq`).raw().all(id);
+    const abort = new AbortController();
+    const running = service.reconcileWorkerStartupInBackground(abort.signal);
+    const interruption = expect(running).rejects.toMatchObject({ name: "AbortError" });
+    const deadline = Date.now() + 4_000;
+    while (!ranges().length && Date.now() < deadline) await new Promise<void>(resolve => setImmediate(resolve));
+    abort.abort();
+    await interruption;
+    expect(ranges()).toEqual([[1, 21]]);
+    await service.reconcileWorkerStartupInBackground(new AbortController().signal);
+    expect(ranges()).toEqual([[1, 21], [22, 41], [42, 43]]);
+    service.reconcileWorkerStartup();
+    expect(ranges()).toHaveLength(3);
+  });
+
   it("keeps a session scanned while the switch was on out of the old L3 after it is switched off", async () => {
     const on = setup();
     await on.service.completeSourceTurn(sourceTurn("agent_source_scan", "scanned", 1, on.project));

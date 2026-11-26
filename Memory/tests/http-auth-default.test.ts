@@ -6,7 +6,7 @@ import { probeMemoryAuthentication } from "../src/cli/auth-probe.js";
 const servers: Server[] = [];
 afterEach(async () => { await Promise.all(servers.splice(0).map(closeMemoryHttpServer)); });
 async function serve(auth?: MemoryHttpServerOptions["auth"]) {
-  const service = { health: () => ({ ok: true }), setAppBudgetReconcileListener() {}, setCapturePendingListener() {}, setPersistRecoveredListener() {} } as unknown as MemoryService;
+  const service = { health: () => ({ ok: true }), setAppBudgetReconcileListener() {}, setWorkerStartupBarrier() {}, setCapturePendingListener() {}, setPersistRecoveredListener() {} } as unknown as MemoryService;
   const shutdown = vi.fn();
   const server = createMemoryHttpServer({ service, auth, onShutdownRequested: shutdown, workerStartupFallbackMs: 600_000, workerPostHealthDelayMs: 600_000 });
   servers.push(server); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));

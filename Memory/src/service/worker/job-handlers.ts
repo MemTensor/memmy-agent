@@ -112,7 +112,7 @@ export interface WorkerJobHandlerDeps {
 
 /** Directly append the same change-log record previously written by MemoryService. */
 export function appendJobChange(
-  deps: WorkerJobHandlerDeps,
+  deps: Pick<WorkerJobHandlerDeps, "repos">,
   job: EvolutionJobRecord,
   op: JobChangeOperation,
   before?: EvolutionJobRecord
@@ -206,7 +206,7 @@ export function enqueueEmbeddingRetry(
 
 /** Queue a worker job and immediately publish its queued change record. */
 export function enqueueJob(
-  deps: WorkerJobHandlerDeps,
+  deps: Pick<WorkerJobHandlerDeps, "repos" | "nowIso">,
   input: EnqueueJobInput
 ): EvolutionJobRecord {
   const at = input.createdAt ?? deps.nowIso();

@@ -1,11 +1,17 @@
+import { once } from "node:events";
+import { closeMemoryHttpServer, createMemoryHttpServer } from "../../../src/server/http.js";
+import { probeDuringLongWrite } from "../../fixtures/startup-http-probe.js";
 import { assignedEpisodeId } from "../../fixtures/memory-service-fixture.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { canonicalJson, sha256Hex } from "../../../src/contracts/index.js";
+import { PolicyEvidenceMaintenance } from "../../../src/service/evolution/policy-evidence-maintenance.js";
+import { finishStartupSteps } from "../../../src/service/worker/startup-reconciliation.js";
+import { SqliteStorageBackend } from "../../../src/storage/backend.js";
 import { Repositories } from "../../../src/storage/repositories.js";
-import { createMemoryServiceFixture, createBatchReflectionLlm } from "../../fixtures/memory-service-fixture.js";
+import { createMemoryServiceFixture, createBatchReflectionLlm, LEGACY_TEST_CONFIG } from "../../fixtures/memory-service-fixture.js";
 import {
   insertActivePolicyMemory,
   insertActiveSkillMemoryForTest,
@@ -16,7 +22,8 @@ import {
 
 const {
   cleanup,
-  createTestService
+  createTestService,
+  createTestMemoryService
 } = createMemoryServiceFixture();
 
 afterEach(cleanup);
@@ -131,6 +138,63 @@ describe("MemoryService / lifecycle / governance", () => {
     expect(memoryProperties(db, "skill_orphaned").internal_info?.skill?.status)
       .toBe("suspended");
     db.close();
+  });
+
+  it("serves health and authenticated requests during a slow policy repair with no legacy Skills", async () => {
+    const { db } = createTestService();
+    insertActivePolicyMemory(db, { userId: "owner", sessionId: "session", agentId: "codex", appId: "app",
+      profileId: "local", id: "p", sourceTraceId: "missing", sourceEpisodeId: "missing" });
+    db.db.exec(`CREATE TRIGGER slow_policy BEFORE UPDATE ON memories WHEN OLD.id = 'p' AND NEW.status = 'archived'
+      BEGIN SELECT (WITH RECURSIVE slow(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM slow WHERE n<20000000)
+        SELECT sum(n) FROM slow); END`);
+    const service = createTestMemoryService({ backend: new SqliteStorageBackend(db) });
+    const server = createMemoryHttpServer({ service, auth: { localServiceToken: "test" },
+      workerPostHealthDelayMs: 0, workerStartupFallbackMs: 60_000 });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected a test port");
+      await probeDuringLongWrite(db.path, `http://127.0.0.1:${address.port}/api/v1`);
+      await vi.waitFor(() => expect(memoryState(db, "p")).toBe("archived"), { timeout: 20_000 });
+    } finally {
+      await closeMemoryHttpServer(server);
+    }
+  }, 30_000);
+
+  it("rolls back an interrupted policy and its dependent Skill, then repairs both on the next file-backed startup", async () => {
+    const { db } = createTestService();
+    const owner = { userId: "owner", sessionId: "session", agentId: "codex", appId: "app", profileId: "local" };
+    insertActivePolicyMemory(db, { ...owner, id: "p", sourceTraceId: "missing", sourceEpisodeId: "missing" });
+    insertActiveSkillMemoryForTest(db, { ...owner, id: "s", sourcePolicyIds: ["p"] });
+    const service = createTestMemoryService({ backend: new SqliteStorageBackend(db) });
+    db.db.exec(`CREATE TRIGGER interrupt_policy_repair BEFORE UPDATE ON memories WHEN OLD.id = 's'
+      BEGIN SELECT RAISE(ABORT, 'simulated interruption'); END`);
+    const run = () => service.reconcileWorkerStartupInBackground(new AbortController().signal);
+    await expect(run()).rejects.toThrow("simulated interruption");
+    for (const id of ["p", "s"]) expect(memoryState(db, id)).toBe("activated");
+    db.db.exec("DROP TRIGGER interrupt_policy_repair");
+    expect(await run()).toMatchObject({
+      reconciledOrphanPolicies: 1, policyEvidencePreflight: { orphanPolicyIds: ["p"], affectedSkillIds: ["s"] }
+    });
+    for (const id of ["p", "s"]) expect(memoryState(db, id)).toBe("archived");
+    expect((await run()).reconciledOrphanPolicies).toBe(0);
+  }, 30_000);
+
+  it("rechecks a preflight candidate before writing when the link is restored between stages", async () => {
+    const { db, service } = createTestService();
+    const owner = { userId: "owner", agentId: "codex", appId: "app", profileId: "local" };
+    const session = service.openSession({ namespace: { source: "codex", profileId: owner.profileId, userId: owner.userId } });
+    const trace = await service.completeTurn("restored-concurrently", { sessionId: session.sessionId, query: "test", answer: "done" });
+    makeTraceEligibleForL2(db, trace.l1MemoryId);
+    insertActivePolicyMemory(db, { ...owner, sessionId: session.sessionId, id: "p",
+      sourceTraceId: trace.l1MemoryId, sourceEpisodeId: assignedEpisodeId(service, trace) });
+    const policies = new PolicyEvidenceMaintenance(new Repositories(db.db), () => LEGACY_TEST_CONFIG.algorithm);
+    const report = finishStartupSteps(policies.preview(10));
+    expect(report.restorablePolicyIds).toEqual(["p"]);
+    insertTracePolicyLinkForTest(db, { userId: owner.userId, l1MemoryId: trace.l1MemoryId, l2MemoryId: "p" });
+    expect(finishStartupSteps(policies.repair(new Date().toISOString(), report, 10))).toBe(0);
+    expect(memoryState(db, "p")).toBe("activated");
   });
 
   it("[BC-11][BC-26] recomputes Policy, World Model, and Skill dependencies after deleting L1 evidence", async () => {

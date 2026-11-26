@@ -192,6 +192,7 @@ async function runMemoryService(argv: string[], lifecycle: {
         startupStage("service.constructing");
         service = new MemoryService({
             backend,
+            startupSignal: startupController.signal,
             mode: config.storage.mode,
             configPath,
             config

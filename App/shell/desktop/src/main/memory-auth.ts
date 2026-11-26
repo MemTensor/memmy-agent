@@ -1,12 +1,16 @@
 export type MemoryAuthentication = "authenticated" | "anonymous" | "mismatch" | "unsupported" | "starting";
 
+const AUTH_REQUEST_TIMEOUT_MS = 2_500;
+
 /** Health is public. Both rejection without a credential and acceptance with it are required. */
 export async function probeMemoryAuthentication(baseUrl: string, token: string): Promise<MemoryAuthentication> {
   if (!token.trim()) return "mismatch";
   const url = `${baseUrl.replace(/\/$/, "")}/api/v1/auth/check`;
+  const deadline = AbortSignal.timeout(2 * AUTH_REQUEST_TIMEOUT_MS);
   const request = (credential?: string) => fetch(url, {
     headers: credential ? { authorization: `Bearer ${credential}` } : {},
-    cache: "no-store", redirect: "error", signal: AbortSignal.timeout(1_000)
+    cache: "no-store", redirect: "error",
+    signal: AbortSignal.any([deadline, AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS)])
   });
   const anonymous = await request();
   const anonymousStatus = anonymous.status;
