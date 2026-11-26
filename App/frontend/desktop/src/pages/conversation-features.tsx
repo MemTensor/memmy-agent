@@ -313,7 +313,7 @@ export function useConversationFeatures(options: {
       onStart={() => { openRecording(); recording.session.start(); }}
       disabled={!clients?.asr || recording.compactBlocked} onClose={recording.closeCompact} /> : null}
     {error?.conversationId === conversationId ? <div role="alert" className="text-sm text-red-600">{error.message}</div> : null}
-    <PluginConversationRecording client={clients?.plugins} config={clients?.runtimeConfig}
+    <PluginConversationRecording client={clients?.plugins} agentClient={clients?.memmyAgent} config={clients?.runtimeConfig}
       plugins={plugins} conversationId={conversationId} onPrompt={text => options.onSend(text)} /></>;
   // Microphone owners stay mounted while navigation only moves/hides their control bar.
   const recorderGroups = new Map<string, PluginUiCall[]>();
