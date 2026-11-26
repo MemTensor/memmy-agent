@@ -148,7 +148,8 @@ export function TeachModePermissionPrompt(props: {
       <ExtensionRow extensions={extensions} extensionEnabled={extensionEnabled}
         t={t} blocked={blocked} onCheck={() => void check()} />
     </div>}
-    {authorized ? <p className="teach-permission-card__description" role="status">{t("plugins.teachPermission.restartRequired")}</p> : null}
+    {inputMonitoringGuided && !status?.inputMonitoring
+      ? <p className="teach-permission-card__description" role="status">{t("plugins.teachPermission.restartRequired")}</p> : null}
     {error ? <p role="alert" className="teach-permission-card__error">{t("computerHistory.permissions.checkFailed", { error })}</p> : null}
     <div className="teach-permission-card__footer">
       <Button type="button" variant="ghost" size="sm" disabled={blocked} onClick={() => void check()}>{t("plugins.teachPermission.recheck")}</Button>
