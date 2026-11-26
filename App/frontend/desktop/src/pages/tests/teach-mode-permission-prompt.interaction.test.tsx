@@ -61,6 +61,16 @@ describe("Teach Mode permission prompt", () => {
     expect(onDismiss).toHaveBeenCalledOnce();
   });
 
+  it("keeps the restart guidance to one line until input monitoring is confirmed", async () => {
+    const { client } = await render();
+    // Opening the grant leaves the permission pending until the process restarts.
+    client.checkComputerHistoryPermissions.mockResolvedValue(denied);
+    const row = card().querySelectorAll(".teach-permission-card__row")[1];
+    await act(async () => (row.querySelector("button") as HTMLButtonElement).click());
+    expect(card().textContent).toContain("重启确认权限后，关闭弹窗即可录制。");
+    expect(card().textContent).not.toContain("权限已设置");
+  });
+
   it("opens the chosen browser extensions page from the whole browser row", async () => {
     await render();
     await click("去安装");
