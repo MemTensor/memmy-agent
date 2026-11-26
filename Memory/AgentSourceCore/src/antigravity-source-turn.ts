@@ -1,4 +1,4 @@
-import { stat } from "node:fs/promises";
+import { lstat, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { readJsonlObjects } from "./jsonl-lines.js";
@@ -23,11 +23,15 @@ export function antigravityConversationId(transcriptPath: string): string {
   return basename(dirname(dirname(dirname(transcriptPath))));
 }
 
-export async function findAntigravityTranscript(logs: string): Promise<{ path: string; mtime: number } | null> {
+export async function findAntigravityTranscript(
+  logs: string,
+  options: { followFileSymlinks?: boolean } = {}
+): Promise<{ path: string; mtime: number } | null> {
+  const inspectFile = options.followFileSymlinks === false ? lstat : stat;
   for (const name of [ANTIGRAVITY_FULL_TRANSCRIPT_NAME, ANTIGRAVITY_TRANSCRIPT_NAME]) {
     const path = join(logs, name);
     try {
-      const file = await stat(path);
+      const file = await inspectFile(path);
       if (file.isFile()) return { path, mtime: file.mtimeMs };
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;

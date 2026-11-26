@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
-import { access, open, readdir, stat } from "node:fs/promises";
+import { access, lstat, open, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ANTIGRAVITY_SOURCE_ID, ANTIGRAVITY_TRANSCRIPT_NAME, antigravityAppDirectory, antigravityConversationId, parseAntigravityStep } from "@memmy/agent-source-core";
+import { ANTIGRAVITY_SOURCE_ID, antigravityAppDirectory, antigravityConversationId, findAntigravityTranscript, parseAntigravityStep } from "@memmy/agent-source-core";
 import { stripInlineMediaPayloads } from "../../../shared/inline-media-sanitizer.js";
 import {
   resolveClaudeCodeProjectsDirectory,
@@ -193,7 +193,7 @@ export function createAntigravityInsightSampler(input: { root: string }): Onboar
     sourceId: ANTIGRAVITY_SOURCE_ID,
     displayName: "Antigravity",
     root: input.root,
-    matchesFile: (name) => name === ANTIGRAVITY_TRANSCRIPT_NAME,
+    listFiles: listRecentAntigravityTranscripts,
     shouldParseLine: (line) => /"type"\s*:\s*"(?:USER_INPUT|PLANNER_RESPONSE)"/u.test(line),
     extractMessage(record, { sourceId, filePath }) {
       const step = parseAntigravityStep(record);
@@ -210,6 +210,31 @@ export function createAntigravityInsightSampler(input: { root: string }): Onboar
       };
     }
   });
+}
+
+async function listRecentAntigravityTranscripts(root: string, options: OnboardingInsightSampleOptions): Promise<RecentFile[]> {
+  const deadlineAt = Date.now() + options.deadlineMs;
+  const expired = () => options.signal?.aborted || Date.now() >= deadlineAt;
+  if (options.maxSessionFiles <= 0 || expired()) return [];
+  const files: RecentFile[] = [];
+  const sessions = await readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const session of sessions) {
+    if (expired()) break;
+    if (!session.isDirectory() || session.name === ".git" || session.name === "node_modules") continue;
+    const generated = join(root, session.name, ".system_generated");
+    const logs = join(generated, "logs");
+    if (!await isRealDirectory(generated) || !await isRealDirectory(logs)) continue;
+    const transcript = await findAntigravityTranscript(logs, { followFileSymlinks: false }).catch(() => null);
+    if (!transcript) continue;
+    files.push({ filePath: transcript.path, mtimeMs: transcript.mtime });
+    files.sort((left, right) => right.mtimeMs - left.mtimeMs || left.filePath.localeCompare(right.filePath));
+    if (files.length > options.maxSessionFiles) files.pop();
+  }
+  return files;
+}
+
+async function isRealDirectory(path: string): Promise<boolean> {
+  return (await lstat(path).catch(() => null))?.isDirectory() === true;
 }
 
 export function createClaudeCodeInsightSampler(input: { root: string }): OnboardingInsightSampler {
@@ -346,10 +371,12 @@ function createJsonlInsightSampler(input: {
   sourceId: string;
   displayName: string;
   root: string;
-  matchesFile(name: string): boolean;
   shouldParseLine?: JsonLineFilter;
   extractMessage: JsonMessageExtractor;
-}): OnboardingInsightSampler {
+} & (
+  { matchesFile(name: string): boolean } |
+  { listFiles(root: string, options: OnboardingInsightSampleOptions): Promise<RecentFile[]> }
+)): OnboardingInsightSampler {
   return {
     sourceId: input.sourceId,
     displayName: input.displayName,
@@ -362,7 +389,9 @@ function createJsonlInsightSampler(input: {
       }
 
       const startedAt = Date.now();
-      const files = await listRecentFiles(input.root, input.matchesFile, options.maxSessionFiles, options);
+      const files = "listFiles" in input
+        ? await input.listFiles(input.root, options)
+        : await listRecentFiles(input.root, input.matchesFile, options.maxSessionFiles, options);
       const queries: OnboardingSampledQuery[] = [];
       const recentMessages: OnboardingSampledMessage[] = [];
       const errors: Array<{ target: string; reason: string }> = [];

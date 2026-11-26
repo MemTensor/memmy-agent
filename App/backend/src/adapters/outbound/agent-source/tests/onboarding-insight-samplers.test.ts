@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createAntigravityInsightSampler,
   createBuiltinOnboardingInsightSamplers,
   createCodexInsightSampler,
   createSourceRegistryOnboardingConversationWindowReader,
@@ -34,6 +35,113 @@ describe("onboarding insight samplers", () => {
       "pi",
       "qwenwork"
     ]);
+  });
+
+  describe("Antigravity", () => {
+    const first = "9c700000-3a17-406b-b3f3-eecb4434ae95";
+    const second = "b83c0000-842d-44bc-b296-96ddd9958777";
+    const options = { maxSessionFiles: 2, maxQueries: 10, maxQueryChars: 200, maxBytesPerFile: 64_000, deadlineMs: 5_000 };
+
+    function fixture() {
+      const home = mkdtempSync(join(tmpdir(), "memmy-antigravity-onboarding-"));
+      roots.push(home);
+      const root = join(home, ".gemini", "antigravity", "brain");
+      return {
+        root,
+        sampler: createAntigravityInsightSampler({ root }),
+        write(conversationId: string, filename: string, prompt: string, modifiedAt: string) {
+          const logs = join(root, conversationId, ".system_generated", "logs");
+          mkdirSync(logs, { recursive: true });
+          const path = join(logs, filename);
+          writeFileSync(path, JSON.stringify({
+            step_index: 5, type: "USER_INPUT", source: "USER_EXPLICIT", status: "DONE", created_at: modifiedAt,
+            content: `<USER_REQUEST>\n${prompt}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>settings</ADDITIONAL_METADATA>`
+          }) + "\n");
+          utimesSync(path, new Date(modifiedAt), new Date(modifiedAt));
+          return path;
+        }
+      };
+    }
+
+    it.each(["transcript_full.jsonl", "transcript.jsonl"])("samples and redacts a session containing only %s", async (name) => {
+      const { sampler, write } = fixture();
+      const time = "2026-11-25T11:06:20.000Z";
+      write(first, name, "Check password=fixture-secret", time);
+      const sample = await sampler.sampleRecentUserQueries(options);
+
+      expect(sample.errors).toEqual([]);
+      expect(sample.recentSessionCount).toBe(1);
+      expect(sample.queries).toEqual([expect.objectContaining({
+        conversationId: first, messageId: `antigravity:${first}:5:${time}`, text: "Check password=[REDACTED:password]"
+      })]);
+      expect(sample.recentMessages?.map(message => message.text)).toEqual(["Check password=[REDACTED:password]"]);
+    });
+
+    it("selects one full transcript per session before ordering and limiting the recent files", async () => {
+      const { sampler, write } = fixture();
+      write(first, "transcript_full.jsonl", "First full prompt", "2026-11-25T11:06:10.000Z");
+      write(first, "transcript.jsonl", "First abbreviated prompt", "2026-11-25T11:06:40.000Z");
+      write(second, "transcript.jsonl", "Second abbreviated prompt", "2026-11-25T11:06:20.000Z");
+      const latest = "2026-11-25T11:06:30.000Z";
+      write(second, "transcript_full.jsonl", "Second full prompt", latest);
+
+      const both = await sampler.sampleRecentUserQueries(options);
+      expect(both.recentSessionCount).toBe(2);
+      expect(both.latestActivityAt).toBe(latest);
+      expect(both.queries.map(query => query.text)).toEqual(["Second full prompt", "First full prompt"]);
+      expect(both.recentMessages?.map(message => message.text)).toEqual(["Second full prompt", "First full prompt"]);
+
+      const newest = await sampler.sampleRecentUserQueries({ ...options, maxSessionFiles: 1 });
+      expect(newest.recentSessionCount).toBe(1);
+      expect(newest.queries.map(query => query.conversationId)).toEqual([second]);
+    });
+
+    it("honors the byte budget when the short view fits but the full prompt exceeds it", async () => {
+      const { sampler, write } = fixture();
+      const time = "2026-11-25T11:06:20.000Z";
+      write(first, "transcript.jsonl", "Abbreviated prompt", time);
+      write(first, "transcript_full.jsonl", "A long explicit request. ".repeat(100), time);
+
+      const sample = await sampler.sampleRecentUserQueries({ ...options, maxBytesPerFile: 512 });
+      expect(sample.recentSessionCount).toBe(1);
+      expect(sample.queries).toEqual([]);
+      expect(sample.recentMessages).toEqual([]);
+    });
+
+    it.each([".system_generated", "logs"])("skips a linked %s directory", async (directory) => {
+      const { root, sampler } = fixture();
+      const other = fixture();
+      other.write(first, "transcript_full.jsonl", "Other session", "2026-11-25T11:06:20.000Z");
+      const relative = directory === "logs" ? join(first, ".system_generated", "logs") : join(first, directory);
+      mkdirSync(dirname(join(root, relative)), { recursive: true });
+      symlinkSync(join(other.root, relative), join(root, relative), process.platform === "win32" ? "junction" : "dir");
+
+      const sample = await sampler.sampleRecentUserQueries(options);
+      expect(sample.recentSessionCount).toBe(0);
+      expect(sample.queries).toEqual([]);
+    });
+
+    it("falls back to the local short transcript when the full transcript is a link", async () => {
+      const { sampler, write } = fixture();
+      const time = "2026-11-25T11:06:20.000Z";
+      const short = write(first, "transcript.jsonl", "Local short prompt", time);
+      const other = fixture().write(second, "transcript_full.jsonl", "Other full prompt", time);
+      symlinkSync(other, join(dirname(short), "transcript_full.jsonl"), "file");
+
+      const sample = await sampler.sampleRecentUserQueries(options);
+      expect(sample.queries.map(query => query.text)).toEqual(["Local short prompt"]);
+    });
+
+    it("skips discovery after cancellation or an exhausted deadline", async () => {
+      const { sampler, write } = fixture();
+      write(first, "transcript_full.jsonl", "Local prompt", "2026-11-25T11:06:20.000Z");
+      vi.spyOn(Date, "now").mockReturnValue(1_000);
+      for (const limits of [{ signal: AbortSignal.abort() }, { deadlineMs: 0 }]) {
+        const sample = await sampler.sampleRecentUserQueries({ ...options, ...limits });
+        expect(sample.recentSessionCount).toBe(0);
+        expect(sample.queries).toEqual([]);
+      }
+    });
   });
 
   it("skips Codex tool records before JSON.parse during first-login sampling", async () => {
