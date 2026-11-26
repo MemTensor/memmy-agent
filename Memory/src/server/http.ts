@@ -409,7 +409,8 @@ function createAutoWorkerDrain(
   let scheduled = false;
   let disposed = false;
   let startupReleased = false;
-  let startupReconciled = false;
+  let startup: Promise<void> | undefined;
+  let startupFailed = false;
   let workerStarted = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let delayedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -419,6 +420,20 @@ function createAutoWorkerDrain(
   const maxCycles = 40;
   const workerBatchSize = 4;
   const admissionAbort = new AbortController();
+
+  // Manual runs, scan handoffs and the automatic worker must all see the same
+  // recovery result before any of them can claim a lease from this database.
+  function prepareWorker(): Promise<void> {
+    return startup ??= service.reconcileWorkerStartupInBackground(admissionAbort.signal).then(
+      () => undefined,
+      (error: unknown) => {
+        startupFailed = true;
+        throw error;
+      }
+    );
+  }
+
+  service.setWorkerStartupBarrier(prepareWorker);
 
   function drain(): Promise<void> {
     // A wake-up can originate from a running job's async descendants. It queues
@@ -439,14 +454,7 @@ function createAutoWorkerDrain(
     activeDrain = new Promise<void>((done) => { drainStopped = done; });
     let continueSoon = false;
     try {
-      if (!startupReconciled) {
-        startupReconciled = true;
-        try {
-          service.reconcileWorkerStartup();
-        } catch (error) {
-          workerLogger.error("startup.reconciliation_failed", memoryErrorFields(error));
-        }
-      }
+      await prepareWorker();
       do {
         requested = false;
         for (let cycle = 0; cycle < maxCycles && !disposed; cycle += 1) {
@@ -468,11 +476,11 @@ function createAutoWorkerDrain(
         }
       } while (requested && !continueSoon && !disposed);
     } catch (error) {
-      workerLogger.error("drain.failed", memoryErrorFields(error));
+      if (!disposed) workerLogger.error("drain.failed", memoryErrorFields(error));
     } finally {
       running = false;
       drainStopped?.();
-      if (disposed) {
+      if (disposed || startupFailed) {
         return;
       }
       if (requested || continueSoon) {
@@ -488,7 +496,7 @@ function createAutoWorkerDrain(
   }
 
   function scheduleNextDueJob(): void {
-    if (disposed) {
+    if (disposed || startupFailed) {
       return;
     }
     if (delayedTimer) {
@@ -506,7 +514,7 @@ function createAutoWorkerDrain(
   }
 
   function schedule(): void {
-    if (disposed) {
+    if (disposed || startupFailed) {
       return;
     }
     service.notifyWorkerWorkAvailable();
@@ -596,7 +604,8 @@ function createAutoWorkerDrain(
         clearTimeout(scheduledTimer);
         scheduledTimer = undefined;
       }
-      await activeDrain;
+      await Promise.allSettled([activeDrain, startup]);
+      service.setWorkerStartupBarrier(undefined);
     }
   };
 }

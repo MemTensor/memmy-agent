@@ -14,7 +14,7 @@ const auth: MemoryHttpAuthOptions = {
 };
 let server: Server;
 async function start(options: MemoryHttpAuthOptions) {
-  const service = { apiLogs, setAppBudgetReconcileListener() {}, setCapturePendingListener() {}, setPersistRecoveredListener() {} };
+  const service = { apiLogs, setAppBudgetReconcileListener() {}, setWorkerStartupBarrier() {}, setCapturePendingListener() {}, setPersistRecoveredListener() {} };
   server = createMemoryHttpServer({ auth: options, service: service as unknown as MemoryService, workerStartupFallbackMs: 600_000 });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();

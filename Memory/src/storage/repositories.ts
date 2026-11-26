@@ -1008,25 +1008,27 @@ export class MemoryRepository {
   }
 
   /** Raw old writer rows, including deleted manuals; deliberately independent of source classification. */
-  listLegacyReadOnlySkills(limit: number, offset = 0, sourceAgentId?: string): MemoryRow[] {
+  listLegacyReadOnlySkills(limit: number, offset = 0, sourceAgentId?: string, sourceSkillId?: string): MemoryRow[] {
     const rows = this.db.prepare(`SELECT * FROM memories
       WHERE memory_layer = 'Skill' AND json_extract(properties_json, '$.internal_info.read_only') = 1
       ${sourceAgentId === undefined ? "" : `AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?`}
+      ${sourceSkillId === undefined ? "" : `AND ${SKILL_SOURCE_ID_SQL} = ?`}
       ORDER BY created_at, id LIMIT ? OFFSET ?`).all(
-        ...(sourceAgentId === undefined ? [] : [normalizeAgentIdKey(sourceAgentId)]), limit, offset
+        ...(sourceAgentId === undefined ? [] : [normalizeAgentIdKey(sourceAgentId)]), ...(sourceSkillId === undefined ? [] : [sourceSkillId]), limit, offset
       ) as MemorySqlRow[];
     return rows.map(row => this.hydrate(memoryFromSql(row)));
   }
 
   /** All imported (read-only) Skill records of one source Agent, deleted ones included. */
-  listImportedSkillsForSource(sourceAgentId: string, options: { displayOnly?: boolean } = {}): MemoryRow[] {
+  listImportedSkillsForSource(sourceAgentId: string, options: { displayOnly?: boolean; sourceSkillId?: string } = {}): MemoryRow[] {
     const rows = this.db.prepare(
       `SELECT ${options.displayOnly ? DISPLAY_MEMORY_COLUMNS : "*"} FROM memories
        WHERE memory_layer = 'Skill'
          AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
          AND ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} = ?
+         ${options.sourceSkillId === undefined ? "" : `AND ${SKILL_SOURCE_ID_SQL} = ?`}
        ORDER BY created_at, id`
-    ).all(normalizeAgentIdKey(sourceAgentId)) as MemorySqlRow[];
+    ).all(normalizeAgentIdKey(sourceAgentId), ...(options.sourceSkillId === undefined ? [] : [options.sourceSkillId])) as MemorySqlRow[];
     return rows.map((row) => options.displayOnly ? memoryFromSql(row) : this.hydrate(memoryFromSql(row)));
   }
 
@@ -1034,7 +1036,7 @@ export class MemoryRepository {
   listImportedSkillsWithLegacyCollisionHistory(
     limit: number,
     cursor: { createdAt: string; id: string } | number = 0,
-    sourceAgentId?: string
+    sourceAgentId?: string, sourceSkillId?: string
   ): MemoryRow[] {
     const keyset = typeof cursor === "object" && cursor !== null ? cursor : undefined;
     const offset = typeof cursor === "number" ? cursor : 0;
@@ -1042,15 +1044,11 @@ export class MemoryRepository {
       WHERE m.memory_layer = 'Skill'
         AND memmy_is_imported_skill(m.properties_json, m.info_json, m.tags_json, m.memory_key) = 1
         ${sourceAgentId === undefined ? "" : `AND ${importedSkillAgentIdSql("json_extract(m.properties_json, '$.internal_info.source_agent_id')")} = ?`}
+        ${sourceSkillId === undefined ? "" : `AND ${SKILL_SOURCE_ID_SQL} = ?`}
         ${keyset === undefined ? "" : "AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))"}
-        AND (json_type(m.properties_json, '$.internal_info.superseded_by_skill_id') IS NOT NULL
-          OR json_extract(m.properties_json, '$.internal_info.source_review_required') = 1
-          OR (json_extract(m.properties_json, '$.internal_info.source_kind') = 'skill'
-            AND json_extract(m.properties_json, '$.internal_info.source_skill_id') = json_extract(m.properties_json, '$.internal_info.turn_id'))
-          OR EXISTS (SELECT 1 FROM memory_change_log h WHERE h.memory_id = m.id
-            AND h.change_type IN ('legacy_manual_supersession_repaired', 'read_only_skill_superseded')))
+        AND ${LEGACY_SKILL_COLLISION_SQL}
       ORDER BY m.created_at, m.id LIMIT ? OFFSET ?`).all(
-        ...(sourceAgentId === undefined ? [] : [normalizeAgentIdKey(sourceAgentId)]),
+        ...(sourceAgentId === undefined ? [] : [normalizeAgentIdKey(sourceAgentId)]), ...(sourceSkillId === undefined ? [] : [sourceSkillId]),
         ...(keyset === undefined ? [] : [keyset.createdAt, keyset.createdAt, keyset.id]),
         limit,
         offset
@@ -1324,17 +1322,19 @@ export class MemoryRepository {
     return rows.map((row) => this.hydrate(memoryFromSql(row)));
   }
 
-  /** Imported Skill records not yet carrying the given import state version, deleted ones included. */
-  listImportedSkillsBelowStateVersion(version: number, limit: number): MemoryRow[] {
-    const rows = this.db.prepare(
-      `SELECT * FROM memories
-       WHERE memory_layer = 'Skill'
-         AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = 1
-         AND COALESCE(json_extract(properties_json, '$.internal_info.import_state_version'), 0) < ?
-       ORDER BY created_at, id
-       LIMIT ?`
-    ).all(version, limit) as MemorySqlRow[];
-    return rows.map((row) => this.hydrate(memoryFromSql(row)));
+  /** Page by immutable rowid. A failed group may remain eligible until the next startup. */
+  listStartupSkillGroups(after: number, limit: number, version: number, phase: "manual" | "state" | "retrieval") {
+    const condition = phase === "state" ? `AND (COALESCE(json_extract(properties_json, '$.internal_info.import_state_version'), 0) < ?
+      OR ${LEGACY_SKILL_COLLISION_SQL})` : phase === "retrieval" ? `AND deleted_at IS NULL
+      AND COALESCE(json_extract(properties_json, '$.internal_info.retrieval_representation_version'), 0) < ?` : "";
+    return this.db.prepare(`SELECT m.rowid AS cursor,
+      ${importedSkillAgentIdSql("json_extract(properties_json, '$.internal_info.source_agent_id')")} AS sourceAgentId,
+      ${SKILL_SOURCE_ID_SQL} AS sourceSkillId
+      FROM memories m WHERE m.rowid > ? AND m.memory_layer = 'Skill'
+        AND json_extract(properties_json, '$.internal_info.read_only') = 1
+        AND memmy_is_imported_skill(properties_json, info_json, tags_json, memory_key) = ?
+        ${condition}
+      ORDER BY m.rowid LIMIT ?`).all(after, phase === "manual" ? 0 : 1, ...(phase === "manual" ? [] : [version]), limit) as Array<{ cursor: number; sourceAgentId: string; sourceSkillId: string }>;
   }
 
   /**
@@ -1435,6 +1435,20 @@ export class MemoryRepository {
       WHERE id IN (SELECT value FROM json_each(?)) AND deleted_at IS NULL`)
       .get(toJson(distinctIds)) as { found: number; historical: number };
     return row.found === distinctIds.length && row.historical === row.found;
+  }
+
+  listStartupPage(filter: MemoryFilter, cursor: number, limit: number) {
+    const built = this.memoryWhere(filter);
+    const rows = this.db.prepare(`SELECT rowid AS cursor, * FROM memories
+      WHERE (${built.where}) AND rowid > ? ORDER BY rowid LIMIT ?`)
+      .all(...built.params, cursor, limit) as Array<MemorySqlRow & { cursor: number }>;
+    return rows.map(row => ({ cursor: row.cursor, memory: this.hydrate(memoryFromSql(row)) }));
+  }
+
+  listIds(filter: MemoryFilter, limit: number): string[] {
+    const { where, params } = this.memoryWhere(filter);
+    return this.db.prepare(`SELECT id FROM memories WHERE ${where}
+      ORDER BY created_at DESC, updated_at DESC, id DESC LIMIT ?`).pluck().all(...params, limit) as string[];
   }
 
   list(filter: MemoryFilter = {}, limit = 50, offset = 0): MemoryRow[] {
@@ -1573,7 +1587,7 @@ export class MemoryRepository {
     return this.hydrateMany(rows.map(memoryFromSql));
   }
 
-  listImportMemoriesNeedingSummary(limit = 10000): MemoryRow[] {
+  listImportMemoriesNeedingSummary(limit = 10000, memoryId?: string): MemoryRow[] {
     const rows = this.db
       .prepare(
         `SELECT *
@@ -1581,6 +1595,7 @@ export class MemoryRepository {
          WHERE deleted_at IS NULL
            AND status != 'deleted'
            AND memory_layer = 'L1'
+           ${memoryId === undefined ? "" : "AND id = ?"}
            AND (
              json_extract(properties_json, '$.internal_info.plugin_algorithm') LIKE 'memory.add.import_async.%'
              OR EXISTS (
@@ -1597,7 +1612,7 @@ export class MemoryRepository {
          ORDER BY created_at DESC, updated_at DESC, id DESC
          LIMIT ?`
       )
-      .all(limit) as MemorySqlRow[];
+      .all(...(memoryId === undefined ? [] : [memoryId]), limit) as MemorySqlRow[];
     return this.hydrateMany(rows.map(memoryFromSql));
   }
 
@@ -4555,17 +4570,26 @@ export class RuntimeRepository {
   }
 
   /** Repairs snapshots already persisted by older releases, including current-state tombstones. */
-  repairImportedSkillResponseCopies(): void {
-    const rows = this.db.prepare(`SELECT DISTINCT k.key, k.response_json FROM idempotency_keys k,
-      json_tree(k.response_json) j JOIN memories m ON m.id = j.value
-      WHERE m.memory_layer = 'Skill' AND j.type = 'text'
-        AND (k.key LIKE 'memory.search:%' OR k.key LIKE 'turn.start:%' OR k.key LIKE 'memory.add:%')`)
-      .all() as Array<{ key: string; response_json: string }>;
-    for (const row of rows) {
-      const parsed = parseJson(row.response_json, undefined);
-      const response = this.sanitizeIdempotencyResponse(row.key, parsed);
-      if (response === undefined) this.db.prepare("DELETE FROM idempotency_keys WHERE key = ?").run(row.key);
-      else if (response !== parsed) this.db.prepare("UPDATE idempotency_keys SET response_json = ? WHERE key = ?").run(toJson(response), row.key);
+  *repairImportedSkillResponseCopies(pageSize: number): Generator<void> {
+    if (!this.db.prepare("SELECT 1 FROM memories WHERE memory_layer = 'Skill' LIMIT 1").get()) return;
+    const select = this.db.prepare(`SELECT rowid, key, response_json FROM idempotency_keys
+      WHERE rowid > ? AND (key LIKE 'memory.search:%' OR key LIKE 'turn.start:%' OR key LIKE 'memory.add:%')
+      ORDER BY rowid LIMIT ?`);
+    let cursor = 0;
+    for (;;) {
+      const last = this.db.transaction(() => {
+        const rows = select.all(cursor, pageSize) as Array<{ rowid: number; key: string; response_json: string }>;
+        for (const row of rows) {
+          const parsed = parseJson(row.response_json, undefined);
+          const response = this.sanitizeIdempotencyResponse(row.key, parsed);
+          if (response === undefined) this.db.prepare("DELETE FROM idempotency_keys WHERE key = ?").run(row.key);
+          else if (response !== parsed) this.db.prepare("UPDATE idempotency_keys SET response_json = ? WHERE key = ?").run(toJson(response), row.key);
+        }
+        return rows.at(-1)?.rowid;
+      })();
+      if (last === undefined) return;
+      cursor = last;
+      yield;
     }
   }
 
@@ -7175,6 +7199,8 @@ function repairRestoredL3FieldOverrides(db: Database.Database, keys: Set<string>
 
 const L3_FIELD_NAMES: L3WorldModelFieldName[] = ["general_rules_and_safety_constraints", "project_environment_profile", "project_contract", "domain_knowledge"];
 
+const L3_BATCH_RAW_TURNS = 20;
+
 export class L3WorldModelRepository {
   /** When it returns a machine id, frozen batches go to the new L3 (field cognition) instead. */
   private fieldCognitionMachineId?: () => string | null;
@@ -7189,18 +7215,55 @@ export class L3WorldModelRepository {
     this.fieldCognitionMachineId = machineId;
   }
 
-  /** v2 Sessions holding captured turns that were never frozen into a batch, with their last activity. */
-  sessionsWithUnfrozenTurns(): Array<{ sessionId: string; open: boolean; lastActivityAt: string }> {
-    return (this.db.prepare(
-      `SELECT s.id AS sessionId, s.status = 'open' AS open, t.last_at AS lastActivityAt FROM sessions AS s
-       JOIN (SELECT session_id, MAX(trace_seq) AS last_seq, MAX(created_at) AS last_at
-             FROM l3_world_model_input_traces GROUP BY session_id) AS t
-         ON t.session_id = s.id
-       LEFT JOIN l3_world_model_session_cursors AS c ON c.session_id = s.id
-       WHERE json_extract(s.meta_json, '$.l3_world_model_protocol_version') = 2
-         AND t.last_seq > COALESCE(c.last_scheduled_seq, 0)`
-    ).all() as Array<{ sessionId: string; open: number; lastActivityAt: string }>)
-      .map((row) => ({ ...row, open: row.open === 1 }));
+  *recoverySessionPages(limit: number): Generator<Array<{ cursor: number; id: string }>> {
+    // Later sessions use the normal capture/close path; continuous arrivals must not prolong startup.
+    const end = this.db.prepare("SELECT MAX(rowid) FROM sessions").pluck().get() as number | null;
+    const page = this.db.prepare("SELECT rowid AS cursor, id FROM sessions WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?");
+    let cursor = 0;
+    while (end !== null && cursor < end) {
+      const rows = page.all(cursor, end, limit) as Array<{ cursor: number; id: string }>;
+      if (!rows.length) break;
+      cursor = rows[rows.length - 1]!.cursor;
+      yield rows;
+    }
+  }
+
+  /** Re-read the session and its committed cursor inside each recovery transaction. */
+  recoverUnfrozenSession(sessionId: string, armIdle: (lastActivityAt: string) => void): { pending: boolean; more: boolean } {
+    const session = this.db.prepare(`SELECT s.status, COALESCE(c.last_scheduled_seq, 0) AS cursor
+      FROM sessions s LEFT JOIN l3_world_model_session_cursors c ON c.session_id=s.id
+      WHERE s.id=? AND json_extract(s.meta_json,'$.l3_world_model_protocol_version')=2`)
+      .get(sessionId) as { status: string; cursor: number } | undefined;
+    if (!session) return { pending: false, more: false };
+    if (session.status === "open") {
+      const pending = this.db.prepare("SELECT 1 FROM l3_world_model_input_traces WHERE session_id=? AND trace_seq>? LIMIT 1")
+        .get(sessionId, session.cursor);
+      if (pending) {
+        const lastActivityAt = this.db.prepare("SELECT MAX(created_at) FROM l3_world_model_input_traces WHERE session_id=?")
+          .pluck().get(sessionId) as string;
+        armIdle(lastActivityAt);
+      }
+      return { pending: !!pending, more: false };
+    }
+
+    // Freeze one ordinary L3 batch per commit, including every adjacent trace of its last raw turn.
+    const traces = this.db.prepare(`SELECT raw_turn_id, l1_memory_id FROM l3_world_model_input_traces
+      WHERE session_id=? AND trace_seq>? ORDER BY trace_seq`).iterate(sessionId, session.cursor) as
+      Iterable<{ raw_turn_id: string; l1_memory_id: string }>;
+    let rawTurns = 0;
+    let previous: string | undefined;
+    let through: string | undefined;
+    let more = false;
+    for (const trace of traces) {
+      if (trace.raw_turn_id !== previous && ++rawTurns > L3_BATCH_RAW_TURNS) {
+        more = true;
+        break;
+      }
+      previous = trace.raw_turn_id;
+      through = trace.l1_memory_id;
+    }
+    if (through) this.freezeBatches({ sessionId, trigger: "session_close", throughL1MemoryId: through });
+    return { pending: through !== undefined, more };
   }
 
   /**
@@ -7883,7 +7946,7 @@ export class L3WorldModelRepository {
       return { scheduled: false, batchIds: [], targetCount: 0 };
     }
 
-    const chunks = splitL3TracesByRawTurn(traces, 20);
+    const chunks = splitL3TracesByRawTurn(traces, L3_BATCH_RAW_TURNS);
     const fieldMachineId = this.l3Field ? this.fieldCognitionMachineId?.() ?? null : null;
     if (fieldMachineId) {
       const batchIds = chunks.map((chunk) => this.freezeL3UnitBatch(session, fieldMachineId, input.trigger, chunk, at));
@@ -9363,6 +9426,18 @@ function isShortAsciiTerm(term: string): boolean {
 function normalizedAgentIdSql(column: string): string {
   return `lower(replace(replace(TRIM(${column}), '-', '_'), ' ', '_'))`;
 }
+
+// Matches importedSkillSourceIdentity for persisted source identifiers.
+const SKILL_SOURCE_ID_SQL = `CAST(COALESCE(NULLIF(json_extract(properties_json, '$.internal_info.source_skill_id'), ''),
+  NULLIF(json_extract(properties_json, '$.internal_info.source_skill_path'), ''),
+  NULLIF(json_extract(properties_json, '$.internal_info.source_skill_key'), ''), id) AS TEXT)`;
+
+const LEGACY_SKILL_COLLISION_SQL = `(json_type(m.properties_json, '$.internal_info.superseded_by_skill_id') IS NOT NULL
+          OR json_extract(m.properties_json, '$.internal_info.source_review_required') = 1
+          OR (json_extract(m.properties_json, '$.internal_info.source_kind') = 'skill'
+            AND json_extract(m.properties_json, '$.internal_info.source_skill_id') = json_extract(m.properties_json, '$.internal_info.turn_id'))
+          OR EXISTS (SELECT 1 FROM memory_change_log h WHERE h.memory_id = m.id
+            AND h.change_type IN ('legacy_manual_supersession_repaired', 'read_only_skill_superseded')))`;
 
 /** Imported-source matching shares the exact canonical TypeScript normalization. */
 function importedSkillAgentIdSql(column: string): string {

@@ -83,6 +83,7 @@ describe("standalone scan HTTP responsiveness", () => {
       service: { withAgentSourceScanPermit: withUnrestrictedScanPermit,
         health: () => ({ ok: true, scanRunning: executor.scanStatus().running }),
         setAppBudgetReconcileListener: () => undefined,
+        setWorkerStartupBarrier: () => undefined,
         setCapturePendingListener: () => undefined,
         setPersistRecoveredListener: () => undefined,
       } as unknown as MemoryService,

@@ -8,6 +8,10 @@ import {createAgentSourceExecutor} from '../../../src/agent-source/runtime.js';
 import {createSourceRegistry} from '../../../src/agent-source/adapters/source-registry.js';
 import {createSkillTargetRegistry} from '../../../src/agent-source/integration/target-registry.js';
 import {createMemoryHttpServer,closeMemoryHttpServer} from '../../../src/server/http.js';
+// This fixture owns exactly 40 skills. Exclude installed shared skills on developer machines.
+vi.mock(import('@memmy/agent-source-core'), async original => ({
+ ...await original(), sharedSkillRootsForAgent: () => []
+}));
 const fixture=createMemoryServiceFixture();
 afterEach(fixture.cleanup);
 it('imports real Codex Skills, syncs history and claims jobs while a real panel worker builds its cache',async()=>{

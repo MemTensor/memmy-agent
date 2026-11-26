@@ -288,10 +288,11 @@ export class L3FieldRepository {
   }
 
   /** Deletes items that became inactive before `before`; active items are never touched. */
-  purgeInactive(before: string): number {
+  purgeInactive(before: string, limit = -1): number {
     return this.db.prepare(
-      `DELETE FROM l3_items WHERE status = 'inactive' AND inactive_at < ?`
-    ).run(before).changes;
+      `DELETE FROM l3_items WHERE rowid IN (SELECT rowid FROM l3_items
+        WHERE status = 'inactive' AND inactive_at < ? ORDER BY inactive_at LIMIT ?)`
+    ).run(before, limit).changes;
   }
 
   listUserProjects(userId: string): L3UserProject[] {
@@ -382,19 +383,20 @@ export class L3FieldRepository {
    * Worker startup: every user's dead-lettered batches get one automatic rerun each, so a batch that
    * failed through a long outage is not lost; a batch that dead-letters again stays for the manual rerun.
    */
-  requeueDeadLetterBatchesOnce(at = nowIso()): string[] {
-    return this.requeueDeadLetters(`AND json_extract(j.payload_json, '$.autoRequeued') IS NULL`, [], at, true);
+  requeueDeadLetterBatchesOnce(at = nowIso(), limit = -1, beforeRequeue?: (jobId: string) => void): string[] {
+    return this.requeueDeadLetters(`AND json_extract(j.payload_json, '$.autoRequeued') IS NULL`, [], at, true, limit, beforeRequeue);
   }
 
-  private requeueDeadLetters(filter: string, params: string[], at: string, markAuto: boolean): string[] {
+  private requeueDeadLetters(filter: string, params: string[], at: string, markAuto: boolean, limit = -1, beforeRequeue?: (jobId: string) => void): string[] {
     return this.db.transaction(() => {
       const jobs = this.db.prepare(
         `SELECT j.id, b.id AS batch_id FROM evolution_jobs j
          JOIN l3_unit_batches b ON b.id = CAST(json_extract(j.payload_json, '$.batchId') AS TEXT)
          WHERE j.job_type = 'l3_unit_update' AND j.status = 'dead_letter' AND b.status != 'applied' ${filter}
-         ORDER BY j.scope_key, j.scope_seq`
-      ).all(...params) as Array<{ id: string; batch_id: string }>;
+         ORDER BY j.scope_key, j.scope_seq LIMIT ?`
+      ).all(...params, limit) as Array<{ id: string; batch_id: string }>;
       for (const job of jobs) {
+        beforeRequeue?.(job.id);
         this.db.prepare(`UPDATE l3_unit_batches SET status = 'queued', updated_at = ? WHERE id = ?`).run(at, job.batch_id);
         this.db.prepare(
           `UPDATE evolution_jobs SET status = 'queued', attempts = 0, failure_count = 0, leased_until = NULL,

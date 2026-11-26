@@ -1,3 +1,4 @@
+import { finishStartupSteps, type StartupSteps } from "./startup-reconciliation.js";
 import { isImportedSkill } from "../../storage/imported-skill.js";
 import { ModelHttpError } from "../../model/http.js";
 /**
@@ -33,7 +34,7 @@ import {
   type EmbeddingJobProcessor,
   type PreparedEmbeddingJob
 } from "../embedding/embedding-job-processor.js";
-import type { PolicyEvidencePreflightReport } from "../evolution/evolution-job-processor.js";
+import type { PolicyEvidencePreflightReport, PolicyEvidenceRecovery } from "../evolution/policy-evidence-maintenance.js";
 import { turnJudgeJobFlags } from "../evolution/turn-judge.js";
 import {
   embeddingTextForMemory,
@@ -182,18 +183,13 @@ export interface WorkerRunnerDeps {
   runWorkerNoWrite: (request: RequestEnvelope) => Promise<WorkerRunSummary>;
   restartFailedProcessing: (at: string, limit: number) => number;
   enqueueObservationBackfill?: (limit: number, at: string) => number;
-  /** Drops new-L3 items that have been inactive longer than the retention window. */
-  purgeL3InactiveItems?: (at: string) => number;
-  /** Arms the idle flush of every Session holding turns not yet handed to the new L3. */
-  armPendingL3Flushes?: () => number;
-  /** Gives each dead-lettered new-L3 batch one automatic rerun. */
-  requeueL3DeadLettersOnce?: (at: string) => number;
+  recoverL3Startup?: (at: string) => Generator<void>;
   /** Whether the new L3 is on; while off its jobs stay queued and are not leased. */
   l3FieldActive?: () => boolean;
   /** Without an evolution model, L3 jobs stay queued (not leased, no attempt used) until one is configured. */
   evolutionModelConfigured?: () => boolean;
   previewPolicyEvidenceReconciliation: (limit: number) => PolicyEvidencePreflightReport;
-  reconcileOrphanedPolicies: (at: string, limit: number) => number;
+  reconcileOrphanedPolicies: (at: string, limit: number, preflight: PolicyEvidencePreflightReport) => number;
   enqueueJob: (input: EnqueueJobInput) => EvolutionJobRecord;
   enqueueEmbeddingRetry: (
     memory: MemoryRow,
@@ -275,6 +271,10 @@ export class WorkerRunner {
   }
 
   reconcileWorkerStartup(limit = 10000): WorkerStartupReconciliation {
+    return finishStartupSteps(this.startupRecoverySteps(limit));
+  }
+
+  *startupRecoverySteps(limit: number, policyWork?: (at: string, limit: number) => Promise<PolicyEvidenceRecovery>): StartupSteps<WorkerStartupReconciliation> {
     if (!this.deps.memoryAddEnabled()) {
       return {
         requeuedJobs: 0,
@@ -291,6 +291,7 @@ export class WorkerRunner {
     const at = this.deps.nowIso();
     this.refreshConfigurationBlockedJobs();
     this.deps.enqueueObservationBackfill?.(Math.min(limit, 100), at);
+    yield;
     const interruptedJobs = this.deps.repos.runtime.requeueLeasedJobsAfterRestart(at);
     observeWorker(this.deps.observer, { type: "lease", queue: "main", action: "recovered", count: interruptedJobs.length });
     const failedJobs = [...this.deps.repos.runtime.requeueFailedEpisodeAssignments(at), ...this.deps.repos.runtime.requeueFailedJobs(limit, at)];
@@ -298,25 +299,37 @@ export class WorkerRunner {
       this.deps.appendJobChange(after, "queued", before);
     }
 
+    yield;
     const embeddingRetries = this.deps.repos.runtime.requeueEmbeddingRetriesAfterRestart(Date.parse(at));
     observeWorker(this.deps.observer, { type: "lease", queue: "embedding_retry", action: "recovered", count: embeddingRetries.length });
     for (const { before, after } of embeddingRetries) {
       this.deps.appendEmbeddingRetryChange(after, "queued", before);
     }
     const restartedFailedProcessing = this.deps.restartFailedProcessing(at, limit);
-    const policyEvidencePreflight = this.deps.previewPolicyEvidenceReconciliation(limit);
-    const reconciledOrphanPolicies = this.deps.reconcileOrphanedPolicies(at, limit);
+    yield;
+    let policies: PolicyEvidenceRecovery;
+    if (policyWork) {
+      yield policyWork(at, limit).then(result => { policies = result; });
+    } else {
+      const preflight = this.deps.previewPolicyEvidenceReconciliation(limit);
+      policies = { policyEvidencePreflight: preflight, reconciledOrphanPolicies: this.deps.reconcileOrphanedPolicies(at, limit, preflight) };
+    }
+    const { policyEvidencePreflight, reconciledOrphanPolicies } = policies!;
 
     let enqueuedImportSummaries = 0;
     let enqueuedEmbeddingRepairs = 0;
     let enqueuedRetrievalReindexes = 0;
+    yield;
     const activeProcessing = this.deps.repos.processing.listByStates([
       "summary_pending",
       "summarizing",
       "embedding_pending",
       "embedding"
     ], limit);
-    for (const processing of activeProcessing) {
+    for (const candidate of activeProcessing) {
+      yield;
+      const processing = this.deps.repos.processing.get(candidate.memoryId);
+      if (!processing || !["summary_pending", "summarizing", "embedding_pending", "embedding"].includes(processing.state)) continue;
       const memory = this.deps.repos.memories.get(processing.memoryId);
       if (!memory) continue;
       if (
@@ -421,7 +434,10 @@ export class WorkerRunner {
       }, ["embedding_pending", "embedding"]);
     }
 
-    for (const memory of this.deps.repos.memories.listImportMemoriesNeedingSummary(limit)) {
+    for (const candidate of this.deps.repos.memories.listImportMemoriesNeedingSummary(limit)) {
+      yield;
+      const [memory] = this.deps.repos.memories.listImportMemoriesNeedingSummary(1, candidate.id);
+      if (!memory) continue;
       const processing = this.deps.repos.processing.get(memory.id);
       if (processing?.state === "summary_pending" || processing?.state === "summarizing") continue;
       // Startup reconciliation must not erase an explicit failure or recreate a
@@ -483,37 +499,32 @@ export class WorkerRunner {
       enqueuedRetrievalReindexes += 1;
     };
 
-    const retrievalMemories = this.deps.repos.memories.list({
-      memoryLayer: ["Skill", "L3"],
-      status: ["activated", "resolving"],
-      importedSkillsMode: "exclude"
+    // Page by immutable rowid; concurrent archive/delete cannot shift later records
+    // across an OFFSET. Select and reindex each authorized page in the same transaction.
+    const ordinary = this.deps.repos.memories.list({
+      memoryLayer: ["Skill", "L3"], status: ["activated", "resolving"], importedSkillsMode: "exclude"
     }, limit);
-    for (const memory of retrievalMemories) {
-      enqueueRetrievalReindex(memory);
+    for (const candidate of ordinary) {
+      yield;
+      const memory = this.deps.repos.memories.get(candidate.id);
+      if (memory && (memory.status === "activated" || memory.status === "resolving") && !isImportedSkill(memory)) enqueueRetrievalReindex(memory);
+    }
+    const importedSkillFilter: MemoryFilter = {
+      memoryLayer: "Skill", status: ["activated", "resolving"], importedSkillsMode: "only", eligibleImportedSkillsOnly: true
+    };
+    let cursor = 0;
+    for (;;) {
+      yield;
+      const last = this.deps.repos.transaction(() => {
+        const page = this.deps.repos.memories.listStartupPage(importedSkillFilter, cursor, Math.max(1, Math.min(limit, 16)));
+        for (const item of page) enqueueRetrievalReindex(item.memory);
+        return page.at(-1)?.cursor;
+      });
+      if (last === undefined) break;
+      cursor = last;
     }
 
-    const importedSkillFilter: MemoryFilter = {
-      memoryLayer: "Skill",
-      status: ["activated", "resolving"],
-      importedSkillsMode: "only",
-      eligibleImportedSkillsOnly: true
-    };
-    const importedSkillPageSize = Number.isFinite(limit) && limit > 0 ? Math.max(1, Math.floor(limit)) : 10000;
-    // FTS repair and enqueue do not change memory ordering. Keep one snapshot
-    // while paging authorized imported Skills so concurrent writes cannot skip rows.
-    this.deps.repos.transaction(() => {
-      const total = this.deps.repos.memories.count(importedSkillFilter);
-      for (let offset = 0; offset < total; offset += importedSkillPageSize) {
-        const importedSkills = this.deps.repos.memories.list(importedSkillFilter, importedSkillPageSize, offset);
-        for (const memory of importedSkills) {
-          enqueueRetrievalReindex(memory);
-        }
-      }
-    });
-
-    this.deps.purgeL3InactiveItems?.(at);
-    this.deps.requeueL3DeadLettersOnce?.(at);
-    this.deps.armPendingL3Flushes?.();
+    if (this.deps.recoverL3Startup) yield* this.deps.recoverL3Startup(at);
     this.refreshObservationModelConfiguration();
     return {
       requeuedJobs: interruptedJobs.length + failedJobs.length,

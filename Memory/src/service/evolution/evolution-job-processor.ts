@@ -1,9 +1,7 @@
-import { l2SupportRelation } from "./l2-content-revision.js";
 import {
   policyMetaFromMemory,
   skillMetaFromMemory,
-  traceMetaFromMemory,
-  worldModelMetaFromMemory
+  traceMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
 import type { Embedder, LlmClient } from "../../model/types.js";
@@ -42,13 +40,6 @@ import type { TurnJudgeSnapshot, TurnJudgment } from "./turn-judge.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
-
-export interface PolicyEvidencePreflightReport {
-  orphanPolicyIds: string[];
-  affectedWorldModelIds: string[];
-  affectedSkillIds: string[];
-  restorablePolicyIds: string[];
-}
 
 export interface EvolutionJobProcessorDeps {
   repos: Repositories;
@@ -274,113 +265,6 @@ export class EvolutionJobProcessor {
 
   findExistingSkillForPolicy(policy: PolicyMeta) {
     return this.skill.findExistingSkillForPolicy(policy);
-  }
-
-  previewPolicyEvidenceReconciliation(limit = 10000): PolicyEvidencePreflightReport {
-    const orphanPolicyIds: string[] = [];
-    const restorablePolicyIds: string[] = [];
-    for (const { policy, linkedTraceIds, validTraces } of this.activePolicyEvidenceStates(limit)) {
-      if (validTraces.length === 0) {
-        orphanPolicyIds.push(policy.id);
-      } else if (validTraces.some((trace) => !linkedTraceIds.has(trace.id))) {
-        restorablePolicyIds.push(policy.id);
-      }
-    }
-
-    const orphanIds = new Set(orphanPolicyIds);
-    const affectedWorldModelIds = this.deps.repos.memories
-      .list({ memoryLayer: "L3", status: ["activated", "resolving"] }, limit)
-      .filter((memory) => worldModelMetaFromMemory(memory)?.policyIds.some((id) => orphanIds.has(id)))
-      .map((memory) => memory.id);
-    const affectedSkillIds = this.deps.repos.memories
-      .list({ memoryLayer: "Skill", status: ["activated", "resolving"] }, limit)
-      .filter((memory) => skillMetaFromMemory(memory)?.sourcePolicyIds.some((id) => orphanIds.has(id)))
-      .map((memory) => memory.id);
-
-    return {
-      orphanPolicyIds: orphanPolicyIds.sort(),
-      affectedWorldModelIds: affectedWorldModelIds.sort(),
-      affectedSkillIds: affectedSkillIds.sort(),
-      restorablePolicyIds: restorablePolicyIds.sort()
-    };
-  }
-
-  reconcileOrphanedPolicies(at: string, limit = 10000): number {
-    let reconciled = 0;
-    for (const { memory, policy, linkedTraceIds, validTraces } of this.activePolicyEvidenceStates(limit)) {
-      if (validTraces.length === 0) {
-        const updated = this.policy.recomputePolicyStats(policy.id, at);
-        if (updated && policyMetaFromMemory(updated)?.status !== "active") {
-          this.invalidatePolicyDependencies(policy.id, at);
-          reconciled += 1;
-        }
-        continue;
-      }
-
-      let restored = false;
-      for (const trace of validTraces) {
-        if (linkedTraceIds.has(trace.id)) continue;
-        this.deps.repos.runtime.insertTracePolicyLink({
-          userId: memory.userId,
-          l1MemoryId: trace.id,
-          l2MemoryId: policy.id,
-          relation: l2SupportRelation(memory),
-          strength: 1,
-          createdAt: at
-        });
-        restored = true;
-      }
-      if (!restored) continue;
-      this.deps.repos.runtime.appendChange({
-        memoryId: memory.id,
-        namespaceId: this.deps.namespaceIdFromMemory(memory),
-        kind: "policy",
-        op: "updated",
-        entityId: memory.id,
-        userId: memory.userId,
-        changeType: "policy_evidence_links_restored",
-        before: { linkedTraceIds: Array.from(linkedTraceIds) },
-        after: { linkedTraceIds: validTraces.map((trace) => trace.id) },
-        source: "startup.policy_evidence_reconciliation",
-        createdAt: at
-      });
-      reconciled += 1;
-    }
-    return reconciled;
-  }
-
-  private activePolicyEvidenceStates(limit: number): Array<{
-    memory: MemoryRow;
-    policy: PolicyMeta;
-    linkedTraceIds: Set<string>;
-    validTraces: TraceMeta[];
-  }> {
-    return this.deps.repos.memories
-      .list({ memoryLayer: "L2", status: "activated" }, limit)
-      .map((memory) => ({ memory, policy: policyMetaFromMemory(memory) }))
-      .filter((item): item is { memory: MemoryRow; policy: PolicyMeta } =>
-        item.policy?.status === "active"
-      )
-      .map(({ memory, policy }) => {
-        const unifiedEvidence = this.deps.config.algorithm.l2Induction.mode === "unified" || policy.schemaVersion === 2;
-        const linkedTraceIds = new Set(this.deps.repos.runtime.listTracePolicyLinks({
-          l2MemoryId: policy.id,
-          limit: 1000
-        }).filter((link) => !unifiedEvidence || link.relation === l2SupportRelation(memory)).map((link) => link.l1MemoryId));
-        const candidateTraceIds = Array.from(new Set([
-          ...policy.sourceTraceIds,
-          ...linkedTraceIds
-        ]));
-        const validTraces = this.deps.repos.memories
-          .getMany(candidateTraceIds)
-          .map((candidate) => this.deps.traceMeta(candidate))
-          .filter((trace): trace is TraceMeta => Boolean(
-            trace && (unifiedEvidence
-              ? trace.userId === memory.userId && this.policy.isPolicyEvidenceValid(trace, policy)
-              : this.policy.isTraceEligibleForL2(trace))
-          ));
-        return { memory, policy, linkedTraceIds, validTraces };
-      });
   }
 
   invalidateMemoryDependencies(memory: MemoryRow, at: string): void {

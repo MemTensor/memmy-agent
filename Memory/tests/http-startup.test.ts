@@ -4,6 +4,10 @@ import { createMemoryHttpServer, type MemoryService } from "../src/index.js";
 import { closeMemoryHttpServer } from "../src/server/http.js";
 import type { AgentSourceExecutor } from "../src/agent-source/runtime.js";
 
+import { RuntimeRepository } from "../src/storage/repositories.js";
+import { WorkerRunner } from "../src/service/worker/worker-runner.js";
+import { createMemoryServiceFixture } from "./fixtures/memory-service-fixture.js";
+
 const servers: Server[] = [];
 
 afterEach(async () => {
@@ -50,6 +54,39 @@ describe("Memory HTTP startup", () => {
     } finally {
       finishWorker();
       finishSources();
+    }
+  });
+
+  it.each(["retry", "permanent"] as const)("shares queue recovery before manual and automatic claims (%s)", async (failure) => {
+    const fixture = createMemoryServiceFixture();
+    const { service } = fixture.createTestService();
+    const recover = vi.spyOn(RuntimeRepository.prototype, "requeueLeasedJobsAfterRestart");
+    const injected = () => { throw new Error("synthetic queue recovery error"); };
+    if (failure === "permanent") recover.mockImplementation(injected);
+    else recover.mockImplementationOnce(injected);
+    const claims = vi.spyOn(WorkerRunner.prototype, "runWorkerOnce");
+    const startup = vi.spyOn(service, "reconcileWorkerStartupInBackground");
+    const server = createMemoryHttpServer({ service, auth: { localServiceToken: "test" }, workerStartupFallbackMs: 0 });
+    try {
+      const base = await listen(server);
+      const headers = { authorization: "Bearer test", "content-type": "application/json" };
+      const runs = await Promise.all([1, 2].map(() => fetch(base + "/api/v1/worker/run", { method: "POST", headers, body: "{}" })));
+      expect(startup).toHaveBeenCalledOnce();
+      expect(recover).toHaveBeenCalledTimes(failure === "permanent" ? 3 : 2);
+      if (failure === "permanent") {
+        expect(runs.map(r => r.status)).toEqual([500, 500]);
+        expect(claims).not.toHaveBeenCalled();
+      } else {
+        expect(runs.map(r => r.status)).toEqual([200, 200]);
+        expect(recover.mock.invocationCallOrder.at(-1)!).toBeLessThan(claims.mock.invocationCallOrder[0]!);
+      }
+      expect((await fetch(base + "/api/v1/health")).status).toBe(200);
+      expect((await fetch(base + "/api/v1/auth/check", { headers })).status).toBe(200);
+      expect((await fetch(base + "/api/v1/auth/check", { headers: { authorization: "Bearer wrong" } })).status).toBe(401);
+    } finally {
+      await closeMemoryHttpServer(server);
+      vi.restoreAllMocks();
+      await fixture.cleanup();
     }
   });
 
@@ -300,7 +337,7 @@ function stubService(reconcile: () => void): StartupServiceStub {
     health() {
       return { ok: true };
     },
-    reconcileWorkerStartup: reconcile,
+    reconcileWorkerStartupInBackground: async () => reconcile(),
     notifyWorkerWorkAvailable() {},
     async runWorkerOnce() {
       return workerResult(0);
@@ -311,6 +348,7 @@ function stubService(reconcile: () => void): StartupServiceStub {
     setAppBudgetReconcileListener(next?: () => void) {
       listener = next;
     },
+    setWorkerStartupBarrier: () => undefined,
     setCapturePendingListener: () => undefined,
     setPersistRecoveredListener(next?: () => void) {
       persistListener = next;

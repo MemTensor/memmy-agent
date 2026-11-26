@@ -365,12 +365,54 @@ describe("raw-first independent L1 and Episode processing", () => {
       VALUES('legacy','capture_replay','dead_letter','local-user',?,?,3,3,?,?)`).run(sessionId,
       JSON.stringify({ command: { operation: "completeTurn", args: ["old", { sessionId, query: "Old input", answer: "Old answer" }] } }), acceptedAt, acceptedAt);
     service.closeSession(sessionId);
+    await service.stop();
     const restored = fixture.createTestMemoryService({ db: new MemoryDb({ path: db.path }), llm, config });
+    expect(db.db.prepare("SELECT id FROM raw_turns WHERE turn_id='old'").get()).toBeUndefined();
+    expect((await restored.completeTurn("old", { sessionId, query: "Old input", answer: "Old answer" })).duplicate).toBe(true);
     expect(db.db.prepare("SELECT user_text,created_at FROM raw_turns WHERE turn_id='old'").get()).toEqual({ user_text: "Old input", created_at: acceptedAt });
     expect(db.db.prepare("SELECT count(*) AS n FROM evolution_jobs WHERE job_type='capture_replay'").get()).toEqual({ n: 0 });
     await drain(restored);
     expect(db.db.prepare("SELECT episode_id FROM raw_turns WHERE turn_id='old'").get()).toMatchObject({ episode_id: expect.any(String) });
     expect(new Repositories(db.db).runtime.getSession(sessionId)?.status).toBe("closed");
+  });
+
+  it("resumes from committed commands across restart, while a different session can capture", async () => {
+    const { service, db } = fixture.createTestService();
+    const old = service.openSession({}).sessionId;
+    const live = service.openSession({}).sessionId;
+    await service.stop();
+    const insert = db.db.prepare(`INSERT INTO evolution_jobs
+      (id,job_type,status,user_id,session_id,payload_json,attempts,max_attempts,created_at,updated_at)
+      VALUES (?,'capture_replay','queued','local-user',?,?,0,3,'2026-01-01','2026-01-01')`);
+    for (let i = 0; i < 40; i++) {
+      insert.run("legacy-" + i, old, JSON.stringify({ command: { operation: "completeTurn",
+        args: ["old-" + i, { sessionId: old, query: "Question " + i, answer: "Answer " + i }] } }));
+    }
+    insert.run("invalid", old, JSON.stringify({ command: { operation: "completeTurn", args: ["invalid", {}] } }));
+    const remaining = () => db.db.prepare("SELECT count(*) FROM evolution_jobs WHERE job_type='capture_replay'").pluck().get() as number;
+    const open = () => fixture.createTestMemoryService({ db: new MemoryDb({ path: db.path }) });
+    const first = open();
+    await first.completeTurn("new", { sessionId: live, query: "Live question", answer: "Live answer" });
+    expect(remaining()).toBeGreaterThan(1);
+    await vi.waitFor(() => expect(remaining()).toBeLessThan(41), { interval: 1 });
+    await first.stop();
+    const pending = remaining();
+    expect(pending).toBeGreaterThan(1);
+    const second = open();
+    const duplicate = await second.completeTurn("old-39", { sessionId: old, query: "Question 39", answer: "Answer 39" });
+    expect(duplicate.duplicate).toBe(true);
+    expect(remaining()).toBe(1);
+    expect(db.db.prepare("SELECT status FROM evolution_jobs WHERE id='invalid'").pluck().get()).toBe("dead_letter");
+    expect(db.db.prepare("SELECT count(*) FROM raw_turns WHERE session_id=?").pluck().get(old)).toBe(40);
+    expect(db.db.prepare("SELECT count(*) FROM memories WHERE memory_layer='L1' AND session_id=?").pluck().get(old)).toBe(40);
+    expect(db.db.prepare("SELECT count(*) FROM raw_turns WHERE session_id=?").pluck().get(live)).toBe(1);
+    await second.stop();
+    const repaired = { sessionId: old, query: "Recovered question", answer: "Recovered answer" };
+    db.db.prepare("UPDATE evolution_jobs SET payload_json=? WHERE id='invalid'").run(JSON.stringify({
+      command: { operation: "completeTurn", args: ["invalid", repaired] }
+    }));
+    expect((await open().completeTurn("invalid", repaired)).duplicate).toBe(true);
+    expect(remaining()).toBe(0);
   });
 
   it.each([false, true])("export/import cannot restore excluded raw text (includeRawText=%s)", async includeRawText => {

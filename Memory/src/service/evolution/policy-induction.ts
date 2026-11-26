@@ -86,10 +86,15 @@ export interface PolicyInductionDeps {
   onPolicyRevised?(policyId: string, at: string): void;
 }
 
-export class PolicyInductionEngine {
-  constructor(private readonly deps: PolicyInductionDeps) {}
+export type PolicyEvidenceDeps = Pick<PolicyInductionDeps, "repos" | "traceMeta" | "namespaceIdFromMemory" |
+  "enqueueJob" | "enqueueChange" | "onSkillRewardDrift"> & {
+  config: { algorithm: Pick<MemmyConfig["algorithm"], "l2Induction" | "negativeExperience" | "skill"> };
+};
 
-  async induceL2(job: EvolutionJobRecord): Promise<void> {
+export class PolicyInductionEngine<D extends PolicyEvidenceDeps = PolicyInductionDeps> {
+  constructor(private readonly deps: D) {}
+
+  async induceL2(this: PolicyInductionEngine, job: EvolutionJobRecord): Promise<void> {
     if (this.deps.config.algorithm.l2Induction.mode === "unified") {
       const source = this.l2InductionSourceForJob(job);
       const trace = this.deps.traceMeta(source);
@@ -425,7 +430,7 @@ export class PolicyInductionEngine {
     return payloadSource ?? legacyTarget;
   }
 
-  async associateL2(job: EvolutionJobRecord): Promise<void> {
+  async associateL2(this: PolicyInductionEngine, job: EvolutionJobRecord): Promise<void> {
     if (this.deps.config.algorithm.l2Induction.mode === "unified") {
       await this.induceL2(job);
       return;
@@ -468,6 +473,7 @@ export class PolicyInductionEngine {
   }
 
   async enhancePolicyDraft(
+    this: PolicyInductionEngine,
     signature: string,
     evidenceTraces: TraceMeta[],
     fallback: PolicyDraft
@@ -589,6 +595,7 @@ export class PolicyInductionEngine {
   }
 
   private findExistingPolicyForL2Bucket(
+    this: PolicyInductionEngine,
     signature: string,
     evidenceTraces: TraceMeta[]
   ): PolicyMeta | null {

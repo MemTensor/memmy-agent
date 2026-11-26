@@ -16,6 +16,19 @@ export function externalEvidenceNamespaceForMemory(memory: MemoryRow): RuntimeNa
     : fallback;
 }
 
+export function namespaceIdFromMemory(memory: MemoryRow): string {
+  return namespaceIdFromContext(externalEvidenceNamespaceForMemory(memory));
+}
+
+export function namespaceIdFromContext(namespace: RuntimeNamespace): string {
+  return [
+    namespace.tenantId,
+    namespace.projectId ?? namespace.workspaceId,
+    namespace.source,
+    namespace.profileId
+  ].filter(Boolean).join(":");
+}
+
 export function externalEvidenceMemoryKey(namespace: RuntimeNamespace, source: string, sourceRecordId: string): string {
   const normalized = normalizeNamespace(namespace);
   return `external-evidence:${stableHash({

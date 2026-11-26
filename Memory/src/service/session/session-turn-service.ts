@@ -118,6 +118,13 @@ type SessionTurnDependencies = {
   readonly skillLlm: LlmClient;
   synthesizeDecisionRepairDraft: SynthesizeDecisionRepairDraft;
 } & Record<string, any>;
+interface LegacyCaptureRow {
+  id: string;
+  session_id: string | null;
+  user_id: string;
+  payload_json: string;
+  created_at: string;
+}
 type CompleteTurnResponse = TurnCompletionResult;
 type EndTopicDecision = TurnRelationDecision & { relation: "end_topic" };
 interface EpisodeTurnRoute { episode: EpisodeRecord; endTopicDecision?: EndTopicDecision; }
@@ -568,73 +575,119 @@ export class SessionTurnService {
 
   // One-time data conversion, not a worker or public-interface replay. Legacy
   // commands are removed only in the transaction that creates their formal rows.
-  migrateLegacyCaptures(): void {
-    const rows = this.deps.repos.db.prepare("SELECT id, session_id, user_id, payload_json, created_at FROM evolution_jobs WHERE job_type='capture_replay' ORDER BY created_at, rowid").all() as Array<{ id: string; session_id: string | null; user_id: string; payload_json: string; created_at: string }>;
-    for (const row of rows) this.deps.repos.transaction(() => {
-      const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
-      const command = isRecord(payload.command) ? payload.command : undefined;
-      if (!command || payload.rawTextExcluded) {
-        this.deps.repos.db.prepare("DELETE FROM evolution_jobs WHERE id=?").run(row.id);
-        return;
+  hasLegacyCapturesFor(sessionId?: string, source?: SourceTurnIdentity): boolean {
+    // Pending commands can predate the session_id column being populated.
+    return !!this.deps.repos.db.prepare(`SELECT 1 FROM evolution_jobs
+      WHERE job_type='capture_replay' AND (session_id=@session OR CASE WHEN json_valid(payload_json) THEN
+        json_extract(payload_json,'$.command.args[0].sessionId')=@session OR
+        json_extract(payload_json,'$.command.args[1].sessionId')=@session OR
+        (json_extract(payload_json,'$.command.operation')='compactSession' AND json_extract(payload_json,'$.command.args[0]')=@session) OR
+        (json_extract(payload_json,'$.command.operation')='completeSourceTurn'
+          AND json_extract(payload_json,'$.command.args[0].sourceTurn.source')=@source
+          AND json_extract(payload_json,'$.command.args[0].sourceTurn.profileId')=@profile
+          AND json_extract(payload_json,'$.command.args[0].sourceTurn.conversationId')=@conversation)
+      END) LIMIT 1`).get({ session: sessionId ?? null, source: source?.source ?? null,
+        profile: source?.profileId ?? null, conversation: source?.conversationId ?? null });
+  }
+
+  *migrateLegacyCaptures(onFailure?: (id: string, error: unknown) => void): Generator<void> {
+    const db = this.deps.repos.db;
+    const page = db.prepare(`SELECT rowid, created_at FROM evolution_jobs WHERE job_type='capture_replay'
+      AND (created_at, rowid) > (?, ?) ORDER BY created_at, rowid LIMIT 32`);
+    const read = db.prepare(`SELECT id, session_id, user_id, payload_json, created_at FROM evolution_jobs
+      WHERE rowid=? AND created_at=? AND job_type='capture_replay'`);
+    let at = "";
+    let cursor = 0;
+    for (;;) {
+      const rows = page.all(at, cursor) as Array<{ rowid: number; created_at: string }>;
+      if (!rows.length) return;
+      for (const key of rows) {
+        cursor = key.rowid;
+        at = key.created_at;
+        if (!this.deps.memoryAddEnabled()) return;
+        this.deps.repos.transaction(() => {
+          // An import or a second service may have consumed this page between turns.
+          const row = read.get(cursor, at) as LegacyCaptureRow | undefined;
+          if (!row) return;
+          try {
+            this.deps.repos.transaction(() => this.convertLegacyCapture(row));
+          } catch (error) {
+            if (!onFailure) throw error;
+            // Retain the original command for another startup, outside the ordinary job queue.
+            db.prepare(`UPDATE evolution_jobs SET status='dead_letter', leased_until=NULL, lease_owner=NULL,
+              lease_token=NULL, available_at=NULL, blocked_reason=NULL WHERE id=?`).run(row.id);
+            onFailure(row.id, error);
+          }
+        });
+        yield;
       }
-      const args = Array.isArray(command.args) ? command.args : [];
-      const operation = String(command.operation);
-      const request = { ...(isRecord(args[1]) ? args[1] : isRecord(args[0]) ? args[0] : {}) };
-      let sessionId = typeof request.sessionId === "string" ? request.sessionId : row.session_id ?? undefined;
-      const source = operation === "completeSourceTurn" && isRecord(request.sourceTurn) ? request.sourceTurn as unknown as SourceTurnIdentity : undefined;
-      let scope: SourceTurnCaptureScope | undefined;
-      if (source) {
-        const namespace = normalizeNamespace({ source: source.source, profileId: source.profileId,
-          sessionKey: source.conversationId, ...(isRecord(request.namespace) ? request.namespace : {}), userId: row.user_id });
-        request.namespace = namespace;
-        scope = { userId: row.user_id, source: source.source, profileId: source.profileId, conversationId: source.conversationId,
-          namespaceKey: stableHash({ tenantId: namespace.tenantId ?? null, projectId: namespace.projectId ?? null, workspaceId: namespace.workspaceId ?? null }) };
-        const existing = this.deps.repos.runtime.getSourceTurnCapture(scope, source.turnId);
-        if (existing) { this.deps.repos.db.prepare("DELETE FROM evolution_jobs WHERE id=?").run(row.id); return; }
-        sessionId = this.deps.repos.runtime.sourceConversationSessions(scope)[0]?.id;
-        if (!sessionId) sessionId = this.openSession({ namespace, source: source.source, profileId: source.profileId,
-          meta: { conversationId: source.conversationId, source_namespace_key: scope.namespaceKey } }, { createNew: true, at: source.startedAt }).sessionId;
-      } else if (operation === "compactSession") sessionId = String(args[0]);
-      const session = sessionId ? this.deps.repos.runtime.getSession(sessionId) : undefined;
-      // A removed Session must not be resurrected by legacy recovery.
-      if (!session) { this.deps.repos.db.prepare("DELETE FROM evolution_jobs WHERE id=?").run(row.id); return; }
-      if (operation === "completeTurn" || source || operation === "subagentComplete") {
-        const turnId = source?.turnId ?? (operation === "completeTurn" ? String(args[0]) : `subagent:complete:${request.subagentId ?? row.id}`);
-        const normalized = sanitizeTurnCompleteRequest({ ...request, sessionId: session.id,
-          ...(operation === "subagentComplete" ? { query: `[Subagent completed] ${request.subagentId ?? ""}`, answer: String(request.summary ?? "") } : {}) } as TurnCompleteRequest & Record<string, unknown>);
-        const result = this.completeTurn(turnId, { ...normalized }, source, row.created_at);
-        if (source && scope) {
-          const contentHash = stableHash({ query: normalized.query, answer: normalized.answer, status: normalized.status ?? "succeeded",
-            reasoningSummary: normalized.reasoningSummary ?? null, toolCalls: normalizeCompleteTurnToolCalls(normalized), toolResults: normalizeCompleteTurnToolResults(normalized) });
-          this.deps.repos.runtime.insertSourceTurnCapture({ ...scope, turnId, contentHash, sessionId: session.id,
-            rawTurnId: result.rawTurnId, episodeId: result.episodeId, startedAt: new Date(source.startedAt).toISOString(),
-            completedAt: new Date(source.completedAt).toISOString(), sequence: source.sequence,
-            response: { status: "stored", result }, createdAt: row.created_at });
-        }
-      } else if (operation === "compactSession") {
-        this.compactSession(session.id, request as SessionCompactRequest, row.created_at);
-      } else {
-        const turnId = typeof request.turnId === "string" ? request.turnId : `legacy-event:${row.id}`;
-        let raw = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, turnId);
-        if (!raw) {
-          const observation = operation === "observeTool" ? toolObservationEvent(request as unknown as ToolObserveRequest) : undefined;
-          raw = this.deps.repos.runtime.insertRawTurn({ id: rawTurnIdForSessionTurn(session.id, turnId), sessionId: session.id,
-            userId: DEVICE_MEMORY_OWNER, conversationId: session.conversationId, turnId,
-            userText: typeof request.task === "string" ? request.task : undefined,
-            toolCalls: observation ? [observation.toolCall] : [], toolResults: observation?.toolResult ? [observation.toolResult] : [],
-            sourceMemoryIds: [], usage: {}, messagePayload: { legacy_event: { operation, subagentId: request.subagentId, metadata: request.metadata } },
-            status: operation === "subagentStart" ? "started" : "observed", createdAt: row.created_at });
-          this.deps.repos.runtime.insertArtifact({ sessionId: session.id, rawTurnId: raw.id, userId: DEVICE_MEMORY_OWNER,
-            kind: operation === "observeTool" ? "tool_call" : operation === "useSkill" ? "skill_use" : "subagent_start",
-            payload: observation ? { phase: observation.phase, value: observation.event } : { subagentId: request.subagentId, task: request.task, skillId: args[0], metadata: request.metadata }, createdAt: row.created_at });
-          this.queueAssignment(raw);
-          if (operation === "useSkill") this.deps.repos.runtime.insertSkillTrial({ id: `trial_${stableHash(row.id).slice(0, 20)}`,
-            userId: DEVICE_MEMORY_OWNER, sessionId: session.id, skillMemoryId: String(args[0]), rawTurnId: raw.id,
-            turnId, status: "pending", outcome: "unknown", createdAt: row.created_at });
-        }
-      }
+    }
+  }
+
+  private convertLegacyCapture(row: LegacyCaptureRow): void {
+    const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+    const command = isRecord(payload.command) ? payload.command : undefined;
+    if (!command || payload.rawTextExcluded) {
       this.deps.repos.db.prepare("DELETE FROM evolution_jobs WHERE id=?").run(row.id);
-    });
+      return;
+    }
+    const args = Array.isArray(command.args) ? command.args : [];
+    const operation = String(command.operation);
+    const request = { ...(isRecord(args[1]) ? args[1] : isRecord(args[0]) ? args[0] : {}) };
+    let sessionId = typeof request.sessionId === "string" ? request.sessionId : row.session_id ?? undefined;
+    const source = operation === "completeSourceTurn" && isRecord(request.sourceTurn) ? request.sourceTurn as unknown as SourceTurnIdentity : undefined;
+    let scope: SourceTurnCaptureScope | undefined;
+    if (source) {
+      const namespace = normalizeNamespace({ source: source.source, profileId: source.profileId,
+        sessionKey: source.conversationId, ...(isRecord(request.namespace) ? request.namespace : {}), userId: row.user_id });
+      request.namespace = namespace;
+      scope = { userId: row.user_id, source: source.source, profileId: source.profileId, conversationId: source.conversationId,
+        namespaceKey: stableHash({ tenantId: namespace.tenantId ?? null, projectId: namespace.projectId ?? null, workspaceId: namespace.workspaceId ?? null }) };
+      const existing = this.deps.repos.runtime.getSourceTurnCapture(scope, source.turnId);
+      if (existing) { this.deps.repos.db.prepare("DELETE FROM evolution_jobs WHERE id=?").run(row.id); return; }
+      sessionId = this.deps.repos.runtime.sourceConversationSessions(scope)[0]?.id;
+      if (!sessionId) sessionId = this.openSession({ namespace, source: source.source, profileId: source.profileId,
+        meta: { conversationId: source.conversationId, source_namespace_key: scope.namespaceKey } }, { createNew: true, at: source.startedAt }).sessionId;
+    } else if (operation === "compactSession") sessionId = String(args[0]);
+    const session = sessionId ? this.deps.repos.runtime.getSession(sessionId) : undefined;
+    // A removed Session must not be resurrected by legacy recovery.
+    if (!session) { this.deps.repos.db.prepare("DELETE FROM evolution_jobs WHERE id=?").run(row.id); return; }
+    if (operation === "completeTurn" || source || operation === "subagentComplete") {
+      const turnId = source?.turnId ?? (operation === "completeTurn" ? String(args[0]) : `subagent:complete:${request.subagentId ?? row.id}`);
+      const normalized = sanitizeTurnCompleteRequest({ ...request, sessionId: session.id,
+        ...(operation === "subagentComplete" ? { query: `[Subagent completed] ${request.subagentId ?? ""}`, answer: String(request.summary ?? "") } : {}) } as TurnCompleteRequest & Record<string, unknown>);
+      const result = this.completeTurn(turnId, { ...normalized }, source, row.created_at);
+      if (source && scope) {
+        const contentHash = stableHash({ query: normalized.query, answer: normalized.answer, status: normalized.status ?? "succeeded",
+          reasoningSummary: normalized.reasoningSummary ?? null, toolCalls: normalizeCompleteTurnToolCalls(normalized), toolResults: normalizeCompleteTurnToolResults(normalized) });
+        this.deps.repos.runtime.insertSourceTurnCapture({ ...scope, turnId, contentHash, sessionId: session.id,
+          rawTurnId: result.rawTurnId, episodeId: result.episodeId, startedAt: new Date(source.startedAt).toISOString(),
+          completedAt: new Date(source.completedAt).toISOString(), sequence: source.sequence,
+          response: { status: "stored", result }, createdAt: row.created_at });
+      }
+    } else if (operation === "compactSession") {
+      this.compactSession(session.id, request as SessionCompactRequest, row.created_at);
+    } else {
+      const turnId = typeof request.turnId === "string" ? request.turnId : `legacy-event:${row.id}`;
+      let raw = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, turnId);
+      if (!raw) {
+        const observation = operation === "observeTool" ? toolObservationEvent(request as unknown as ToolObserveRequest) : undefined;
+        raw = this.deps.repos.runtime.insertRawTurn({ id: rawTurnIdForSessionTurn(session.id, turnId), sessionId: session.id,
+          userId: DEVICE_MEMORY_OWNER, conversationId: session.conversationId, turnId,
+          userText: typeof request.task === "string" ? request.task : undefined,
+          toolCalls: observation ? [observation.toolCall] : [], toolResults: observation?.toolResult ? [observation.toolResult] : [],
+          sourceMemoryIds: [], usage: {}, messagePayload: { legacy_event: { operation, subagentId: request.subagentId, metadata: request.metadata } },
+          status: operation === "subagentStart" ? "started" : "observed", createdAt: row.created_at });
+        this.deps.repos.runtime.insertArtifact({ sessionId: session.id, rawTurnId: raw.id, userId: DEVICE_MEMORY_OWNER,
+          kind: operation === "observeTool" ? "tool_call" : operation === "useSkill" ? "skill_use" : "subagent_start",
+          payload: observation ? { phase: observation.phase, value: observation.event } : { subagentId: request.subagentId, task: request.task, skillId: args[0], metadata: request.metadata }, createdAt: row.created_at });
+        this.queueAssignment(raw);
+        if (operation === "useSkill") this.deps.repos.runtime.insertSkillTrial({ id: `trial_${stableHash(row.id).slice(0, 20)}`,
+          userId: DEVICE_MEMORY_OWNER, sessionId: session.id, skillMemoryId: String(args[0]), rawTurnId: raw.id,
+          turnId, status: "pending", outcome: "unknown", createdAt: row.created_at });
+      }
+    }
+    this.deps.repos.db.prepare("DELETE FROM evolution_jobs WHERE id=?").run(row.id);
   }
 
   async assignEpisode(job: EvolutionJobRecord): Promise<void> {

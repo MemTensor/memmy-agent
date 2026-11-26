@@ -1,3 +1,7 @@
+import { rawTurnIdFromMemory, traceMetaWithSource } from "./evolution/trace-meta-with-source.js";
+import { runMaintenanceWorker } from "./worker/startup-maintenance-thread.js";
+import { PolicyEvidenceMaintenance, type PolicyEvidenceRecovery } from "./evolution/policy-evidence-maintenance.js";
+import { finishStartupSteps, runStartupSteps } from "./worker/startup-reconciliation.js";
 import { AgentSkillLibrary, type AgentSkillReconcileRequest, type AgentSkillReconcileResult } from "./import/agent-skill-library.js";
 import { isImportedSkill } from "../storage/imported-skill.js";
 import { PanelMemoryBudget } from "./panel/memory-budget.js";
@@ -223,7 +227,7 @@ import {
 import { SkillTrialResolver } from "./trials/skill-trial-resolver.js";
 import { WorkMemoryPipeline } from "./work-memory/work-memory-pipeline.js";
 import { ObservationMemoryPipeline } from "./evidence/observation-memory-pipeline.js";
-import { lookupExternalEvidence, lookupExternalEvidenceSkill, externalEvidenceSourceMatchesMemory, externalEvidenceNamespaceForMemory } from "./external-evidence-source.js";
+import { lookupExternalEvidence, lookupExternalEvidenceSkill, externalEvidenceSourceMatchesMemory, externalEvidenceNamespaceForMemory, namespaceIdFromMemory, namespaceIdFromContext } from "./external-evidence-source.js";
 import { observationMemoryState, isObservationMemoryProcessed, OBSERVATION_SUMMARY_MODEL_UNCONFIGURED } from "./observation-memory-state.js";
 import { editedSkillDisplay, externalSkillJobPayload, HISTORY_SKILL_INITIAL_ETA, historySkillDraftIsUnmodified, historySkillObservationSummary,
   historySkillProcedure, historySkillSteps, isHistoryEvidenceSkill, isSubstantiveHistoryAction } from "./evidence/history-skill-policy.js";
@@ -262,6 +266,8 @@ export type { FeedbackResponse } from "./feedback/feedback-experience.js";
 export interface MemoryServiceOptions {
   /** One controller is shared by worker admission and actual model requests. */
   concurrency?: WorkerConcurrencyController;
+  /** Stops startup maintenance as soon as the owning server begins shutting down. */
+  startupSignal?: AbortSignal;
   /** Optional process-local diagnostics sink, never a public status API. */
   observability?: WorkerObservability;
   db?: MemoryDb;
@@ -330,6 +336,7 @@ function isAbortError(error: unknown): boolean {
 
 export class MemoryService {
   private readonly embeddingJobs: EmbeddingJobProcessor;
+  private readonly policyEvidence: PolicyEvidenceMaintenance;
   private readonly evolutionJobs: EvolutionJobProcessor;
   private readonly feedbackExperience: FeedbackExperienceService;
   private readonly skillTrials: SkillTrialResolver;
@@ -460,6 +467,8 @@ export class MemoryService {
   private persistRecoveredListener?: () => void;
   private capturePendingListener?: () => void;
   private readonly fallbackSessionId = randomUUID();
+  private legacyCaptureMigration?: Promise<void>;
+  private beforeWorkerRun?: () => Promise<void>;
   private closing = false;
   private stopping?: Promise<void>;
   private viewerEndpoint?: string;
@@ -593,6 +602,7 @@ export class MemoryService {
         }
       }
     });
+    this.policyEvidence = new PolicyEvidenceMaintenance(this.repos, () => this.config.algorithm);
     const evolutionOwner = this;
     this.evolutionJobs = new EvolutionJobProcessor({
       repos: this.repos,
@@ -781,14 +791,10 @@ export class MemoryService {
       restartFailedProcessing: this.restartFailedProcessing.bind(this),
       enqueueObservationBackfill: (limit, at) => this.observationMemory.backfill(limit, at),
       l3FieldActive: () => this.l3FieldActive(),
-      requeueL3DeadLettersOnce: (at) => this.requeueL3DeadLettersOnce(at),
-      armPendingL3Flushes: () => this.armPendingL3Flushes(),
+      recoverL3Startup: at => this.recoverL3Startup(at),
       evolutionModelConfigured: () => workerRunnerOwner.skillLlm.isConfigured(),
-      purgeL3InactiveItems: (at) => this.repos.l3Field.purgeInactive(
-        new Date(Date.parse(at) - this.config.algorithm.l3FieldCognition.inactiveRetentionDays * 86_400_000).toISOString()
-      ),
-      previewPolicyEvidenceReconciliation: this.evolutionJobs.previewPolicyEvidenceReconciliation.bind(this.evolutionJobs),
-      reconcileOrphanedPolicies: this.evolutionJobs.reconcileOrphanedPolicies.bind(this.evolutionJobs),
+      previewPolicyEvidenceReconciliation: limit => finishStartupSteps(this.policyEvidence.preview(limit)),
+      reconcileOrphanedPolicies: (at, limit, report) => finishStartupSteps(this.policyEvidence.repair(at, report, limit)),
       enqueueJob: this.workerHandlers.enqueueJob,
       enqueueEmbeddingRetry: this.workerHandlers.enqueueEmbeddingRetry,
       appendJobChange: this.workerHandlers.appendJobChange,
@@ -974,10 +980,28 @@ export class MemoryService {
       stringifyForMemory,
       withDuplicateFlag
     });
-    this.sessionTurns.migrateLegacyCaptures();
+    this.startLegacyCaptureMigration();
     serviceLogger.info("initialized", memoryConfigLogFields(this.config));
     this.tokenUsageRecorder.start();
     this.workerMetrics.start();
+  }
+
+  private startLegacyCaptureMigration(): void {
+    if (this.legacyCaptureMigration || !this.memoryAddEnabled()) return;
+    const steps = this.sessionTurns.migrateLegacyCaptures((id, error) => {
+      serviceLogger.error("capture.legacy_command_failed", { id, ...memoryErrorFields(error) });
+    });
+    const signal = this.options.startupSignal
+      ? AbortSignal.any([this.options.startupSignal, this.budgetAbort.signal])
+      : this.budgetAbort.signal;
+    const migration = runStartupSteps(steps, signal);
+    this.legacyCaptureMigration = migration;
+    void migration.then(
+      () => { this.legacyCaptureMigration = undefined; },
+      error => {
+        if (!signal.aborted) serviceLogger.error("capture.legacy_migration_failed", memoryErrorFields(error));
+      }
+    );
   }
 
   stopTokenUsageDelivery(): void {
@@ -1004,7 +1028,7 @@ export class MemoryService {
     // A display-only scan is safe to recompute and must not keep running while
     // other accepted work drains during shutdown.
     this.embeddingMaintenanceReader.cancelDiscardableStats();
-    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped]).then(async () => {
+    this.stopping = Promise.all([stopped, modelsStopped, requestsStopped, readerStopped, this.legacyCaptureMigration?.catch(() => {})]).then(async () => {
       // Reads that a maintenance run depends on get a bounded grace period before
       // the worker is terminated, so shutdown cannot hang on a stuck scan.
       await this.embeddingMaintenanceReader.stop();
@@ -1139,6 +1163,10 @@ export class MemoryService {
 
   setAppBudgetReconcileListener(listener?: () => void): void {
     this.appBudgetReconcile.settledListener = listener;
+  }
+
+  setWorkerStartupBarrier(prepare?: () => Promise<void>): void {
+    this.beforeWorkerRun = prepare;
   }
 
   setCapturePendingListener(listener?: () => void): void {
@@ -1479,6 +1507,7 @@ export class MemoryService {
     const l3FieldWasActive = this.l3FieldActive();
 
     this.config = nextConfig;
+    if (!previousConfig.algorithm.enableMemoryAdd) this.startLegacyCaptureMigration();
     this.tokenBudgetLedger.setLimits(this.config.tokenBudget);
     this.appBudgetReconcile.succeeded = false;
     this.appBudgetReconcile.nextAttemptAtMs = 0;
@@ -1779,27 +1808,49 @@ export class MemoryService {
    * now. Nothing while the new L3 is off.
    */
   armPendingL3Flushes(): number {
-    if (!this.l3FieldActive() || !this.memoryAddEnabled()) return 0;
-    const pending = this.repos.l3WorldModels.sessionsWithUnfrozenTurns();
-    this.repos.transaction(() => {
-      for (const { sessionId, open, lastActivityAt } of pending) {
-        if (open) this.workMemory.armIdleFlush(sessionId, lastActivityAt);
-        else this.repos.l3WorldModels.freezeBatches({ sessionId, trigger: "session_close" });
-      }
-    });
-    return pending.length;
+    return finishStartupSteps(this.pendingL3FlushSteps());
   }
 
-  /** Worker startup: one automatic rerun for each dead-lettered new-L3 batch; nothing while the new L3 is off. */
-  private requeueL3DeadLettersOnce(at: string): number {
-    if (!this.l3FieldActive()) return 0;
-    const before = new Map(this.repos.runtime.listJobs("dead_letter", 10_000).map((job) => [job.id, job]));
-    const requeued = this.repos.l3Field.requeueDeadLetterBatchesOnce(at);
-    for (const id of requeued) {
-      const after = this.repos.runtime.getJob(id);
-      if (after) this.workerHandlers.appendJobChange(after, "queued", before.get(id));
+  private *pendingL3FlushSteps(): Generator<void, number> {
+    if (!this.l3FieldActive() || !this.memoryAddEnabled()) return 0;
+    let pending = 0;
+    for (const sessions of this.repos.l3WorldModels.recoverySessionPages(32)) {
+      for (const session of sessions) {
+        let counted = false;
+        for (;;) {
+          if (!this.l3FieldActive() || !this.memoryAddEnabled()) return pending;
+          const result = this.repos.transaction(() => this.repos.l3WorldModels.recoverUnfrozenSession(
+            session.id, at => this.workMemory.armIdleFlush(session.id, at)
+          ));
+          if (result.pending && !counted) { pending++; counted = true; }
+          if (result.pending) yield;
+          if (!result.more) break;
+        }
+      }
+      yield;
     }
-    return requeued.length;
+    return pending;
+  }
+
+  private *recoverL3Startup(at: string): Generator<void> {
+    const limit = 32;
+    const before = new Date(Date.parse(at) - this.config.algorithm.l3FieldCognition.inactiveRetentionDays * 86_400_000).toISOString();
+    while (this.memoryAddEnabled() && this.repos.l3Field.purgeInactive(before, limit) === limit) yield;
+
+    while (this.memoryAddEnabled() && this.l3FieldActive()) {
+      const count = this.repos.transaction(() => {
+        const previous = new Map<string, EvolutionJobRecord | undefined>();
+        const ids = this.repos.l3Field.requeueDeadLetterBatchesOnce(at, limit, id => previous.set(id, this.repos.runtime.getJob(id)));
+        for (const id of ids) {
+          const after = this.repos.runtime.getJob(id);
+          if (after) this.workerHandlers.appendJobChange(after, "queued", previous.get(id));
+        }
+        return ids.length;
+      });
+      yield;
+      if (count < limit) break;
+    }
+    yield* this.pendingL3FlushSteps();
   }
 
   l3WorldModelBoundary(
@@ -1880,7 +1931,7 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.summary ?? "" },
       () => this.sessionTurns.compactSession(sessionId, this.withTimeZone(request))
-    ), sessionId));
+    ), sessionId), sessionId);
   }
 
   async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
@@ -1910,7 +1961,11 @@ export class MemoryService {
       signal ? AbortSignal.any([signal, this.budgetAbort.signal]) : this.budgetAbort.signal);
   }
 
-  private async acceptCapture<T>(execute: () => Promise<T>): Promise<T> {
+  private async acceptCapture<T>(execute: () => Promise<T>, sessionId?: string, source?: SourceTurnCompleteRequest["sourceTurn"]): Promise<T> {
+    // An accepted legacy command precedes live writes to its session. Unrelated sessions can write between commits.
+    if (this.legacyCaptureMigration && this.sessionTurns.hasLegacyCapturesFor(sessionId, source)) {
+      await this.legacyCaptureMigration;
+    }
     const result = await execute();
     this.capturePendingListener?.();
     return result;
@@ -1935,7 +1990,7 @@ export class MemoryService {
         }
       }), () => { recoveredEvolutionScheduled = true; }), signal
     ), request.sessionId ?? (request.sourceTurn
-      ? `${request.sourceTurn.source}:${request.sourceTurn.profileId}:${request.sourceTurn.conversationId}` : undefined)));
+      ? `${request.sourceTurn.source}:${request.sourceTurn.profileId}:${request.sourceTurn.conversationId}` : undefined)), request.sessionId, request.sourceTurn);
     // Full scans are an explicit recovery action. Hooks and incremental scans
     // must not repeatedly restart a terminal failure without user intervention.
     if (isExplicitHistoryRecovery(request) && response.status === "existing") {
@@ -1966,7 +2021,7 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: request.query, turnId },
       () => this.sessionTurns.completeTurn(turnId, this.withTimeZone(request)), signal
-    ), request.sessionId));
+    ), request.sessionId), request.sessionId);
   }
 
   async observeTool(input: ToolObserveRequest): Promise<{
@@ -1978,7 +2033,7 @@ export class MemoryService {
     syncCursor?: string;
     serverTime: string;
   }> {
-    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.observeTool(this.withTimeZone(input)), input.sessionId));
+    return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.observeTool(this.withTimeZone(input)), input.sessionId), input.sessionId);
   }
 
 
@@ -1994,14 +2049,14 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: input.task ?? "" },
       () => this.sessionTurns.subagentStart(this.withTimeZone(input))
-    ), input.sessionId));
+    ), input.sessionId), input.sessionId);
   }
 
   async subagentComplete(input: SubagentCompleteRequest): Promise<CompleteTurnResponse> {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: input.summary ?? "Subagent completed" },
       () => this.sessionTurns.subagentComplete(this.withTimeZone(input))
-    ), input.sessionId));
+    ), input.sessionId), input.sessionId);
   }
 
   async repairSuggestion(input: RepairSuggestionRequest): Promise<{
@@ -2890,7 +2945,7 @@ export class MemoryService {
     return this.acceptCapture(() => this.withModelTaskContext(() => this.sessionTurns.withEpisodeSelection(
       { userText: `Use skill ${skillId}` },
       () => this.skillReadModel.useSkill(skillId, this.withTimeZone(request))
-    )));
+    )), request.sessionId);
   }
 
   async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
@@ -3027,7 +3082,7 @@ export class MemoryService {
     const result = this.repos.runtime.importBundleTables(request.bundle.tables, {
       conflictStrategy: request.conflictStrategy ?? "skip"
     });
-    this.sessionTurns.migrateLegacyCaptures();
+    finishStartupSteps(this.sessionTurns.migrateLegacyCaptures());
     // Imported Sessions with turns not yet handed to the new L3 (including work the import had to
     // drop for a unit kept here) get their idle flush armed.
     this.armPendingL3Flushes();
@@ -3973,21 +4028,84 @@ export class MemoryService {
   }
 
   reconcileWorkerStartup(limit = 10000): ReturnType<WorkerRunner["reconcileWorkerStartup"]> {
+    const pageSize = Math.max(1, Math.min(limit, 32));
+    finishStartupSteps(this.sessionTurns.migrateLegacyCaptures());
     try {
-      // Existing source restrictions and deleted bodies still need repair when capture is disabled.
-      const migration = this.agentSkills.migrateLegacyRecords(nowIso(), limit);
-      this.repos.runtime.repairImportedSkillResponseCopies();
-      if (migration.migrated > 0) serviceLogger.info("agent_skill.legacy_migrated", migration);
-      if (this.memoryAddEnabled()) {
-        const upgraded = this.agentSkills.upgradeRetrievalRepresentation(limit);
-        if (upgraded > 0) serviceLogger.info("agent_skill.retrieval_text_upgraded", { upgraded });
-      }
+      finishStartupSteps(this.agentSkills.startupMaintenance(pageSize, () => this.memoryAddEnabled()));
     } catch (error) {
       serviceLogger.error("agent_skill.legacy_migration_failed", memoryErrorFields(error));
     }
-    const result = this.workerRunner.reconcileWorkerStartup(limit);
-    this.reconcileAutomaticHistorySkills(nowIso(), limit);
+    return finishStartupSteps(this.startupRecoverySteps(limit, pageSize, 1));
+  }
+
+  async reconcileWorkerStartupInBackground(signal: AbortSignal) {
+    if (this.legacyCaptureMigration) await this.legacyCaptureMigration;
+    signal.throwIfAborted();
+    const pageSize = 32;
+    // A managed SQLite backend can reopen its own file. An injected connection may
+    // be private to the caller (in-memory database, TEMP tables or local functions).
+    const path = this.options.backend?.sqlitePath;
+    const managedFile = path && path !== ":memory:" ? path : undefined;
+    const settings = () => ({
+      enableMemoryAdd: this.memoryAddEnabled(), embedAfterCapture: this.config.algorithm.capture.embedAfterCapture
+    });
+    try {
+      if (managedFile) {
+        await runMaintenanceWorker(managedFile, { type: "skills", pageSize }, signal, settings);
+      } else {
+        await runStartupSteps(this.agentSkills.startupMaintenance(pageSize, () => this.memoryAddEnabled()), signal);
+      }
+    } catch (error) {
+      signal.throwIfAborted();
+      serviceLogger.error("agent_skill.legacy_migration_failed", memoryErrorFields(error));
+    }
+    const policyWork = (at: string, limit: number) => managedFile
+      ? runMaintenanceWorker(managedFile, { type: "policies", at, limit }, signal, () => ({
+          ...settings(), algorithm: this.config.algorithm
+        }))
+      : runStartupSteps(this.policyEvidence.steps(at, limit, () => this.memoryAddEnabled()), signal);
+    return runStartupSteps(this.startupRecoverySteps(10_000, pageSize, 3, policyWork), signal);
+  }
+
+  private *startupRecoverySteps(limit: number, pageSize: number, recoveryAttempts: number,
+    policyWork?: (at: string, limit: number) => Promise<PolicyEvidenceRecovery>) {
+    let result: ReturnType<WorkerRunner["reconcileWorkerStartup"]>;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        result = yield* this.workerRunner.startupRecoverySteps(limit, policyWork);
+        break;
+      } catch (error) {
+        serviceLogger.error("worker.startup_recovery_failed", { attempt, ...memoryErrorFields(error) });
+        if (attempt >= recoveryAttempts) throw error;
+        yield;
+      }
+    }
+    try {
+      yield* this.reconcileStartupHistorySkills(limit, pageSize);
+    } catch (error) {
+      serviceLogger.error("agent_skill.history_recovery_failed", memoryErrorFields(error));
+    }
     return result;
+  }
+
+  private *reconcileStartupHistorySkills(limit: number, pageSize: number) {
+    if (!this.memoryAddEnabled()) return;
+    const at = nowIso();
+    let cursor = 0;
+    let remaining = limit;
+    while (remaining > 0) {
+      yield;
+      const page = this.repos.transaction(() => {
+        const rows = this.repos.memories.listStartupPage({
+          memoryLayer: "Skill", status: "resolving", tags: ["external-evidence-candidate"]
+        }, cursor, Math.min(pageSize, remaining));
+        for (const { memory } of rows) this.maybeActivateAutomaticHistorySkill(memory, at);
+        return rows;
+      });
+      if (!page.length) break;
+      cursor = page[page.length - 1]!.cursor;
+      remaining -= page.length;
+    }
   }
 
   async runWorkerOnce(
@@ -3998,6 +4116,8 @@ export class MemoryService {
     } = {},
     execution: WorkerRunExecution = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
+    if (this.beforeWorkerRun) await this.beforeWorkerRun();
+    if (this.legacyCaptureMigration) await this.legacyCaptureMigration;
     retryFtsRepairs(this.repos.db);
     return this.workerRunner.runWorkerOnce(limit, request, execution);
   }
@@ -4348,10 +4468,7 @@ export class MemoryService {
   }
 
   private traceMeta(memory: MemoryRow | undefined | null): TraceMeta | null {
-    if (!memory) return null;
-    const rawTurnId = rawTurnIdFromMemory(memory);
-    const rawTurn = rawTurnId ? this.repos.runtime.getRawTurn(rawTurnId) : undefined;
-    return traceMetaFromMemoryWithRaw(memory, rawTurn);
+    return traceMetaWithSource(this.repos, memory);
   }
 
   private requireEpisode(episodeId: string): EpisodeRecord {
@@ -4784,21 +4901,8 @@ function shouldReembedImportedVector(
   return embedding !== null && embedding !== undefined;
 }
 
-function namespaceIdFromMemory(memory: MemoryRow): string {
-  return namespaceIdFromContext(externalEvidenceNamespaceForMemory(memory));
-}
-
 function namespaceIdFromSession(session: SessionRecord): string {
   return namespaceIdFromContext(namespaceForSession(session));
-}
-
-function namespaceIdFromContext(namespace: RuntimeNamespace): string {
-  return [
-    namespace.tenantId,
-    namespace.projectId ?? namespace.workspaceId,
-    namespace.source,
-    namespace.profileId
-  ].filter(Boolean).join(":");
 }
 
 function scopeBundleTables(
@@ -4819,50 +4923,6 @@ function stringArray(value: unknown): string[] {
     .filter((item): item is string => typeof item === "string")
     .map((item) => item.trim())
     .filter(Boolean);
-}
-
-function traceMetaFromMemoryWithRaw(memory: MemoryRow, rawTurn?: RawTurnRecord): TraceMeta | null {
-  const trace = traceMetaFromMemory(memory);
-  if (!trace || !rawTurn) return trace;
-
-  const internalTrace = isRecord(memory.properties.internal_info.trace)
-    ? memory.properties.internal_info.trace
-    : {};
-  const rawSpan = isRecord(internalTrace.raw_span) ? internalTrace.raw_span : {};
-  const hasUserSpan = rawSpan.user_text === true;
-  const hasAgentSpan = rawSpan.agent_text === true;
-  const isRedacted = Boolean(rawTurn.redactedAt || rawTurn.deletedAt);
-
-  return {
-    ...trace,
-    toolCalls: isRedacted
-      ? trace.toolCalls
-      : rawTurn.toolCalls.filter(isToolCallPayload),
-    userText: isRedacted
-      ? (hasUserSpan ? "[REDACTED]" : trace.userText)
-      : (trace.userText || (hasUserSpan ? rawTurn.userText ?? "" : "")),
-    agentText: isRedacted
-      ? (hasAgentSpan ? "[REDACTED]" : trace.agentText)
-      : (trace.agentText || (hasAgentSpan ? rawTurn.assistantText ?? "" : ""))
-  };
-}
-
-function rawTurnIdFromMemory(memory: MemoryRow): string | undefined {
-  const sourceRawTurnId = memory.properties.internal_info.source_raw_turn_id;
-  if (typeof sourceRawTurnId === "string" && sourceRawTurnId) return sourceRawTurnId;
-  const rawTurnId = memory.properties.internal_info.raw_turn_id;
-  if (typeof rawTurnId === "string" && rawTurnId) return rawTurnId;
-  const trace = memory.properties.internal_info.trace;
-  return isRecord(trace) ? stringFromRecord(trace, "raw_turn_id") : undefined;
-}
-
-function stringFromRecord(record: Record<string, unknown>, key: string): string | undefined {
-  const value = record[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-function isToolCallPayload(value: unknown): value is ToolCallPayload {
-  return isRecord(value) && typeof value.name === "string";
 }
 
 function errorMessageFromUnknown(value: unknown): string | undefined {
