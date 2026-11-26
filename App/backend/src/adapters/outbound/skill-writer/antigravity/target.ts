@@ -7,7 +7,6 @@ import {
 } from "@memmy/agent-source-core";
 import { createNodeHookCommand } from "../hook-command.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
-import { pathExists, removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmyResumeHookScript } from "../templates/memmy-resume-hook.js";
 import { renderMemmyResumeSkillFile } from "../templates/memmy-skill-directory.js";
@@ -42,16 +41,6 @@ export function createAntigravitySkillTarget(options: {
     ...createAntigravityProjectIntegration({ root, memmyConfigPath, hookCommand, resolveRootDirectory: plugin.resolveRootDirectory }),
     targetId,
     displayName: "Antigravity",
-    pluginUninstallIncludesSkills: true,
-    isMemoryHookInstalled: plugin.isPluginInstalled,
-    async install(manifest) {
-      await replaceMemmySkillDirectory(root, manifest);
-    },
-    async uninstall() {
-      await removeMemmySkillDirectory(root);
-    },
-    async isInstalled() {
-      return await plugin.isInstalled() || await pathExists(join(root, "skills", "memmy-memory", "SKILL.md"));
-    }
+    isMemoryHookInstalled: plugin.isPluginInstalled
   };
 }

@@ -23,6 +23,8 @@ export interface SkillTarget {
   install(manifest: SkillManifest): Promise<void>;
   uninstall(targetId: string): Promise<void>;
   isInstalled(targetId: string): Promise<boolean>;
+  /** Targets that independently own their standalone skill use install() to refresh just that skill. */
+  isStandaloneSkillInstalled?(): Promise<boolean>;
   /** Older CLI instructions also establish an existing integration for rollback. */
   isLegacySkillInstalled?(): Promise<boolean>;
   /** Detects any installed plugin version without requiring current contents. */

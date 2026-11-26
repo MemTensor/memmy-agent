@@ -1,5 +1,6 @@
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, rmdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { antigravityDirectoryState } from "@memmy/agent-source-core";
 import {
   PROJECT_HOOK_SCRIPT_FILE_NAME,
   installProjectHookBundle,
@@ -25,7 +26,8 @@ export function createAntigravityProjectIntegration(input: {
   resolveRootDirectory(): Promise<string | null>;
   hookCommand(path: string): string;
 }) {
-  const plugin = join(input.root, "plugins", PROJECT_PLUGIN_ID);
+  const plugins = join(input.root, "plugins");
+  const plugin = join(plugins, PROJECT_PLUGIN_ID);
   const manifestPath = join(plugin, "plugin.json");
   const manifest = JSON.stringify({
     name: PROJECT_PLUGIN_ID,
@@ -52,8 +54,14 @@ export function createAntigravityProjectIntegration(input: {
   const rulePath = join(input.root, "rules", "memmy-project-activation.md");
   const bootstrap = { skillFilePath: join(input.root, "skills", "memmy-project", "SKILL.md") };
 
-  async function ownsPlugin(): Promise<boolean> {
-    const contents = await readOptional(manifestPath);
+  async function readLocalManifest(): Promise<string | undefined> {
+    const state = await antigravityDirectoryState(plugins, PROJECT_PLUGIN_ID);
+    if (state === "missing") return undefined;
+    if (state === "unmanaged" || !(await lstat(manifestPath).catch(missing))?.isFile()) return "";
+    return readOptional(manifestPath);
+  }
+
+  function ownsPlugin(contents: string | undefined): boolean {
     if (!contents) return false;
     try {
       const value = JSON.parse(contents);
@@ -80,17 +88,15 @@ export function createAntigravityProjectIntegration(input: {
     },
     async installProjectHook() {
       if (!await input.resolveRootDirectory()) throw new Error("Antigravity App is unavailable");
-      const current = await lstat(plugin).catch(missing);
-      if (current && (!current.isDirectory() || !await ownsPlugin())) {
-        throw new Error("The Antigravity project plugin directory is already in use");
-      }
-      if (current) {
+      const current = await readLocalManifest();
+      if (current !== undefined) {
+        if (!ownsPlugin(current)) throw new Error("The Antigravity project plugin directory is already in use");
         await installProjectHookBundle(plugin, bundle);
         await writeFileAtomically(hooksPath, hooks);
         await writeFileAtomically(manifestPath, manifest);
         return;
       }
-      await mkdir(dirname(plugin), { recursive: true });
+      await mkdir(plugins, { recursive: true });
       const staging = await mkdtemp(join(input.root, ".memmy-project-install-"));
       try {
         await installProjectHookBundle(staging, bundle);
@@ -102,17 +108,17 @@ export function createAntigravityProjectIntegration(input: {
       }
     },
     async uninstallProjectHook() {
-      if (!await ownsPlugin()) return;
+      if (!ownsPlugin(await readLocalManifest())) return;
       await rm(hooksPath, { force: true });
       await removeProjectHookBundle(plugin);
       await rm(manifestPath, { force: true });
       await rmdir(plugin).catch(() => undefined);
     },
     async isProjectHookInstalled() {
-      return await ownsPlugin() && !!await readOptional(hooksPath) && await isProjectHookBundleInstalled(plugin);
+      return ownsPlugin(await readLocalManifest()) && !!await readOptional(hooksPath) && await isProjectHookBundleInstalled(plugin);
     },
     async isProjectHookCurrent() {
-      return await readOptional(manifestPath) === manifest
+      return await readLocalManifest() === manifest
         && await readOptional(hooksPath) === hooks
         && await isInstalledProjectHookCurrent(plugin, bundle);
     }

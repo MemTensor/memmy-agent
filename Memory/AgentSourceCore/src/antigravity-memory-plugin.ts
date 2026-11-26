@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   ANTIGRAVITY_FULL_TRANSCRIPT_NAME,
@@ -42,6 +42,9 @@ interface AntigravityMemoryPluginOptions {
 export function createAntigravityMemoryPlugin(options: AntigravityMemoryPluginOptions) {
   const plugins = join(options.configDirectory, "plugins");
   const directory = join(plugins, PLUGIN_ID);
+  const skills = join(options.configDirectory, "skills");
+  const standaloneDirectory = join(skills, PLUGIN_ID);
+  const standaloneFile = join(standaloneDirectory, "SKILL.md");
   const manifest = json({
     name: PLUGIN_ID,
     displayName: "Memmy Memory",
@@ -62,11 +65,27 @@ export function createAntigravityMemoryPlugin(options: AntigravityMemoryPluginOp
     + options.skillContent + "\n";
 
   async function isPluginInstalled(): Promise<boolean> {
-    const target = await lstat(directory).catch(ignoreMissingPath);
-    return target?.isDirectory() === true && (await optionalText(join(directory, HOOK_FILE)))?.startsWith(HOOK_HEADER) === true;
+    if (await antigravityDirectoryState(plugins, PLUGIN_ID) !== "directory") return false;
+    const hookFile = join(directory, HOOK_FILE);
+    return (await lstat(hookFile).catch(ignoreMissingPath))?.isFile() === true
+      && (await optionalText(hookFile))?.startsWith(HOOK_HEADER) === true;
   }
 
-  async function isInstalled(): Promise<boolean> {
+  async function standaloneSkillState(): Promise<"missing" | "owned" | "unmanaged"> {
+    const directoryState = await antigravityDirectoryState(skills, PLUGIN_ID);
+    if (directoryState !== "directory") return directoryState;
+    const file = await lstat(standaloneFile).catch(ignoreMissingPath);
+    if (!file) return "missing";
+    if (!file.isFile()) return "unmanaged";
+    const content = await optionalText(standaloneFile);
+    return content?.replaceAll("\r\n", "\n").startsWith(STANDALONE_SKILL_HEADER) ? "owned" : "unmanaged";
+  }
+
+  async function isStandaloneSkillInstalled(): Promise<boolean> {
+    return await standaloneSkillState() === "owned";
+  }
+
+  async function isPluginComplete(): Promise<boolean> {
     if (!await isPluginInstalled()) return false;
     const files = await Promise.all(["plugin.json", "hooks.json", BRIDGE_FILE, CONFIG_FILE, LOGO_FILE, SKILL_FILE, RESUME_SKILL, RESUME_HOOK]
       .map((file) => stat(join(directory, file)).catch(ignoreMissingPath)));
@@ -79,11 +98,37 @@ export function createAntigravityMemoryPlugin(options: AntigravityMemoryPluginOp
 
   return {
     resolveRootDirectory,
-    isInstalled,
+    async isInstalled() {
+      return await isPluginComplete() || await isStandaloneSkillInstalled();
+    },
     isPluginInstalled,
+    isStandaloneSkillInstalled,
+    async install(manifest: { content: string }) {
+      if (await standaloneSkillState() === "unmanaged") {
+        throw new Error("The Antigravity memmy-memory skill directory is already in use");
+      }
+      await mkdir(standaloneDirectory, { recursive: true });
+      const staging = await mkdtemp(join(options.configDirectory, ".memmy-skill-"));
+      try {
+        const file = join(staging, "SKILL.md");
+        await writeFile(file, STANDALONE_SKILL_HEADER + "\n" + manifest.content.trimEnd() + "\n");
+        await rename(file, standaloneFile);
+      } finally {
+        await rm(staging, { recursive: true, force: true });
+      }
+    },
+
+    async uninstall() {
+      if (!await isStandaloneSkillInstalled()) return;
+      await rm(standaloneFile, { force: true });
+      // Users may keep other files alongside the generated skill.
+      await rmdir(standaloneDirectory).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY" && error.code !== "EEXIST") throw error;
+      });
+    },
 
     async isInstalledHookCurrent() {
-      if (!await isInstalled()) return false;
+      if (!await isPluginComplete()) return false;
       const files = await Promise.all(["plugin.json", "hooks.json", HOOK_FILE, BRIDGE_FILE, SKILL_FILE, RESUME_SKILL, RESUME_HOOK]
         .map((file) => optionalText(join(directory, file))));
       const logo = await readFile(join(directory, LOGO_FILE)).catch(ignoreMissingPath);
@@ -95,8 +140,8 @@ export function createAntigravityMemoryPlugin(options: AntigravityMemoryPluginOp
 
     async installPlugin() {
       if (!await resolveRootDirectory()) throw new Error("Antigravity App is unavailable");
-      const existing = await lstat(directory).catch(ignoreMissingPath);
-      if (existing && !await isPluginInstalled()) throw new Error("The Antigravity memmy-memory plugin directory is already in use");
+      const existing = await antigravityDirectoryState(plugins, PLUGIN_ID);
+      if (existing !== "missing" && !await isPluginInstalled()) throw new Error("The Antigravity memmy-memory plugin directory is already in use");
       const [bridge, config, logo] = await Promise.all([options.loadBridge(), options.loadConfig(), options.loadLogo()]);
       await mkdir(plugins, { recursive: true });
       // Stage outside plugins, so Antigravity can only discover a complete plugin.
@@ -119,7 +164,7 @@ export function createAntigravityMemoryPlugin(options: AntigravityMemoryPluginOp
           writeFile(join(pending, RESUME_HOOK), options.resumeHook),
           writeFile(join(pending, CONFIG_FILE), json(config), { mode: 0o600 })
         ]);
-        if (existing) {
+        if (existing === "directory") {
           await rename(directory, previous);
           keepPrevious = true;
         }
@@ -144,6 +189,16 @@ export function createAntigravityMemoryPlugin(options: AntigravityMemoryPluginOp
   };
 }
 
+/** The configured root is authoritative. Links below it belong to their external manager. */
+export async function antigravityDirectoryState(collection: string, name: string): Promise<"missing" | "directory" | "unmanaged"> {
+  const parent = await lstat(collection).catch(ignoreMissingPath);
+  if (!parent) return "missing";
+  if (!parent.isDirectory()) return "unmanaged";
+  const child = await lstat(join(collection, name)).catch(ignoreMissingPath);
+  if (!child) return "missing";
+  return child.isDirectory() ? "directory" : "unmanaged";
+}
+
 function json(value: object): string {
   return JSON.stringify(value, null, 2) + "\n";
 }
@@ -157,6 +212,8 @@ function ignoreMissingPath(error: unknown): undefined {
   throw error;
 }
 
+// Keep the frontmatter shared by existing backend and Memory installations.
+const STANDALONE_SKILL_HEADER = "---\nname: memmy-memory\ndescription: Use shared Memmy memory when prior context may be relevant.\n---\n";
 const HOOK_HEADER = "// Memmy-owned Antigravity memory hook\n";
 function renderHook(): string {
   return HOOK_HEADER + String.raw`import { basename, dirname, isAbsolute } from "node:path";

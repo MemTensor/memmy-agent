@@ -128,7 +128,9 @@ export async function readSkillInstallationState(
   const root = await target.resolveRootDirectory();
   const skillInstalled = await target.isInstalled(sourceId)
     || (await target.isLegacySkillInstalled?.() ?? false)
-    || (root !== null && await pathExists(join(root, "skills", "memmy-memory", "SKILL.md")));
+    || (target.isStandaloneSkillInstalled
+      ? await target.isStandaloneSkillInstalled()
+      : root !== null && await pathExists(join(root, "skills", "memmy-memory", "SKILL.md")));
   let pluginInstalled: boolean | undefined = target.installPlugin ? undefined : false;
   if (target.isPluginInstalled) {
     try {
@@ -154,6 +156,8 @@ export async function rollbackSkillInstallation(
   }
   if (before.pluginInstalled !== false) return;
   await target.uninstallPlugin?.(sourceId);
+  // A separately managed skill can survive a plugin-only rollback byte for byte.
+  if (before.skillInstalled && await target.isStandaloneSkillInstalled?.()) return;
   if (!target.pluginUninstallIncludesSkills) await target.uninstall(sourceId);
   if (before.skillInstalled) await target.install(renderMemmyDefaultSkillManifest(sourceId));
 }

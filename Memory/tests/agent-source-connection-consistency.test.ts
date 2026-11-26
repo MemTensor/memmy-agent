@@ -15,6 +15,8 @@ import { Repositories } from "../src/storage/repositories.js";
 import { agentSkillConnectionKey } from "../src/storage/imported-skill.js";
 import { withLegacyImportedSkillWriter } from "./fixtures/legacy-imported-skill-writer.js";
 
+import { routeViewerRequest } from "../src/server/viewer-api.js";
+import { createAntigravitySkillTarget } from "../src/agent-source/integration/antigravity/target.js";
 import { createClaudeCodeSkillTarget } from "../src/agent-source/integration/claude-code/index.js";
 import { createCursorSkillTarget } from "../src/agent-source/integration/cursor/index.js";
 import { createOpencodeSkillTarget } from "../src/agent-source/integration/opencode/index.js";
@@ -62,9 +64,9 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-function harness(kind: "skill" | "plugin", legacySource?: "codex" | "claude_code" | "opencode" | "openclaw" | "hermes") {
+function harness(kind: "skill" | "plugin", sourceOverride?: "antigravity" | "codex" | "claude_code" | "opencode" | "openclaw" | "hermes") {
   const root = fixture.createTestRoot("pr780-connection-consistency-");
-  const sourceId = legacySource ?? (kind === "plugin" ? "codex" : "workbuddy");
+  const sourceId = sourceOverride ?? (kind === "plugin" ? "codex" : "workbuddy");
   const agentRoot = join(root, `.${sourceId}`);
   const configPath = join(root, "config.yaml");
   const statePath = join(root, "agent-sources.json");
@@ -76,6 +78,7 @@ function harness(kind: "skill" | "plugin", legacySource?: "codex" | "claude_code
   const inputs: string[] = [];
   const { db, service } = fixture.createTestService({ llm: createFailingLlm(), embedder: createCapturingEmbedder(inputs) });
   const target = sourceId === "workbuddy" ? createWorkbuddySkillTarget({ rootDirectory: agentRoot })
+    : sourceId === "antigravity" ? createAntigravitySkillTarget({ appDirectory: agentRoot, rootDirectory: agentRoot, memmyConfigPath: configPath })
     : sourceId === "hermes" ? createHermesSkillTarget({ rootDirectory: agentRoot, memmyConfigPath: configPath })
     : sourceId === "claude_code" ? createClaudeCodeSkillTarget({ rootDirectory: agentRoot, memmyConfigPath: configPath })
     : sourceId === "opencode" ? createOpencodeSkillTarget({ rootDirectory: agentRoot, memmyConfigPath: configPath })
@@ -108,6 +111,32 @@ function harness(kind: "skill" | "plugin", legacySource?: "codex" | "claude_code
   const status = async () => (await executor.list()).sources.find((source) => source.sourceId === sourceId)!.status;
   return { root, agentRoot, sourceId, statePath, configPath, db, service, target, executor, scan, status, inputs, restartExecutor };
 }
+
+describe("Antigravity Viewer connection lifecycle", () => {
+  it("restores the standalone skill on failed conversion and disconnects both installations", async () => {
+    const h = harness("plugin", "antigravity");
+    const context = { agentSources: h.executor, service: h.service, routes: [], scheduleWorker() {} };
+    const url = (suffix: string) => new URL("/api/v1/agent-sources" + suffix, "http://localhost");
+    const route = (method: string, suffix: string) => routeViewerRequest(context, method, url(suffix), undefined);
+    const skillFile = join(h.agentRoot, "skills", "memmy-memory", "SKILL.md");
+
+    await route("POST", "/antigravity/skill");
+    const previous = readFileSync(skillFile, "utf8") + "\nLocal instructions.\n";
+    writeFileSync(skillFile, previous);
+    vi.spyOn(h.service, "reconcileAgentSkills").mockImplementationOnce(() => { throw new Error("fixture notification failed"); });
+    await expect(route("POST", "/antigravity/plugin")).rejects.toThrow("fixture notification failed");
+    expect(await h.target.isPluginInstalled!()).toBe(false);
+    expect(readFileSync(skillFile, "utf8")).toBe(previous);
+
+    await route("POST", "/antigravity/plugin");
+    expect(await h.target.isPluginInstalled!()).toBe(true);
+    await route("DELETE", "/antigravity/plugin");
+    expect(existsSync(skillFile)).toBe(false);
+    expect(await h.target.isPluginInstalled!()).toBe(false);
+    expect(await route("GET", "")).toMatchObject({ body: { sources: [{ sourceId: "antigravity", status: "not_connected" }] } });
+    expect(existsSync(join(h.agentRoot, "skills", "deploy-helper", "SKILL.md"))).toBe(true);
+  });
+});
 
 describe("Memory disconnection keeps failed integration cleanup retryable", () => {
   it.each((["skill", "plugin"] as const).flatMap(kind => [false, true].map(notificationFails => ({ kind, notificationFails }))))(

@@ -225,7 +225,8 @@ export function createSkillDistributionService(
       const root = await target.resolveRootDirectory();
       if (!root) return false;
 
-      // A skill on disk is what Memmy installed before; only its variant is inferred from its own text.
+      if (target.isStandaloneSkillInstalled && !await target.isStandaloneSkillInstalled()) return false;
+      // Infer the installed variant from the skill text.
       const installed = await readInstalledSkillKind(root);
       if (!installed) return false;
       const kind = mode ?? installed;
@@ -242,6 +243,7 @@ export function createSkillDistributionService(
 
       if (!memoryCurrent) {
         if (kind === "plugin") await target.installPlugin!(sourceId);
+        else if (target.isStandaloneSkillInstalled) await target.install(manifest);
         // Skill-only agents get the skill directory alone: their instructions file must not gain memory guidance.
         else await replaceMemmySkillDirectory(root, manifest);
       }
