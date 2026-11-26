@@ -166,8 +166,10 @@ function reconnectHarness(options: { alarms?: Map<string, Record<string, unknown
   const save = vi.fn(async (value: Record<string, unknown>) => {
     Object.assign(saved, value); options.onSave?.();
   });
+  type RuntimeListener = (message: object, sender: object, respond: (value: unknown) => void) => unknown;
+  const runtimeListeners: RuntimeListener[] = [];
   const chrome = {
-    runtime: { id: "extension-id", onMessage: events, reload, getURL: (file: string) => `chrome-extension://id/${file}`,
+    runtime: { id: "extension-id", onMessage: { addListener(listener: RuntimeListener) { runtimeListeners.push(listener); } }, reload, getURL: (file: string) => `chrome-extension://id/${file}`,
       onStartup: { addListener(listener: typeof onStartup) { onStartup = listener; } },
       onInstalled: { addListener(listener: typeof onInstalled) { onInstalled = listener; } } },
     storage: { local: { get: async () => {
@@ -196,7 +198,7 @@ function reconnectHarness(options: { alarms?: Map<string, Record<string, unknown
       if (options.historyInitializeFailure) vm.runInContext("installMemmyBrowserHistoryBackground = () => { throw new Error('Simulated History init failure'); }", context);
     } });
   vm.runInContext(fs.readFileSync(path.join(extension, "background.js"), "utf8"), context);
-  return { context, alarms, saved, save, reload, createAlarm, sockets, sent,
+  return { context, runtimeListeners, alarms, saved, save, reload, createAlarm, sockets, sent,
     fireAlarm: (name = "memmy-reconnect") => onAlarm({ name }),
     fireStartup: () => onStartup(), fireInstalled: () => onInstalled(),
     fireFocus: () => focusListeners.forEach(listener => listener()),
@@ -210,6 +212,33 @@ function reconnectHarness(options: { alarms?: Map<string, Record<string, unknown
 }
 
 describe("external browser connection recovery", () => {
+  it("routes History messages to their async listener and popup actions to their own responder", async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtimeListeners } = reconnectHarness();
+      expect(runtimeListeners).toHaveLength(2);
+      const dispatch = (message: object) => {
+        const respond = vi.fn();
+        const channels = runtimeListeners.map(listener => listener(message, { id: "extension-id" }, respond));
+        return { respond, channels };
+      };
+      // Chrome takes the first reply. With History off, its listener still owns
+      // both messages and replies asynchronously with the corresponding denial.
+      for (const [type, reply] of [
+        ["memmy_history_config", { enabled: false, idle: true }],
+        ["memmy_history_event", { accepted: false }],
+      ] as const) {
+        const { respond, channels } = dispatch({ type });
+        expect(respond).not.toHaveBeenCalled();
+        expect(channels.filter(channel => channel === true)).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(respond.mock.calls).toEqual([[reply]]);
+      }
+      expect(dispatch({ action: "status" }).respond.mock.calls).toEqual([[expect.objectContaining({ ok: true })]]);
+      expect(dispatch({ action: "unclaim" }).respond.mock.calls).toEqual([[{ ok: false, error: "Invalid tab" }]]);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
   it.each(["chrome", "edge"] as const)("wakes %s on profile startup and repairs a missing alarm", async browser => {
     vi.useFakeTimers();
     try {
@@ -550,7 +579,7 @@ describe("external browser page discovery", () => {
     try {
       const test = discoveryHarness({ browser, boot: true });
       await vi.advanceTimersByTimeAsync(0);
-      expect(test.sent).toContainEqual({ type: "hello", browser, extensionVersion: "1.0.12", capabilities: ["openTab", "playwright", "browserHistory"] });
+      expect(test.sent).toContainEqual({ type: "hello", browser, extensionVersion: "1.0.13", capabilities: ["openTab", "playwright", "browserHistory"] });
       expect(test.attaches).toEqual([]);
       expect(test.sent).toContainEqual(expect.objectContaining({ type: "claim", browser, tabId: 7 }));
       expect((await test.message({ action: "status" })).controllableTabCount).toBe(1);
@@ -905,7 +934,7 @@ describe("Chrome and Edge extension packaging", () => {
   it("uses a deterministic browser ID and limits extension privileges", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(extension, "manifest.json"), "utf8"));
     expect(manifest.manifest_version).toBe(3);
-    expect(manifest.version).toBe("1.0.12");
+    expect(manifest.version).toBe("1.0.13");
     const id = [...createHash("sha256").update(Buffer.from(manifest.key, "base64"))
       .digest().subarray(0, 16)].flatMap(value => [value >> 4, value & 15])
       .map(value => String.fromCharCode(97 + value)).join("");

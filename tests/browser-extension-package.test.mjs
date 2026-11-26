@@ -17,7 +17,7 @@ afterEach(() => { for (const directory of temporary.splice(0)) fs.rmSync(directo
 describe("packaged browser extension provenance", () => {
   it("records the frozen version and hashes of new History assets", () => {
     const result = verifyBrowserExtension(source, fixture());
-    expect(result.version).toBe("1.0.12");
+    expect(result.version).toBe("1.0.13");
     for (const file of ["browser-history-background.js", "history-sensor.js", "history-content.js"])
       expect(result.files[file]).toMatch(/^[a-f0-9]{64}$/u);
   });
