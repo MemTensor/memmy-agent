@@ -1709,7 +1709,7 @@ export class MemoryRepository {
     if (filter.panelSource && filter.panelVisible &&
         Object.entries(filter).every(([key, value]) => value === undefined || cachedKeys.has(key))) {
       ensurePanelCache(this.db, ["memories"]);
-      const clauses = [visibleFactSql("f")];
+      const clauses = [visibleFactSql("f", filter.memoryLayer === "Skill")];
       const params: SqlValue[] = [];
       const search = query?.trim() ? buildMemorySearchWhere(query, true) : undefined;
       for (const [column, value] of [
@@ -9455,7 +9455,7 @@ function buildMemoryWhere(filter: MemoryFilter, db: Database.Database): { where:
     ...(includesSkillLayer ? [NOT_PLUGIN_REGISTRATION_SQL] : [])
   ];
   const params: SqlValue[] = [];
-  if (filter.panelVisible) clauses.push(panelVisibleMemorySql());
+  if (filter.panelVisible) clauses.push(panelVisibleMemorySql(filter.memoryLayer === "Skill"));
 
   // userId is legacy provenance, never a local read boundary.
   addValueClause("session_id", filter.sessionId);

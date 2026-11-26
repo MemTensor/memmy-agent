@@ -210,6 +210,38 @@ describe("agent skill reconcile", () => {
     expect(rows(db, "shared")[0]).toMatchObject({ status: "activated", reason: null, memory_value: "Shared body." });
   });
 
+  it("omits invocation-policy archives only from Skill list pages and their search results", async () => {
+    const { db, service } = createTestService();
+    const visible = Array.from({ length: 20 }, (_, i) => skill(`visible-${i}`, `Instructions ${i}`));
+    service.reconcileAgentSkills({
+      namespace, sourceAgentId: "codex", complete: true,
+      skills: [...visible, skill("explicit-only", "Manual invocation", { allowImplicitInvocation: false })]
+    });
+    const hidden = rows(db, "explicit-only")[0]!;
+    const userArchive = rows(db, "visible-0")[0]!;
+    service.archiveMemory(userArchive.id, { namespace });
+
+    const filter = { layer: "Skill" as const };
+    const page = service.panelItems({ ...filter, namespace, page: 2 });
+    expect(page).toMatchObject({ total: 20, totalPages: 1, page: 1, hasNext: false });
+    expect(page.items).toHaveLength(20);
+    expect(page.items.map(item => item.id)).not.toContain(hidden.id);
+    expect(page.items).toContainEqual(expect.objectContaining({ id: userArchive.id, status: "archived" }));
+
+    const view = await service.browsePanel({ op: "create", filter }, { namespace });
+    expect(view).toMatchObject({ total: 20, totalPages: 1, hasNext: false });
+    if (!("items" in view)) throw new Error("Expected a Skill list");
+    expect(view.items?.map(item => item.id)).toEqual(page.items.map(item => item.id));
+
+    const search = { ...filter, status: "archived" as const, q: hidden.id };
+    expect(service.panelItems({ ...search, namespace })).toMatchObject({ total: 0, items: [] });
+    expect(await service.browsePanel({ op: "create", filter: search }, { namespace }))
+      .toMatchObject({ total: 0, items: [] });
+    expect(service.panelOverviewSummary().counts.skills).toBe(21);
+    expect(service.getMemory(hidden.id, { namespace })).toMatchObject({ id: hidden.id, status: "archived" });
+    expect(rows(db, "explicit-only")[0]).toEqual(hidden);
+  });
+
   it("records enabled plugin skills as identity-only registrations", () => {
     const { db, service } = createTestService();
     const result = service.reconcileAgentSkills({

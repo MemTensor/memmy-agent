@@ -203,18 +203,22 @@ export function panelLogIdsPending(db: Database.Database, ids: readonly number[]
 }
 /** Shared management predicate. Source state is read live through its primary key;
  * only the declared source pointer is cached, so raw privacy changes need no JSON scan. */
-export function visibleFactSql(fact: string): string {
-  return `${fact}.status!='deleted' AND (${fact}.raw_id IS NULL OR EXISTS(
+export function visibleFactSql(fact: string, skillList = false): string {
+  const visible = `${fact}.status!='deleted' AND (${fact}.raw_id IS NULL OR EXISTS(
     SELECT 1 FROM raw_turns r WHERE r.id=${fact}.raw_id AND r.deleted_at IS NULL AND r.redacted_at IS NULL
       AND (${fact}.session_id IS NULL OR ${fact}.session_id=r.session_id)))`;
+  if (!skillList) return visible;
+  return `${visible} AND NOT EXISTS (
+    SELECT 1 FROM memories skill WHERE skill.id=${fact}.id
+      AND json_extract(skill.properties_json,'$.internal_info.archive_reason')='invocation_policy')`;
 }
-export function panelVisibleMemorySql(memory = "memories"): string {
-  return `EXISTS(SELECT 1 FROM panel_memory_facts panel_fact WHERE panel_fact.id=${memory}.id AND ${visibleFactSql("panel_fact")})`;
+export function panelVisibleMemorySql(skillList = false): string {
+  return `EXISTS(SELECT 1 FROM panel_memory_facts panel_fact WHERE panel_fact.id=memories.id AND ${visibleFactSql("panel_fact", skillList)})`;
 }
-export function panelVisibleMemoryIds(db: Database.Database, ids: readonly string[]): Set<string> {
+export function panelVisibleMemoryIds(db: Database.Database, ids: readonly string[], skillList = false): Set<string> {
   ensurePanelCache(db,["memories"]);
   if (!ids.length) return new Set();
-  return new Set(db.prepare(`SELECT f.id FROM panel_memory_facts f WHERE f.id IN(SELECT value FROM json_each(?)) AND ${visibleFactSql("f")}`)
+  return new Set(db.prepare(`SELECT f.id FROM panel_memory_facts f WHERE f.id IN(SELECT value FROM json_each(?)) AND ${visibleFactSql("f", skillList)}`)
     .pluck().all(JSON.stringify(ids)) as string[]);
 }
 export function* panelMemoryStats(db: Database.Database, prepared = false): IterableIterator<MemoryStatsRow> {
