@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { registerProjectMemoryRoutes } from "../../../adapters/inbound/local-api/routes/project-memory.js";
 import { ProjectMemoryService } from "../service.js";
 
-const migration = ["0031-project-memory.sql", "0032-project-memory-workspace-roots.sql"]
+const migration = ["0031-project-memory.sql", "0032-project-memory-workspace-roots.sql", "0033-project-memory-references.sql"]
   .map(name => readFileSync(new URL("../../../infrastructure/app-state-store/migrations/" + name, import.meta.url), "utf8")).join("\n");
 const origin = { source: "codex", conversation_id: "s", cwd: "/work/repo/src" };
 const query = { ...origin, turn_id: "t", query: "409" };
@@ -18,7 +18,7 @@ beforeEach(() => {
   db.exec("CREATE TABLE app_settings(active_uuid TEXT);" + migration);
   account = "alice";
   gateway.mockReset().mockImplementation(async (_auth, _method, path, body) => {
-    if (path === "search") return { topics: [...body.project_ids, "foreign"].map(id => ({ project_id: id, id })) };
+    if (path === "search") return { project_item_list: [...body.project_ids, "foreign"].map(id => ({ project_id: id, id })) };
     if (path === "index") return { projects: body.project_ids.map(id => ({ project_id: id, topics: [] })) };
     if (path === "add") return { status: "running", task_id: "task-" + body.project_ids[0] };
     return {};
@@ -37,7 +37,7 @@ it.each(["memmy-agent", "codex", "hermes", "claude-code"])("pins %s to its launc
   bind("A"); bind("B", ["/work/repo/src"]); bind("C", ["/work/repo-old"]);
   const response = await post("search", { ...query, source, include_index: true });
   expect(response.statusCode).toBe(200);
-  expect(response.json().topics.map(t => t.id)).toEqual(["A", "B"]);
+  expect(response.json().project_item_list.map(t => t.id)).toEqual(["A", "B"]);
   expect(response.json().projects).toHaveLength(2);
   expect(gateway.mock.calls.every(call => !JSON.stringify(call[3]).includes("/work"))).toBe(true);
   bind("D"); bind("B", []);
@@ -48,22 +48,22 @@ it.each(["memmy-agent", "codex", "hermes", "claude-code"])("pins %s to its launc
   expect(writes).toHaveLength(1);
   expect(writes[0]![3].messages[1]).toMatchObject({ content: "Fixed", message_id: expect.any(String), chat_time: expect.any(String) });
   expect((await post("add", { ...body, messages: [{ role: "user", content: "different" }] })).statusCode).toBe(409);
-  expect((await post("search", { ...query, source, cwd: "/work/repo-old", turn_id: "next" })).json().topics.map(t => t.id)).toEqual(["A","D"]);
+  expect((await post("search", { ...query, source, cwd: "/work/repo-old", turn_id: "next" })).json().project_item_list.map(t => t.id)).toEqual(["A","D"]);
 });
 
 it("isolates accounts, unbound folders and workspaces, including a binding removed while reading", async () => {
   bind("A"); bind("B", [], ["ws"]);
   for (const cwd of ["/work/repo-old", undefined]) {
     const session = { ...query, conversation_id: String(cwd), cwd };
-    expect((await post("search", session)).json().topics).toEqual([]);
+    expect((await post("search", session)).json().project_item_list).toEqual([]);
     expect((await post("add", { ...add, ...session, query: undefined })).json().submissions).toEqual([]);
   }
   expect(gateway).not.toHaveBeenCalled();
-  expect((await post("search", { ...query, workspace_id: "ws" })).json().topics).toHaveLength(2);
-  gateway.mockImplementationOnce(async () => { bind("A", []); return { topics: [{ project_id: "A", id: "private" }] }; });
-  expect((await post("search", query)).json().topics).toEqual([]);
+  expect((await post("search", { ...query, workspace_id: "ws" })).json().project_item_list).toHaveLength(2);
+  gateway.mockImplementationOnce(async () => { bind("A", []); return { project_item_list: [{ project_id: "A", id: "private" }] }; });
+  expect((await post("search", query)).json().project_item_list).toEqual([]);
   account = "bob";
-  expect((await post("search", query)).json().topics).toEqual([]);
+  expect((await post("search", query)).json().project_item_list).toEqual([]);
   account = null;
   expect((await post("search", query)).statusCode).toBe(401);
   expect((await app.inject({ url: "/api/project-memory/bindings?project_id=A" })).statusCode).toBe(401);
@@ -79,7 +79,7 @@ it("accepts a startup folder on the first prompt and keeps that scope on later p
     await post("sessions/open", s);
     await post("search", { ...query, ...s, cwd: firstFolder });
     const later = await post("search", { ...query, ...s, cwd: laterFolder, turn_id: "next" });
-    expect(later.json().topics.map(t => t.id)).toEqual(expected);
+    expect(later.json().project_item_list.map(t => t.id)).toEqual(expected);
   }
 });
 
@@ -135,9 +135,47 @@ it("retains readable projects when the gateway denies a multi-project batch", as
   bind("A"); bind("B");
   gateway.mockImplementation(async (_a,_m,_p,b) => {
     if (b.project_ids.includes("B")) throw Object.assign(new Error("private"), { code: "forbidden" });
-    return { topics: [{ id: "1", project_id: "A" }] };
+    return { project_item_list: [{ id: "1", project_id: "A" }] };
   });
   const result = (await post("search", query)).json();
-  expect(result.topics).toEqual([{ id: "1", project_id: "A" }]);
+  expect(result.project_item_list).toEqual([{ id: "1", project_id: "A" }]);
   expect(result.degraded).toEqual([{ project_id: "B", code: "forbidden" }]);
+});
+
+it("reads evidence from its source conversation and reports ambiguous bare references", async () => {
+  bind("A");
+  const hit = { project_id: "A", id: "msg_7", message_id: "msg_7", role: "tool", conversation_id: "source-1" };
+  gateway.mockResolvedValueOnce({ project_item_list: [hit] });
+  await post("search", query);
+  gateway.mockResolvedValueOnce({ project_id: "A", memory_id: hit.id, kind: "message", content: hit });
+  const target = { ...origin, turn_id: query.turn_id, project_id: "A", memory_id: hit.id };
+  expect((await post("read", target)).json().content).toEqual(hit);
+  const params = new URLSearchParams(gateway.mock.lastCall![2].split("?")[1]);
+  expect(params.get("source_conversation_id")).toBe(hit.conversation_id);
+  expect(params.get("kind")).toBe("message");
+  gateway.mockResolvedValueOnce({ project_item_list: [{ ...hit, conversation_id: "source-2" }] });
+  await post("search", query);
+  expect((await post("read", target)).statusCode).toBe(409);
+});
+
+it("resolves a skeleton hit whose first member has the same original ID", async () => {
+  bind("A");
+  const turn = { project_id: "A", id: "same", message_ids: ["same", "step"], content: "run build", conversation_id: "builder" };
+  gateway.mockResolvedValueOnce({ project_item_list: [turn] });
+  await post("search", query);
+  for (const [id, kind] of [["same", "turn"], ["step", "message"]]) {
+    gateway.mockResolvedValueOnce({ project_id: "A", memory_id: id, kind, content: { conversation_id: "builder" } });
+    const result = await post("read", { ...origin, turn_id: query.turn_id, project_id: "A", memory_id: id });
+    expect(result.statusCode).toBe(200);
+    expect(new URLSearchParams(gateway.mock.lastCall![2].split("?")[1]).get("kind")).toBe(kind);
+  }
+});
+
+it("interleaves project ranks across batches of at most twenty bindings", async () => {
+  for (let i = 0; i < 21; i++) bind("p" + String(i).padStart(2, "0"));
+  gateway.mockImplementation(async (_a, _m, _path, body) => ({ project_item_list:
+    [1, 2].map(rank => ({ id: body.project_ids[0] + "-" + rank, project_id: body.project_ids[0] })) }));
+  const response = await post("search", { ...query, limit: 3 });
+  expect(gateway.mock.calls.map(call => call[3].project_ids.length)).toEqual([20, 1]);
+  expect(response.json().project_item_list.map(item => item.id)).toEqual(["p00-1", "p20-1", "p00-2"]);
 });

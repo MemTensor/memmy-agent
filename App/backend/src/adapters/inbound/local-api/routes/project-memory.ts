@@ -58,11 +58,14 @@ export function registerProjectMemoryRoutes(app: FastifyInstance, deps: AgentRun
     const a = service.account();
     const allowed = () => service.scope.projects(a.id, s, s.turn_id).includes(s.project_id);
     if (allowed()) {
-      const item = await service.item(a, s.project_id, s.memory_id);
+      const item = await service.readTurnItem(a, s);
       if (allowed()) return item;
     }
     throw Object.assign(new Error("Item outside this turn's projects"), { code: "not_found" });
   }));
-  app.get(base + "items/:id", auth, withErrorEnvelope(async req =>
-    service.item(service.account(), contract.project.parse(req.query).project_id, params.parse(req.params).id)));
+  app.get(base + "items/:id", auth, withErrorEnvelope(async req => {
+    const scope = contract.project.extend({ source_conversation_id: contract.id.optional(),
+      kind: z.enum(["message", "turn", "episode"]).optional() }).parse(req.query);
+    return service.item(service.account(), scope.project_id, params.parse(req.params).id, scope.source_conversation_id, scope.kind);
+  }));
 }

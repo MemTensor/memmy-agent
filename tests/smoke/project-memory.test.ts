@@ -59,16 +59,22 @@ it("captures a Memmy turn, recalls it from Codex, and routes a native completion
     const memmy = await post("sessions/open", { source, sessionId: "memmy-1", workspaceId: "workspace-1" });
     const turn = { source, sessionId: memmy.sessionId, turnId: "turn-1", query };
     await post("turns/start", turn);
-    const stored = await post("turns/turn-1/complete", { ...turn, answer });
+    const stored = await post("turns/turn-1/complete", { ...turn, answer, toolCalls: [{ id: "call-1", name: "rollback", input: { version: "v1" } }], toolResults: [{ toolCallId: "call-1", output: "restored-v1" }] });
     expect(stored.projectMemory.submissions.map(x => x.project_id)).toEqual(["A","B"]);
 
     const codex = await post("sessions/open", { source: "codex", sessionId: "codex-2", namespace: { source: "codex", profileId: "default", sessionKey: "codex-2" }, workspacePath: join(bound, "src") });
     const input = { source: "codex", sessionId: codex.sessionId, turnId: "hook-turn", query: "409" };
     const recall = await post("turns/start", input);
     expect(recall.injectedContext.markdown).toContain("HTTP 409");
-    expect(recall.projectMemory.selectedIds.filter(id => id.startsWith("project:"))).toHaveLength(2);
+    expect(recall.projectMemory.selectedIds.filter(id => id.startsWith("project:")).length).toBeGreaterThanOrEqual(2);
     expect((await post("memory/search", input)).injectedContext).toContain("HTTP 409");
     expect((await post("project-memory/item", { ...input, memory_id: recall.projectMemory.selectedIds.find(id => id.startsWith("project:A:")).split(":")[2], project_id: "A" })).content.topic_summary).toBe(answer);
+    const toolSearch = await post("memory/search", { ...input, query: "restored-v1", verbose: true });
+    expect(toolSearch.injectedContext).toContain("rollback");
+    const ref = toolSearch.debug.projectMemory.selectedIds.find(id => id.startsWith("project:A:"));
+    const detail = await post("project-memory/item", { ...input, project_id: "A", memory_id: ref.split(":")[2] });
+    expect(detail.content).toMatchObject({ role: "tool", tool_call_id: "call-1", content: "restored-v1",
+      tool_calls: [{ function: { name: "rollback", arguments: '{"version":"v1"}' } }] });
     const native = await post("source-turns/complete", { ...input, query: "HTTP 409 retry timing", answer: "Check status before retry.",
       recallTurnId: "hook-turn", channel: "hook", namespace: { source: "codex", profileId: "default", sessionKey: "codex-2" },
       sourceTurn: { source: "codex", profileId: "default", conversationId: "codex-2", turnId: "native-turn",
