@@ -45,6 +45,8 @@ describe.skipIf(process.platform === "win32")("exec selected Unix runtime", () =
         `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(probe)} ${shellQuote(identity)} "$@"\n`,
         { mode: 0o755 });
     }
+    vi.stubEnv("HOME", root);
+    fs.writeFileSync(path.join(root, ".bashrc"), 'export PATH="/fixture/bashrc-prefix:$PATH"\n');
     selectedPath = `${selectedBin}:/usr/bin:/bin`;
     vi.stubEnv("PATH", selectedPath);
     vi.stubEnv("VIRTUAL_ENV", path.join(root, "venv"));
