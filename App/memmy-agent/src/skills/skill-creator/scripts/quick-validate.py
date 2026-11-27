@@ -134,10 +134,10 @@ def _validate_memmy_metadata(metadata: Optional[Dict[str, Any]]) -> Optional[str
         return None
     if not isinstance(requires, dict):
         return "metadata.memmy.requires must be a mapping"
-    unexpected_requires = sorted(set(str(key) for key in requires) - {"bins", "env"})
+    unexpected_requires = sorted(set(str(key) for key in requires) - {"bins", "env", "tools"})
     if unexpected_requires:
         return f"Unexpected metadata.memmy.requires key(s): {', '.join(unexpected_requires)}"
-    for key in ("bins", "env"):
+    for key in ("bins", "env", "tools"):
         values = requires.get(key)
         if values is None:
             continue

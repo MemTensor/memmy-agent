@@ -45,7 +45,7 @@ export function createPluginLocalArtifactService(options: CreatePluginLocalArtif
       } catch {
         throw pluginArtifactError("Plugin artifact URI must be an absolute HTTP(S) or file URI");
       }
-      if (url.protocol === "https:" || url.protocol === "http:") return artifact;
+      if (url.protocol === "https:" || url.protocol === "http:") return { ...artifact, path: undefined };
       if (url.protocol !== "file:") throw pluginArtifactError(`Unsupported plugin artifact URI protocol: ${url.protocol}`);
       const canHostArtifacts = plugin.approvedPermissions.some((permission) => (
         permission.type === "host-service" && permission.services.includes("artifact-host")
@@ -76,7 +76,8 @@ export function createPluginLocalArtifactService(options: CreatePluginLocalArtif
         ...artifact,
         uri: `${base}/preview`,
         downloadUri: `${base}/download`,
-        ...(publishedPath ? { path: publishedPath } : {})
+        // Never trust an absolute path supplied by a plugin, including when no workspace is bound.
+        path: publishedPath ?? undefined
       };
     },
 

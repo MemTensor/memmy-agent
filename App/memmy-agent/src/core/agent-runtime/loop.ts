@@ -4945,7 +4945,7 @@ export class AgentLoop {
     sessionKey?: string,
     options: Parameters<AgentLoop["processMessageTurn"]>[2] = {},
   ): Promise<OutboundMessage | null> {
-    return agentTaskActivity.run(() => this.processMessageTurn(message, sessionKey, options));
+    return agentTaskActivity.run(() => this.processMessageTurn(message, sessionKey, options), options.abortSignal);
   }
 
   private async processMessageTurn(

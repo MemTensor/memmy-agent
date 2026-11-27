@@ -122,6 +122,9 @@ interface MemmyPreloadApi {
   selectEmbeddedBrowserTab(tabId: number | null): void;
   setMenuBarIcon(enabled: boolean): Promise<DesktopMenuBarIconResult>;
   setComputerHistoryTrayIndicator(state: { enabled: boolean; recording: boolean }): void;
+  updateTeachingRecordingControls(state: { id: string; startedAt: string; state: 'starting' | 'recording' | 'finalizing'; conversationId: string; pluginId?: string; capabilityId?: string; labels: { stop: string; discard: string; drag: string; error?: string; confirmTitle?: string; confirmMessage?: string; confirmDiscard?: string; confirmCancel?: string } } | null): Promise<void>;
+  onTeachingRecordingControlAction(callback: (action: { id: string; action: 'stop' | 'cancel' }) => void): () => void;
+  onTeachingRecordingControlsVisibility(callback: (visible: boolean) => void): () => void;
   onMainWindowActionRequest(callback: (request: MainWindowActionRequest) => void): () => void;
   getMainWindowFullScreen(): Promise<{ isFullScreen: boolean }>;
   onMainWindowFullScreenChanged(callback: (state: { isFullScreen: boolean }) => void): () => void;
@@ -519,6 +522,22 @@ const memmyPreloadApi: MemmyPreloadApi = {
 
   setComputerHistoryTrayIndicator(state: { enabled: boolean; recording: boolean }): void {
     ipcRenderer.send("memmy:set-computer-history-tray-indicator", state);
+  },
+
+  updateTeachingRecordingControls(state: { id: string; startedAt: string; state: 'starting' | 'recording' | 'finalizing'; conversationId: string; pluginId?: string; capabilityId?: string; labels: { stop: string; discard: string; drag: string; error?: string; confirmTitle?: string; confirmMessage?: string; confirmDiscard?: string; confirmCancel?: string } } | null): Promise<void> {
+    return ipcRenderer.invoke('memmy:teaching-recording-controls:update', state);
+  },
+
+  onTeachingRecordingControlAction(callback: (action: { id: string; action: 'stop' | 'cancel' }) => void): () => void {
+    const listener = (_event: IpcRendererEvent, action: { id: string; action: 'stop' | 'cancel' }) => callback(action);
+    ipcRenderer.on('memmy:teaching-recording-controls:action', listener);
+    return () => ipcRenderer.removeListener('memmy:teaching-recording-controls:action', listener);
+  },
+
+  onTeachingRecordingControlsVisibility(callback: (visible: boolean) => void): () => void {
+    const listener = (_event: IpcRendererEvent, visible: boolean) => callback(visible === true);
+    ipcRenderer.on('memmy:teaching-recording-controls:visible', listener);
+    return () => ipcRenderer.removeListener('memmy:teaching-recording-controls:visible', listener);
   },
 
   onMainWindowActionRequest(callback: (request: MainWindowActionRequest) => void): () => void {

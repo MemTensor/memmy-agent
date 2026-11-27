@@ -258,6 +258,18 @@ describe("content-free recorder health", () => {
     assert.equal(click.details.previousControlsAtPoint, undefined);
     assert.deepEqual(click.details.accessibility, { role: "AXUnknown" });
   });
+  test("checkpoint flush publishes throttled faults without shutting down health reporting", () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-21T00:00:00Z"));
+    const output: string[] = [], health = recorderHealthReporter(line => output.push(line));
+    health.report("enrichment_backlog"); vi.advanceTimersByTime(100);
+    health.report("enrichment_backlog", { count: 2 });
+    assert.equal(output.length, 1);
+    health.flush();
+    assert.equal(JSON.parse(output[1].slice("[recorder-health] ".length)).count, 2);
+    assert.equal(vi.getTimerCount(), 0);
+    health.report("observer_ready"); assert.equal(output.length, 3);
+    health.close();
+  });
 
   test("policy exclusions alone do not claim a capture fault or successful event write", async () => {
     fixture.lines = [JSON.stringify({ kind: "mouse.click", app: { bundleIdentifier: "com.example.Excluded" },

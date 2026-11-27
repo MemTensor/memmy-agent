@@ -1,4 +1,7 @@
 import { agentTaskActivity } from "../../core/agent-runtime/task-activity.js";
+import { invokeNativePluginService, shutdownNativePlugins } from "../../tools/plugin-host/native-services.js";
+import { SkillsLoader } from "../../core/agent-runtime/skills.js";
+import { PluginUpdateLease } from "../../core/agent-runtime/plugin-update-lease.js";
 import crypto from "node:crypto";
 import * as childProcess from "node:child_process";
 import fs from "node:fs";
@@ -857,6 +860,7 @@ export class WebSocketChannel extends BaseChannel {
   private pendingCronOutbox: CronNotificationOutbox | null = null;
   private flushingPendingCron = false;
   terminalRunControl: TerminalRunControl | null = null;
+  private pluginUpdateLease: PluginUpdateLease;
   staticDistPath: string | null = null;
   runtimeModelName: RuntimeModelNameResolver = null;
   runtimeToolNames: RuntimeToolNamesResolver = null;
@@ -910,6 +914,7 @@ export class WebSocketChannel extends BaseChannel {
     this.terminalRunControl = this.sessionManager?.root
       ? new TerminalRunControl(this.sessionManager.root)
       : null;
+    this.pluginUpdateLease = new PluginUpdateLease(agentTaskActivity, this.terminalRunControl);
     this.projectStore = options.projectStore ?? config?.projectStore ?? null;
     const staticDistPath = options.staticDistPath ?? config?.staticDistPath ?? null;
     this.staticDistPath = staticDistPath ? path.resolve(String(staticDistPath)) : null;
@@ -3584,11 +3589,52 @@ export class WebSocketChannel extends BaseChannel {
       if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
       return httpJsonResponse({ busy: agentTaskActivity.busy || Boolean(this.terminalRunControl?.hasActiveRuns()) });
     }
+    if (got === "/api/runtime/plugin-update-lease") {
+      if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+      if (request.method !== "POST") return httpError(405, "Method not allowed");
+      let body: { token?: unknown; action?: unknown; ownerPid?: unknown };
+      try { body = JSON.parse(String(request.body ?? "{}")); }
+      catch { return httpError(400, "Invalid lease request"); }
+      if (!body || typeof body.token !== "string" || !/^[a-f0-9-]{36}$/.test(body.token)
+        || !["acquire", "release"].includes(String(body.action))) return httpError(400, "Invalid lease request");
+      if (body.action === "release") {
+        await this.pluginUpdateLease.release(body.token);
+        return httpJsonResponse({ released: true });
+      }
+      if (typeof body.ownerPid !== "number" || !Number.isSafeInteger(body.ownerPid) || body.ownerPid <= 0) {
+        return httpError(400, "Invalid lease owner");
+      }
+      return httpJsonResponse({ acquired: await this.pluginUpdateLease.acquire(body.token, body.ownerPid) });
+    }
     if (got === "/api/sessions") return this.handleSessionsList(request);
     if (got === "/api/sessions/reassign-project") return this.handleSessionReassignProject(request);
     if (got === "/api/projects") return this.handleProjectCreate(request);
     if (got === "/api/settings") return this.handleSettings(request);
     if (got === "/api/commands") return this.handleCommands(request);
+    if (got === "/api/plugin-host/services") {
+      if (!this.checkApiToken(request)) return httpError(401, "Unauthorized");
+      if (String(request?.method ?? "GET").toUpperCase() !== "POST") return httpError(405, "Method not allowed");
+      try {
+        const raw = JSON.parse(String(request.body ?? "{}"));
+        let skills: Array<{ name: string; path: string }> | undefined;
+        let evidenceWorkspace: string | undefined;
+        if (raw.service === "event-sessions" && raw.input?.action === "evidence-files") {
+          // Backend Host services strip websocket: before forwarding conversationId.
+          const key = typeof raw.input.conversationId === "string"
+            ? `websocket:${raw.input.conversationId.replace(/^websocket:/, "")}` : null;
+          const selected = key ? this.workspaceEnvironmentSession(key) : null;
+          if (!selected?.ok || !selected.context.cwd) throw new Error("capture_workspace_unavailable");
+          evidenceWorkspace = selected.context.cwd;
+        }
+        if (raw.service === "event-sessions" && raw.input?.action === "configuration") {
+          const selected = typeof raw.input.conversationId === "string" ? this.workspaceEnvironmentSession(`websocket:${raw.input.conversationId.replace(/^websocket:/, "")}`) : null;
+          const workspace = selected?.ok && selected.context.cwd ? selected.context.cwd : this.workspacePath;
+          skills = new SkillsLoader(workspace).listSkills(false).map(({ name, path }) => ({ name, path }));
+        }
+        return httpJsonResponse(await invokeNativePluginService(raw,
+          { history: this.computerHistory, toolNames: this.runtimeToolNames?.() ?? [], skills, evidenceWorkspace }));
+      } catch (error) { return httpError(409, error instanceof Error ? error.message : "Plugin host service failed"); }
+    }
     if (got === "/api/computer-history") return this.handleComputerHistory(request, "snapshot");
     if (got === "/api/computer-history/observation/status") return this.handleComputerHistory(request, "observation-status");
     if (got === "/api/computer-history/settings") return this.handleComputerHistory(request, "settings");
@@ -3758,6 +3804,7 @@ export class WebSocketChannel extends BaseChannel {
   }
 
   override async stop(): Promise<void> {
+    await this.pluginUpdateLease.close();
     if (this.computerHistoryModelTimer) clearInterval(this.computerHistoryModelTimer);
     this.computerHistoryModelTimer = null;
     if (!this.running && !this.server) return;
@@ -3765,6 +3812,7 @@ export class WebSocketChannel extends BaseChannel {
     nativeExcelControl.stop();
     // Recording is scoped to the app: closing it finalizes the open segment
     // rather than leaving a recorder running behind the user's back.
+    await shutdownNativePlugins();
     await this.computerHistory.shutdown();
     if (typeof this.server?.close === "function") {
       await new Promise<void>((resolve) => this.server.close(() => resolve()));

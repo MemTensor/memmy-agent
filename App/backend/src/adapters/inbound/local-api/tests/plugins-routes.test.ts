@@ -1,4 +1,5 @@
 import { InstalledPluginSchema, type InstalledPlugin } from "@memmy/local-api-contracts";
+import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginService } from "../../../../services/plugin-service.js";
@@ -41,10 +42,11 @@ const plugin = InstalledPluginSchema.parse({
 
 function createService(): PluginService {
   return {
+    catalog: vi.fn(async () => []), isBusy: () => false, suspend: vi.fn(async () => undefined),
     list: vi.fn(() => [plugin]),
     get: vi.fn(() => plugin),
     readUi: vi.fn(async (_id, slot) => `<main>${slot}</main>`),
-    openArtifact: vi.fn(async () => ({ path: new URL(import.meta.url).pathname, name: "report.txt", mediaType: "text/plain" })),
+    openArtifact: vi.fn(async () => ({ path: fileURLToPath(import.meta.url), name: "report.txt", mediaType: "text/plain" })),
     install: vi.fn(async () => plugin),
     update: vi.fn(async () => plugin),
     configure: vi.fn(() => plugin),
@@ -81,6 +83,22 @@ function createApp(
 }
 
 describe("plugin routes", () => {
+  it("keeps declared status polling out of chat events and rejects hidden state changes", async () => {
+    const service = createService(), onEvent = vi.fn();
+    const capture = structuredClone(plugin);
+    capture.manifest.skills = [{ id: "capture-start", name: "Capture", description: "Capture authorized events", entry: "skills/capture/SKILL.md" }];
+    capture.manifest.conversation = { recordingCapabilityId: "run", recordingSkillId: "capture-start" };
+    vi.mocked(service.get).mockReturnValue(capture);
+    app = createApp(service, onEvent);
+    const url = `/api/v1/plugins/${plugin.id}/capabilities/run/invoke`;
+    const response = await app.inject({ method: "POST", url, payload: { conversationId: "chat-a", origin: "user", background: true, input: { action: "status" } } });
+    expect(response.statusCode).toBe(200); expect(onEvent).not.toHaveBeenCalled();
+    const hiddenStart = await app.inject({ method: "POST", url, payload: { conversationId: "chat-a", origin: "user", background: true, input: { action: "start" } } });
+    expect(hiddenStart.statusCode).toBe(400);
+    expect((await app.inject({ method: "POST", url, payload: { conversationId: "chat-a", origin: "user", input: { action: "stop" } } })).statusCode).toBe(200);
+    expect(onEvent).toHaveBeenCalled();
+  });
+
   it("installs and manages plugins by id", async () => {
     const plugins = createService();
     const refreshAgentTools = vi.fn(async () => undefined);
@@ -150,4 +168,32 @@ describe("plugin routes", () => {
     expect(response.statusCode).toBe(400);
     expect(plugins.install).not.toHaveBeenCalled();
   });
+});
+
+it("preserves artifact events in both invocation response and progress stream", async () => {
+  const service = createService();
+  const artifact = { type: "artifact" as const, artifact: { id: "skill", name: "SKILL.md",
+    uri: "/api/v1/plugins/example/artifacts/skill/preview", mediaType: "text/markdown" } };
+  service.invoke = async function* () { yield artifact; yield { type: "result", output: { saved: true } }; };
+  const published: unknown[] = [];
+  app = createApp(service, event => published.push(event));
+  const response = await app.inject({ method: "POST", url: `/api/v1/plugins/${plugin.id}/capabilities/run/invoke`,
+    payload: { conversationId: "chat", origin: "user", input: {} } });
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toMatchObject({ event: { type: "result", output: { saved: true } }, events: [artifact] });
+  expect(published).toContainEqual(expect.objectContaining({ event: artifact }));
+});
+
+it.each(["teach-mode", "other-plugin"])("rejects hidden mutations while preserving declared status for %s", async id => {
+  const service = createService();
+  service.get = vi.fn(() => ({ ...plugin, id, manifest: { ...plugin.manifest,
+    conversation: { recordingCapabilityId: "run", recordingSkillId: "capture" } } }));
+  const invoke = vi.spyOn(service, "invoke");
+  app = createApp(service);
+  const url = `/api/v1/plugins/${id}/capabilities/run/invoke`;
+  expect((await app.inject({ method: "POST", url, payload: { conversationId: "chat", origin: "user",
+    background: true, input: { action: "stop" } } })).statusCode).toBe(400);
+  expect(invoke).not.toHaveBeenCalled();
+  expect((await app.inject({ method: "POST", url, payload: { conversationId: "chat", origin: "user",
+    background: true, input: { action: "status" } } })).statusCode).toBe(200);
 });
