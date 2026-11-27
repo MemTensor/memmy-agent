@@ -21,6 +21,7 @@ vi.mock("../app-frame.js", () => ({ AppFrame: ({ children }: { children: ReactNo
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root, host: HTMLDivElement;
 let switchAccount: (id: string) => void;
+let openPlans: () => void;
 const summary = {
   account: { balance: "1234.56", held: "20.00", spendable: "1214.56", version: 2 },
   plan: { code: "FREE" as const, cycleStart: "2026-11-03T00:00+08:00", cycleEnd: "2026-12-03T00:00+08:00", nextCycleGrant: "1000.00" },
@@ -37,6 +38,7 @@ function fixture() {
 function Harness({ client, home = false, language = "zh-CN" }: { client: CreditsClient; home?: boolean | "compact"; language?: "zh-CN" | "en-US" }) {
   const { state, dispatch } = useAppState(); const { setClients } = useApiClients();
   switchAccount = id => dispatch(appActions.accountUpdated({ userId: id }));
+  openPlans = () => dispatch(appActions.navigate("/plans"));
   useEffect(() => {
     setClients({ credits: client } as AppClients);
     dispatch(appActions.bootstrapLoaded({ ...mockBootstrap, app: { ...mockBootstrap.app, userMode: "account", language } }, "/settings"));
@@ -90,6 +92,39 @@ it("does not fall back to demo data after failed requests", async () => {
   const client = fixture(); client.summary.mockRejectedValueOnce(new ApiRequestError("expired", 401)); await mount(client);
   expect(host.textContent).toContain("登录已失效"); expect(host.textContent).not.toContain("1,000.00");
   await click("重试"); expect(host.textContent).toContain("1,214.56");
+});
+it("shows a recoverable balance error in the settings layout", async () => {
+  const client = fixture(); client.summary.mockRejectedValueOnce(new Error("offline")); await mount(client);
+  const status = host.querySelector<HTMLDivElement>('#credits-balance [role="alert"]');
+  expect(status?.className).toContain("creditLoadNotice");
+  expect(status?.textContent).toContain("积分加载失败");
+  expect(host.querySelector("#credits-balance")?.textContent).toContain("总剩余积分");
+  expect(host.querySelector("#credits-balance strong")?.textContent).toBe("—");
+  expect([...host.querySelectorAll("button")].some(button => button.textContent?.includes("查看套餐"))).toBe(true);
+  expect(host.textContent).not.toContain("1,000.00");
+  await click("重试"); expect(host.textContent).toContain("1,214.56");
+});
+it("opens fixed plans from the failed balance card", async () => {
+  const client = fixture(); client.summary.mockRejectedValueOnce(new Error("offline")); await mount(client);
+  await click("查看套餐");
+  expect(host.querySelector("h1")?.textContent).toBe("套餐");
+  expect(host.querySelectorAll("article")).toHaveLength(2);
+});
+it("keeps fixed plan cards and the application available when account credits fail", async () => {
+  const client = fixture(); client.summary.mockRejectedValueOnce(new Error("offline")); await mount(client);
+  await act(async () => openPlans());
+  const notice = host.querySelector<HTMLElement>('[role="alert"]');
+  expect(notice?.textContent).toContain("当前套餐待确认");
+  expect(host.querySelectorAll("article")).toHaveLength(2);
+  expect(host.textContent).toContain("每月 1,000.00 积分");
+  expect(host.textContent).toContain("每月 5,000.00 积分");
+  expect([...host.querySelectorAll("button")].some(button => button.textContent === "现在申请")).toBe(true);
+  await click("现在申请");
+  expect(document.body.textContent).toContain("Memmy 进阶版申请");
+  await click("关闭");
+  await click("重试读取积分");
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect(host.textContent).toContain("当前套餐：免费版");
 });
 it("shares one snapshot across pages and the modal while credits are held, then reports actual exhaustion", async () => {
   const client = fixture();
@@ -476,6 +511,27 @@ it("shows the spendable balance in the account menu when the server includes hol
   await click("刷新积分余额");
   expect(menu?.textContent).toContain("1,233.56");
   expect(menu?.textContent).not.toContain("数据可能不是最新");
+});
+it("shows a failed read inside the account menu balance field", async () => {
+  const { AppFrame } = await vi.importActual<typeof import("../app-frame.js")>("../app-frame.js");
+  const client = fixture(); client.summary.mockRejectedValueOnce(new Error("offline"));
+  function MenuHarness() {
+    const { dispatch } = useAppState(); const { setClients } = useApiClients();
+    useEffect(() => {
+      setClients({ credits: client } as AppClients);
+      dispatch(appActions.bootstrapLoaded({ ...mockBootstrap, app: { ...mockBootstrap.app, userMode: "account", language: "zh-CN" } }, "/settings"));
+      dispatch(appActions.accountUpdated({ userId: "100001" }));
+    }, [dispatch, setClients]);
+    return <AppFrame title="test"><div>test</div></AppFrame>;
+  }
+  await act(async () => root.render(<AppProviders><MenuHarness /></AppProviders>));
+  const trigger = host.querySelector<HTMLButtonElement>('[data-account-menu-trigger="true"]');
+  await act(async () => trigger!.click());
+  const menu = document.querySelector('[role="menu"]');
+  expect(menu?.textContent).toContain("积分余额读取失败");
+  expect(menu?.querySelector(".app-frame-sidebar-menu__quota-status")).toBeNull();
+  await click("重试读取积分");
+  expect(menu?.textContent).toContain("1,214.56");
 });
 it("retries a live redemption with the same request ID and displays its actual result", async () => {
   const client = fixture();

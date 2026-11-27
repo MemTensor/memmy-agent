@@ -1,6 +1,6 @@
 /** Credits balance, plans, and check-in, using the settings usage visual language. */
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Coins, Gift, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Coins, Gift, Info, RefreshCw, X } from "lucide-react";
 import { Button } from "../components/button.js";
 import { useOptionalNotificationCenter } from "../components/notification-center.js";
 import { useTranslation } from "../i18n/use-translation.js";
@@ -218,12 +218,34 @@ export function CreditsSourceDetailPage(props: { source: "reward" }) {
   </div></CreditsSettingsShell>;
 }
 
+function CreditLoadNotice({ account }: { account: ReturnType<typeof useCreditAccount> }) {
+  const { t } = useTranslation();
+  const loading = account.loading;
+  return <div className={usageStyles.creditLoadNotice} role={account.error && !loading ? "alert" : "status"}>
+    {loading ? <RefreshCw size={15} className={usageStyles.creditsRefreshSpin} aria-hidden="true" /> : <Info size={15} aria-hidden="true" />}
+    <span>{t(loading ? "credits.live.loading" : account.error === "auth" ? "credits.live.auth" : "credits.live.errorTitle")}</span>
+    {account.error && !loading && <button type="button" onClick={account.reload}>{t("credits.live.retry")}</button>}
+  </div>;
+}
+
 function CreditAccountStatus({ account }: { account: ReturnType<typeof useCreditAccount> }) {
   const { t } = useTranslation();
-  return <div role={account.error ? "alert" : "status"}>
-    <p>{t(account.error === "auth" ? "credits.live.auth" : account.error ? "credits.live.error" : "credits.live.loading")}</p>
-    {account.error && <Button size="sm" variant="secondary" onClick={account.reload}>{t("credits.live.retry")}</Button>}
-  </div>;
+  const { dispatch } = useAppState();
+  return <section className={usageStyles.usageSection}>
+    <div className={usageStyles.sectionHead}>
+      <h2><Coins size={16} aria-hidden="true" />{t("credits.balance.title")}</h2>
+    </div>
+    <div className={usageStyles.creditAccountFallback}>
+      <div className={usageStyles.creditAccountFallbackTop}>
+        <span>{t("credits.balance.total")}</span>
+        <button type="button" className={usageStyles.balanceEntryButton} onClick={() => dispatch(appActions.navigate("/plans"))}>
+          {t("credits.balance.viewPlans")}<ChevronRight size={16} aria-hidden="true" />
+        </button>
+      </div>
+      <strong>—</strong>
+      <CreditLoadNotice account={account} />
+    </div>
+  </section>;
 }
 
 /** Original credits layout, with server data in account mode. */
@@ -291,7 +313,7 @@ export function CreditsSettingsPanel(props: { invitationContent?: ReactNode }) {
     }, 450);
   }
 
-  if (account.live && !account.summary) return <div id="credits-balance" className={usageStyles.detailContent}><CreditAccountStatus account={account} /></div>;
+  if (account.live && !account.summary) return <div id="credits-balance" className={`${usageStyles.detailContent} ${usageStyles.balancePage}`}><CreditAccountStatus account={account} /></div>;
 
   return (
     <div id="credits-balance" className={`${usageStyles.detailContent} ${usageStyles.balancePage}`}>

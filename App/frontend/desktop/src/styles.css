@@ -12466,6 +12466,11 @@ button.home-checkin__action:hover:not(:disabled) {
 
 .app-frame-sidebar-menu__quota-refresh:hover { background: var(--color-background-paper); color: var(--color-action-sky); }
 .app-frame-sidebar-menu__quota-refresh:focus-visible { outline: 2px solid var(--color-action-sky); outline-offset: 2px; }
+.app-frame-sidebar-menu__quota-refresh--retry { color: var(--color-action-sky-hover); }
+.app-frame-sidebar-menu__quota-refresh:disabled { cursor: default; opacity: 0.65; }
+.app-frame-sidebar-menu__quota-refresh-icon--loading { animation: app-frame-quota-spin 0.8s linear infinite; }
+@keyframes app-frame-quota-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .app-frame-sidebar-menu__quota-refresh-icon--loading { animation: none; } }
 
 .app-frame-sidebar-menu__quota-figures > span {
   display: flex;
@@ -12490,6 +12495,7 @@ button.home-checkin__action:hover:not(:disabled) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.app-frame-sidebar-menu__quota-figures .app-frame-sidebar-menu__quota-unavailable { color: color-mix(in srgb, var(--color-text-ink) 68%, transparent); font-weight: 500; }
 
 .app-frame-sidebar-menu__quota-upgrade {
   color: var(--color-action-sky);

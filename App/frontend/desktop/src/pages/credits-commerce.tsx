@@ -50,11 +50,15 @@ export function CreditsPlansPage() {
         <button type="button" className={styles.balanceRefresh} aria-label={t("credits.application.refresh")} title={t("credits.application.refresh")} onClick={() => { if (account.live) account.reload(); else reload(); setRefreshed(true); }}><RefreshCw size={15} aria-hidden="true" /></button>
         <span className={styles.balanceLive} role="status">{applicationSuccess && applicationSuccess === state.account.userId ? (language === "zh-CN" ? "已成功升级进阶版" : "Your Pro plan is active") : refreshed ? t("credits.application.refreshed") : ""}</span>
       </div>}
+      {account.live && !summary && <div className={styles.planStatus}>
+        <p role={account.error && !account.loading ? "alert" : "status"} title={account.error ? t(account.error === "auth" ? "credits.live.auth" : "credits.live.error") : undefined}>
+          {t(account.loading ? "credits.plans.currentLoading" : "credits.plans.currentUnavailable")}
+        </p>
+        <button type="button" className={styles.balanceRefresh} aria-label={t("credits.balance.retry")} title={t("credits.balance.retry")} disabled={account.loading} onClick={account.reload}>
+          <RefreshCw size={15} className={account.loading ? styles.creditsRefreshSpin : undefined} aria-hidden="true" />
+        </button>
+      </div>}
     </header>
-    {account.live && !summary && account.error && <div>
-      <p role="alert">{t(account.error === "auth" ? "credits.live.auth" : "credits.live.error")}</p>
-      <Button onClick={account.reload}>{t("credits.live.retry")}</Button>
-    </div>}
     <div className={styles.entitlementGrid} aria-label={t("credits.plans.title")}>
       {(["free", "pro"] as const).map(plan => {
         const pro = plan === "pro";
@@ -70,9 +74,9 @@ export function CreditsPlansPage() {
             <span className={styles.planPrice}><strong>{currentPrice}</strong><span>{t("credits.plan.pricePeriod")}</span></span>
             {pro && <s className={styles.planOriginalPrice}>{t("credits.plan.originalPrice", { price: originalPrice })}</s>}
           </div>
-          {planCode === "free" && (pro
+          {pro && (planCode === "free" || (account.live && !summary && !!account.error))
             ? <Button className={styles.planAction} onClick={() => { setApplicationSuccess(null); setApplicationOwner(state.account.userId ?? "preview"); }}>{t("credits.application.open")}</Button>
-            : <Button className={styles.planAction} variant="secondary" onClick={() => dispatch(appActions.navigate("/main"))}>{t("credits.plan.useNow")}</Button>)}
+            : !pro && planCode === "free" && <Button className={styles.planAction} variant="secondary" onClick={() => dispatch(appActions.navigate("/main"))}>{t("credits.plan.useNow")}</Button>}
 
           <ul className={styles.benefitList}>
             <Benefit icon={<Sparkles size={16} />}>{t("credits.plan.monthlyCredits", { count: monthlyCredits })}<span className={styles.benefitValidity}>{t("credits.plan.validityMonth")}</span></Benefit>

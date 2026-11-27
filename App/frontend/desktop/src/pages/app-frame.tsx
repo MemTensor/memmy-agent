@@ -1703,8 +1703,14 @@ export function AppFrame(props: AppFrameProps) {
                 </span>
                 <span>
                   <span>{t("credits.balance.title")}</span>
-                  <strong>
-                    {typeof creditQuota.balance === "string" ? formatCreditAmount(creditQuota.balance, language) : creditQuota.balance?.toLocaleString(language === "en-US" ? "en-US" : "zh-CN", {
+                  <strong
+                    className={creditAccount.live && !creditAccount.summary ? "app-frame-sidebar-menu__quota-unavailable" : undefined}
+                    role={creditAccount.live && !creditAccount.summary ? creditAccount.error && !creditAccount.loading ? "alert" : "status" : undefined}
+                    title={creditAccount.live && !creditAccount.summary && creditAccount.error ? t(creditAccount.error === "auth" ? "credits.live.auth" : "credits.live.error") : undefined}
+                  >
+                    {creditAccount.live && !creditAccount.summary
+                      ? t(creditAccount.loading ? "credits.live.loadingShort" : creditAccount.error === "auth" ? "credits.live.authShort" : "credits.live.errorShort")
+                      : typeof creditQuota.balance === "string" ? formatCreditAmount(creditQuota.balance, language) : creditQuota.balance?.toLocaleString(language === "en-US" ? "en-US" : "zh-CN", {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2
                     }) ?? "—"}
@@ -1713,18 +1719,18 @@ export function AppFrame(props: AppFrameProps) {
               </button>
               <button
                 type="button"
-                className="app-frame-sidebar-menu__quota-refresh"
+                className={`app-frame-sidebar-menu__quota-refresh${creditAccount.live && !creditAccount.summary && creditAccount.error ? " app-frame-sidebar-menu__quota-refresh--retry" : ""}`}
                 role="menuitem"
-                aria-label={t("credits.balance.refresh")}
-                title={creditRefreshedAt ? t("credits.refreshed", { time: creditRefreshedAt.toLocaleTimeString(language) }) : t("credits.balance.refresh")}
-                onClick={() => { if (creditAccount.live) creditAccount.reload(); else creditDemo.reload(); setCreditRefreshedAt(new Date()); }}
+                aria-label={t(creditAccount.live && !creditAccount.summary && creditAccount.error ? "credits.balance.retry" : "credits.balance.refresh")}
+                title={creditAccount.live && !creditAccount.summary && creditAccount.error ? t("credits.balance.retry") : creditRefreshedAt ? t("credits.refreshed", { time: creditRefreshedAt.toLocaleTimeString(language) }) : t("credits.balance.refresh")}
+                disabled={creditAccount.live && creditAccount.loading}
+                onClick={() => { if (creditAccount.live) creditAccount.reload(); else { creditDemo.reload(); setCreditRefreshedAt(new Date()); } }}
               >
-                <RefreshCw size={13} aria-hidden="true" />
+                <RefreshCw size={13} className={creditAccount.live && creditAccount.loading ? "app-frame-sidebar-menu__quota-refresh-icon--loading" : undefined} aria-hidden="true" />
               </button>
             </div>
           </div>
           <div className="app-frame-sidebar-menu__divider" />
-          {creditAccount.live && !creditAccount.summary && (creditAccount.error || creditAccount.loading) && <p role={creditAccount.error ? "alert" : "status"}>{t(creditAccount.error === "auth" ? "credits.live.auth" : creditAccount.error ? "credits.live.error" : "credits.live.loading")}</p>}
           {(
             <button type="button" className="app-frame-sidebar-menu__item app-frame-sidebar-menu__quota-upgrade" role="menuitem" onClick={openCreditPlans}>
               <span className="app-frame-sidebar-menu__item-icon"><ArrowUpRight size={13} /></span>

@@ -1072,6 +1072,16 @@ button.creditsAction:hover:not(:disabled) {
 
 /* Balance first, then source summaries and their individual credit grants. */
 .balancePage { container-type:inline-size; }
+.creditAccountFallback { display:flex; flex-direction:column; align-items:flex-start; padding:20px 24px 16px; border:1px solid var(--usage-card-border); border-radius:var(--radius-card,16px); background:var(--color-background-paper); }
+.creditAccountFallbackTop { display:flex; width:100%; align-items:center; justify-content:space-between; gap:12px; }
+.creditAccountFallbackTop > span { color:var(--usage-secondary); font-size:var(--codex-text-sm); line-height:var(--codex-leading-sm); }
+.creditAccountFallback > strong { margin:8px 0 18px; color:var(--usage-ink); font-size:32px; font-weight:600; line-height:1.1; }
+.creditLoadNotice { display:flex; align-items:center; gap:8px; width:100%; box-sizing:border-box; min-height:40px; padding:10px 12px; border-radius:var(--radius-input,10px); background:var(--usage-row-bg); color:var(--usage-secondary); font-size:var(--codex-text-sm); line-height:var(--codex-leading-sm); }
+.creditLoadNotice svg { flex:0 0 auto; color:var(--usage-muted); }
+.creditLoadNotice span { min-width:0; flex:1; }
+.creditLoadNotice button { flex:0 0 auto; padding:0; border:0; background:transparent; color:var(--color-action-sky-hover); font:inherit; font-weight:600; cursor:pointer; }
+.creditLoadNotice button:hover { text-decoration:underline; }
+.creditLoadNotice button:focus-visible { outline:2px solid var(--color-action-sky); outline-offset:3px; border-radius:2px; }
 .balancePage .invitationCard, .balancePage .platformQuotaList { border-color:var(--usage-card-border) !important; }
 .balancePage .invitationCard { border-radius:var(--radius-card,16px); }
 .balanceHero { padding:20px 24px; border:1px solid var(--usage-card-border); border-radius:var(--radius-card,16px); background:var(--color-background-paper); }
@@ -1190,4 +1200,5 @@ button.creditsAction:hover:not(:disabled) {
 .entitlementCard button.planAction:not(:disabled) { color:var(--color-action-sky); border-color:var(--color-action-sky); background:transparent; }
 
 .commerceHeader .planStatus { display:flex; align-items:center; flex-wrap:nowrap; gap:4px; }
+.planStatus p[role="alert"] { color:var(--usage-muted); }
 .planOpenError { margin:12px 0 0; font-size:var(--codex-text-sm); line-height:1.5; }
