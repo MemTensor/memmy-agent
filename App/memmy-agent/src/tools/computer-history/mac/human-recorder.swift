@@ -3,12 +3,15 @@ import ApplicationServices
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import Darwin
 
 let emitLock = NSLock()
 // The product runs this recorder inside Memmy Computer Use.app. The CLI keeps
 // stdout output for source builds and standalone diagnostics.
 var historyEventSink: ((String) -> Void)?
 var historySessionId: UInt64 = 0
+var historyNativeSessionId = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+var historyNativeSequence: UInt64 = 0
 
 let separatelyAuthorizedSourceBundleIds: Set<String> = ["com.tencent.xinwechat", "com.tencent.wechat"]
 
@@ -17,13 +20,17 @@ func isSeparatelyAuthorizedSource(_ application: [String: Any]) -> Bool {
 }
 
 func emit(_ payload: [String: Any], expectedSession: UInt64? = nil) {
-  guard JSONSerialization.isValidJSONObject(payload),
-        let data = try? JSONSerialization.data(withJSONObject: payload),
-        let line = String(data: data, encoding: .utf8)
-  else { return }
   emitLock.lock()
   defer { emitLock.unlock() }
   if let expectedSession, expectedSession != historySessionId { return }
+  var ordered = payload
+  ordered["nativeSessionId"] = historyNativeSessionId
+  ordered["nativeSequence"] = historyNativeSequence + 1
+  guard JSONSerialization.isValidJSONObject(ordered),
+        let data = try? JSONSerialization.data(withJSONObject: ordered),
+        let line = String(data: data, encoding: .utf8)
+  else { return }
+  historyNativeSequence += 1
   if let historyEventSink {
     historyEventSink(line)
   } else {
@@ -66,7 +73,13 @@ func excludesUnconsentedWeChat(_ application: [String: Any]) -> Bool {
 }
 
 func timestamp() -> String {
-  ISO8601DateFormatter().string(from: Date())
+  timestampAt(Date())
+}
+
+func timestampAt(_ date: Date) -> String {
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return formatter.string(from: date)
 }
 
 // Diagnostics never carry an app, title, URL, text, or a window identity.
@@ -74,6 +87,7 @@ func timestamp() -> String {
 let diagnosticLock = NSLock()
 var diagnosticLastAt: [String: Date] = [:]
 var diagnosticCounts: [String: Int] = [:]
+var diagnosticPendingAt: [String: Date] = [:]
 let diagnosticQueue = DispatchQueue(label: "human-recorder.diagnostics")
 var pendingDiagnostics: [String: (payload: [String: Any], session: UInt64)] = [:]
 var pendingDiagnosticOrder: [String] = []
@@ -122,11 +136,15 @@ func emitRecorderDiagnostic(code: String, count: Int? = nil, minimumInterval: Ti
   if let expected, expected != recorderSession() { return }
   let now = Date()
   diagnosticLock.lock()
-  if let count { diagnosticCounts[code, default: 0] += count }
+  if let count {
+    diagnosticCounts[code, default: 0] += count
+    diagnosticPendingAt[code] = now
+  }
   if let last = diagnosticLastAt[code], now.timeIntervalSince(last) < minimumInterval {
     diagnosticLock.unlock(); return
   }
   let accumulated = diagnosticCounts.removeValue(forKey: code)
+  diagnosticPendingAt.removeValue(forKey: code)
   diagnosticLastAt[code] = now
   diagnosticLock.unlock()
   var payload: [String: Any] = ["type": "recorder.diagnostic", "timestamp": timestamp(), "code": code]
@@ -135,6 +153,25 @@ func emitRecorderDiagnostic(code: String, count: Int? = nil, minimumInterval: Ti
   // A stalled output sink must not stall the input tap's overflow path. Only
   // one pending content-free payload per diagnostic code is retained.
   queueRecorderDiagnostic(payload, session: session)
+}
+
+// Throttled faults must not remain hidden behind a successful checkpoint.
+// Original observation times preserve the Host's readiness ordering. Pending
+// faults also mark this boundary conservatively partial, including counts
+// that could straddle its timestamp cutoff.
+func flushCheckpointDiagnostics(session: UInt64) -> [String] {
+  diagnosticLock.lock()
+  let counts = diagnosticCounts, times = diagnosticPendingAt
+  let faults: Set<String> = ["observer_unavailable", "observer_notifications_unavailable", "ax_snapshot_budget_exceeded",
+    "enrichment_backlog", "privacy_unknown", "input_monitoring_unavailable"]
+  let waiting = pendingDiagnostics.keys.filter { faults.contains($0) }
+  diagnosticCounts.removeAll(); diagnosticPendingAt.removeAll()
+  diagnosticLock.unlock()
+  for (code, count) in counts {
+    queueRecorderDiagnostic(["type": "recorder.diagnostic", "timestamp": timestampAt(times[code] ?? Date()),
+      "code": code, "count": count], session: session)
+  }
+  return Set(Array(counts.keys) + waiting).sorted()
 }
 
 // AX calls have an individual timeout, but a tree of individually slow calls
@@ -529,7 +566,7 @@ let enrichmentQueueKey = DispatchSpecificKey<Bool>()
 // MARK: - Bounded enrichment scheduling
 
 final class HistoryEnrichmentScheduler {
-  private struct Work { let key: String?; let run: () -> Void }
+  private struct Work { let key: String?; let barrier: Bool; let run: () -> Void }
   private let lock = NSLock()
   private let queue: DispatchQueue
   private let limit: Int
@@ -545,8 +582,9 @@ final class HistoryEnrichmentScheduler {
     lock.lock()
     // Replace a queued sampling job with its newest state. Input jobs have no
     // key and preserve their order, including mouse-down/up drag endpoints.
-    if let key, let index = pending.firstIndex(where: { $0.key == key }) {
-      pending[index] = Work(key: key, run: run)
+    let afterBarrier = (pending.lastIndex(where: { $0.barrier }) ?? -1) + 1
+    if let key, let index = pending.indices.dropFirst(afterBarrier).first(where: { pending[$0].key == key }) {
+      pending[index] = Work(key: key, barrier: false, run: run)
       lock.unlock(); return
     }
     var dropped = false
@@ -557,7 +595,7 @@ final class HistoryEnrichmentScheduler {
         lock.unlock(); overflow(); return
       }
     }
-    pending.append(Work(key: key, run: run))
+    pending.append(Work(key: key, barrier: false, run: run))
     let start = !draining
     draining = true
     lock.unlock()
@@ -567,6 +605,19 @@ final class HistoryEnrichmentScheduler {
 
   func cancelPending() {
     lock.lock(); pending.removeAll(); lock.unlock()
+  }
+
+  // Control markers cannot be dropped or replaced by sampling coalescence.
+  // The caller also bounds outstanding requests to sixteen.
+  func checkpoint(_ run: @escaping () -> Void) -> Bool {
+    lock.lock()
+    guard pending.filter({ $0.barrier }).count < 16 else { lock.unlock(); return false }
+    pending.append(Work(key: nil, barrier: true, run: run))
+    let start = !draining
+    draining = true
+    lock.unlock()
+    if start { queue.async { self.drain() } }
+    return true
   }
 
   private func drain() {
@@ -1209,12 +1260,14 @@ public func startHistoryRecorder(output: @escaping (String) -> Void) throws {
   }
   emitLock.lock()
   historySessionId &+= 1
+  historyNativeSessionId = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+  historyNativeSequence = 0
   historyEventSink = output
   emitLock.unlock()
   enrichmentScheduler.cancelPending()
   inputMonitoringWasReady = nil
   diagnosticLock.lock()
-  diagnosticLastAt.removeAll(); diagnosticCounts.removeAll()
+  diagnosticLastAt.removeAll(); diagnosticCounts.removeAll(); diagnosticPendingAt.removeAll()
   pendingDiagnostics.removeAll(); pendingDiagnosticOrder.removeAll()
   diagnosticLock.unlock()
   samplingLock.lock(); lastScrollSampleAt = nil; samplingLock.unlock()
@@ -1281,4 +1334,61 @@ public func stopHistoryRecorder() {
   observedPid = nil
   observedObserver = nil
   axStateLock.unlock()
+}
+
+/// Orders a marker after already accepted enrichment and diagnostic work.
+/// Interval coverage remains the Host's responsibility; this confirms a boundary.
+public func checkpointHistoryRecorder(id: String) {
+  guard UUID(uuidString: id)?.uuidString.lowercased() == id else { return }
+  let session = recorderSession()
+  let accepted = enrichmentScheduler.checkpoint {
+    guard recorderSession() == session else { return }
+    let issues = flushCheckpointDiagnostics(session: session)
+    diagnosticQueue.sync {}
+    emit(["kind": "session.checkpoint", "id": id, "complete": true, "issues": issues], expectedSession: session)
+  }
+  if !accepted {
+    emit(["kind": "session.checkpoint", "id": id, "complete": false], expectedSession: session)
+  }
+}
+
+/// Bounded stdin controls shared by the standalone recorder and app proxy.
+/// Cancelling never closes the caller's stdin. Owned resources close on its queue.
+public final class HistoryControlInput: @unchecked Sendable {
+  private let source: DispatchSourceRead
+  private let descriptor: Int32
+  private let checkpoint: @Sendable (String) -> Void
+  private let end: @Sendable () -> Void
+  private var bytes: [UInt8] = []
+  private var overflow = false
+
+  public init(fileDescriptor: Int32, onCheckpoint: @escaping @Sendable (String) -> Void,
+              onEnd: @escaping @Sendable () -> Void, onClose: @escaping @Sendable () -> Void = {}) {
+    descriptor = fileDescriptor; checkpoint = onCheckpoint; end = onEnd
+    source = DispatchSource.makeReadSource(fileDescriptor: fileDescriptor,
+      queue: DispatchQueue(label: "human-recorder.controls"))
+    source.setEventHandler { [weak self] in self?.readControls() }
+    source.setCancelHandler(handler: onClose)
+    source.resume()
+  }
+
+  public func cancel() { source.cancel() }
+  deinit { source.cancel() }
+
+  private func readControls() {
+    let capacity = 4096
+    var input = [UInt8](repeating: 0, count: capacity)
+    let count = Darwin.read(descriptor, &input, capacity)
+    if count < 0 && (errno == EINTR || errno == EAGAIN) { return }
+    guard count > 0 else { end(); source.cancel(); return }
+    for byte in input.prefix(count) {
+      if byte == 10 {
+        if !overflow, let request = try? JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any],
+           request["kind"] as? String == "checkpoint", let id = request["id"] as? String,
+           UUID(uuidString: id)?.uuidString.lowercased() == id { checkpoint(id) }
+        bytes.removeAll(keepingCapacity: true); overflow = false
+      } else if bytes.count >= 512 { overflow = true }
+      else if !overflow { bytes.append(byte) }
+    }
+  }
 }

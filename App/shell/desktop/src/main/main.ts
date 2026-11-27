@@ -1,3 +1,4 @@
+import { registerTeachingRecordingControls, unregisterTeachingRecordingControls } from "./teaching-recording-controls.js";
 import { bundledCliInstallDecision, HOMEBREW_CLI_BIN_DIRECTORY, MEMMY_CLI_LAUNCHER_MARKER, PACKAGED_MAC_CLI_COMMANDS, SYSTEM_CLI_BIN_DIRECTORY, USER_CLI_SHELL_PROFILES, memmyCliAppCandidates, renderMemmyCliLauncher } from './cli-auto-install.js';
 import { createMacDmgUpdateInstallScript, createMacDmgUpdateStageScript, type MacUpdateValidationOptions } from './mac-update-scripts.js';
 import { createDesktopScreenCapture } from './desktop-screen-capture.js';
@@ -1557,6 +1558,7 @@ async function startLocalApi(services: ManagedRuntimeServices | null): Promise<D
       ?? (app.isPackaged ? join(process.resourcesPath, "bundled-plugins") : undefined),
     memoryBaseUrl: memoryControl.baseUrl,
     memoryReady: services?.memory.ready,
+    agentGatewayReady: services?.agentGatewayReady,
     skipAgentMcpReload: Boolean(services),
     runtimeConfigPath: process.env.MEMMY_HOME ? join(process.env.MEMMY_HOME, "runtime.json") : undefined
   });
@@ -1667,6 +1669,7 @@ async function guideMemmySystemPermission(permission: "accessibility" | "inputMo
 }
 
 function registerIpcHandlers(): void {
+  registerTeachingRecordingControls(() => mainWindow, () => runtimeConfig);
   if (areIpcHandlersRegistered) {
     return;
   }
@@ -6549,6 +6552,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   ipcMain.removeListener("memmy:stop-pet-window-drag", handleStopPetWindowDrag);
   ipcMain.removeListener("memmy:update-pet-window-layout", handleUpdatePetWindowLayout);
   ipcMain.removeListener("memmy:analytics-client-id", handleAnalyticsClientId);
+  unregisterTeachingRecordingControls();
   areIpcHandlersRegistered = false;
   destroyMenuBarTray();
   const services = runtimeServices;
