@@ -10,7 +10,7 @@ export function createMockProjectGateway() {
     const bearer = req.headers.authorization;
     if (!bearer?.startsWith("Bearer ")) return res.code(401).send({ code: 401, message: "Sign in" });
     const owner = createHash("sha256").update(bearer).digest("hex");
-    if (!accounts.has(owner)) accounts.set(owner, { submissions: new Map(), topics: [], tasks: new Map() });
+    if (!accounts.has(owner)) accounts.set(owner, { submissions: new Map(), topics: [], messages: [], tasks: new Map() });
     const state = accounts.get(owner);
     const [operation, id] = req.params["*"].split("/");
     const b = req.body ?? {}, q = req.query;
@@ -26,6 +26,7 @@ export function createMockProjectGateway() {
           topic_summary: b.messages.at(-1).content, topic_description: "", decisions: [], experiences: [], timeline: [] };
         data = { task_id: "task_" + b.submission_id, status: "completed", updated_topic_ids: [topic.id] };
         state.topics.unshift(topic);
+        state.messages.push(...b.messages.map(m => ({ ...m, id: m.message_id, project_id: projects[0], conversation_id: b.conversation_id })));
         state.tasks.set(data.task_id, data);
         state.submissions.set(b.submission_id, { body: JSON.stringify(b), data });
         break;
@@ -33,8 +34,11 @@ export function createMockProjectGateway() {
       case "submissions": data = state.submissions.get(id)?.data ?? { status: "not_accepted" }; break;
       case "status": data = state.tasks.get(id); break;
       case "index": data = { projects: projects.map(project_id => ({ project_id, topics: visible.filter(t => t.project_id === project_id).slice(0,b.size) })) }; break;
-      case "search": data = b.view === "trajectory" ? { trajectories: [], degraded: [] }
-        : { topics: visible.filter(t => (t.topic_name + t.topic_summary).includes(b.query)).slice(0,b.limit), degraded: [] }; break;
+      case "search": {
+        const messages = state.messages.filter(m => projects.includes(m.project_id) && m.content.includes(b.query));
+        data = { project_item_list: [...visible.filter(t => (t.topic_name + t.topic_summary).includes(b.query)), ...messages].slice(0,b.limit), degraded: [] };
+        break;
+      }
       case "topics": {
         if (id) data = state.topics.find(t => t.project_id === q.project_id && t.id === id);
         else {
@@ -45,8 +49,12 @@ export function createMockProjectGateway() {
       }
       case "items": {
         const topic = state.topics.find(t => t.id === id && t.project_id === q.project_id);
-        if (topic) data = { project_id: q.project_id, memory_id: id, kind: "topic", cache_policy: "live",
-          ...(q.view !== "metadata" ? { content: topic } : {}) };
+        const messages = state.messages.filter(m => m.id === id && m.project_id === q.project_id &&
+          (!q.source_conversation_id || q.source_conversation_id === m.conversation_id));
+        if (messages.length > 1) return res.code(409).send({ code: 409, message: "Ambiguous memory" });
+        const item = topic ?? messages[0];
+        if (item) data = { project_id: q.project_id, memory_id: id, kind: topic ? "topic" : "message", cache_policy: "live",
+          ...(q.view !== "metadata" ? { content: item } : {}) };
         break;
       }
     }

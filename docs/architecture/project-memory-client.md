@@ -16,7 +16,7 @@ Backend 按启动目录及其上级目录查找绑定。例如，只把 `/repo/a
 | `PUT /bindings` | JSON 含 `project_id, workspace_ids[], folder_paths[]`。传两组空数组可清除该项目的全部绑定 | 替换后的绑定。桌面工作区使用工作区选择器的 ID，文件夹使用绝对路径 |
 | `GET /topics` | `project_id, page?, size?`。页码从 1 开始，每页默认 20，最多 50 | `topics[], page, size, total` |
 | `GET /topics/{id}` | 查询参数 `project_id` | 网关授权的主题详情、决策、分歧和来源 |
-| `GET /items/{id}` | 查询参数 `project_id` | `memory_id, project_id, kind, content, read_from` |
+| `GET /items/{id}` | 查询参数 `project_id`，同名消息可带 `source_conversation_id`、`kind` | `memory_id, project_id, kind, content, read_from` |
 | `GET /status/{task_id}` | 路径传整理任务 ID | `task_id, status, updated_topic_ids[]`，整理失败时附错误 |
 
 按 ID 读取时，只缓存网关明确标为 `immutable`、无版本的固定正文。再次读取先向网关核验元数据。离线时无法读取旧副本。退出账号会清理该账号的缓存。
@@ -31,15 +31,15 @@ Backend 按启动目录及其上级目录查找绑定。例如，只把 `/repo/a
 | --- | --- | --- |
 | `/sessions/open` | `cwd?` 为宿主报告的启动绝对路径，`workspace_id?` 为 Memmy 工作区 ID。只有工作区根目录列表时可传 `workspace_roots[]` | 固定会话归属，返回 `ok` |
 | `/index` | `size?`，每个项目默认 8 | `projects[], degraded[]` |
-| `/search` | `turn_id, query, domains?, limit?, view?, include_index?`。默认查主题，取 9 条，最多 25 条。查原文用 `view="trajectory"` | `topics[]` 或 `trajectories[]`，另有 `degraded[]`。自动检索在首轮和压缩后的检索中附最近主题索引 |
+| `/search` | `turn_id, query, domains?, limit?, include_index?`。同时查主题及其条目、消息和 Episode 摘要，默认 9 条，最多 25 条 | `project_item_list[]`，另有 `degraded[]`。自动检索在首轮和压缩后的检索中附最近主题索引 |
 | `/add` | `turn_id, submission_id, messages[], domains?`。目标取本轮开始时确定且仍有效的绑定 | `submissions[]`，含 `project_id, submission_id, status`，受理后含 `task_id`。受理状态未知时 HTTP 202 |
 | `/import` | 用户确认后传 `confirmed=true, submission_id, project_ids[], messages[], domains?`。按同一来源会话提交 | 仅导入指定且仍绑定的项目，按消息时间排序，每批最多 40,000 token。返回逐项目、逐批受理结果 |
 | `/sessions/compacted` | 公共参数 | 下一次自动检索重新取索引 |
 | `/read` | `turn_id, project_id, memory_id` | 在当前轮次的授权范围内按 ID 读取，供 Agent 工具使用 |
 
-消息仅接受 `user` 和 `assistant`，正文为 `content`。可以传 `role_id, role_name`。新轮次缺少 `chat_time` 或 `message_id` 时服务会补齐，重试沿用首次记录。历史导入需要逐条传原始时间和稳定消息 ID。完成事件只取用户提问和可见回复，并剔除协议注入块和引用块。
+消息支持 `user`、`assistant` 和 `tool`。工具调用的名称和输入放在 `tool_calls`，输出放在同一条消息的 `content`。可以传 `role_id, role_name`。新轮次缺少 `chat_time` 或 `message_id` 时服务会补齐，重试沿用首次记录。历史导入需要逐条传原始时间和稳定消息 ID。完成事件按调用号配对工具输入和输出，并剔除正文中的协议注入块和引用块。
 
-Memmy 的 `memmy_memory_search` 返回混排结果。项目项带 `project:<项目>:<记忆>` 标识，可交给 `memmy_memory_get`。需要核对原话时使用 `search_team_trajectory(query)`。该工具由服务限定项目范围和片段长度，原文权限由网关检查。
+Memmy 的 `memmy_memory_search` 返回混排结果。项目项带 `project:<项目>:<记忆>` 标识，可交给 `memmy_memory_get`。工具消息可按引用读取输入和输出。回读时服务透传命中项的来源会话，网关校验读取权限。
 
 ## 混排与评测
 
@@ -53,7 +53,7 @@ Memmy 的 `memmy_memory_search` 返回混排结果。项目项带 `project:<项�
 
 Backend 使用当前账号的 Bearer 凭证访问 `/api/memmy/project-memory`。云端返回 `{code: 0, data: ...}`。读写错误使用 HTTP 状态码。云端负责项目成员权限、项目到 MemOS 空间的映射和主题整理。
 
-- `POST /search` 和 `POST /index` 使用非空 `project_ids[]`，超过 20 个项目分批。检索另传 `conversation_id, query, domains?, limit, view`。返回主题和索引项均需带 `project_id`。
+- `POST /search` 和 `POST /index` 使用非空 `project_ids[]`，超过 20 个项目分批。检索另传 `conversation_id, query, domains?, limit`。返回主题和索引项均需带 `project_id`。
 - `POST /add` 每次只提交一个项目，带 `project_ids, submission_id, source, conversation_id, messages, domains?`。每个项目有独立、稳定的提交 ID。已受理的结果需返回 `task_id, status`。
 - 响应丢失时，Backend 用 `GET /submissions/{submission_id}?project_id=…` 复查。返回任务 ID 表示已受理，只有明确返回 `status="not_accepted"` 才重发。这是待与真实网关确认的接口。待确认的提交保存在本机，后台复查前再次检查账号和绑定。
 - 主题列表走 `POST /topics`，分页参数放在 JSON 中。详情、整理状态和按 ID 读取沿用本机 GET 路径。读取固定正文的权限复核使用 `view=metadata`，读取正文使用 `view=content`。

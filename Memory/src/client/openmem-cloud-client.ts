@@ -213,7 +213,7 @@ function stringifyToolResult(value: unknown): string {
   return JSON.stringify(value ?? {});
 }
 
-function toolCallIdFromResult(value: unknown): string | undefined {
+export function toolCallIdFromResult(value: unknown): string | undefined {
   if (!isRecord(value)) return undefined;
   return stringField(value, "tool_call_id") ??
     stringField(value, "toolCallId") ??
@@ -221,7 +221,7 @@ function toolCallIdFromResult(value: unknown): string | undefined {
     stringField(value, "id");
 }
 
-function normalizeOpenMemToolCalls(values: unknown): OpenMemToolCall[] {
+export function normalizeOpenMemToolCalls(values: unknown): OpenMemToolCall[] {
   return (Array.isArray(values) ? values : [])
     .map((value, index) => normalizeOpenMemToolCall(value, index))
     .filter((value): value is OpenMemToolCall => Boolean(value));
@@ -236,7 +236,7 @@ function normalizeOpenMemToolCall(value: unknown, index: number): OpenMemToolCal
 
   const rawArguments = firstDefined(value.input, value.args, value.arguments, fn.arguments, {});
   return {
-    id: stringField(value, "id") ?? stringField(value, "tool_call_id") ?? stringField(value, "call_id") ?? `tool-call-${index + 1}`,
+    id: stringField(value, "id") ?? stringField(value, "tool_call_id") ?? stringField(value, "toolCallId") ?? stringField(value, "callId") ?? stringField(value, "call_id") ?? `tool-call-${index + 1}`,
     type: "function",
     function: {
       name,

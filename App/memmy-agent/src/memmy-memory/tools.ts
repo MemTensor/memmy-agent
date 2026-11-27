@@ -69,15 +69,6 @@ export const MEMOS_MEMORY_TOOL_SPECS: ToolSpec[] = [
       });
     },
   },
-  {
-    name: "search_team_trajectory",
-    description: "Find original messages shared with the projects bound to the current session.",
-    parameters: objectSchema({ query: { type: "string" } }, ["query"]),
-    readOnly: true,
-    execute: (client, params, runtime, key) => client.post("/api/v1/project-memory/trajectory", {
-      ...runtime.requestEnvelope(key), sessionId: runtime.currentSessionId(key), turnId: runtime.currentTurnId(key), query: params.query
-    }),
-  },
 ];
 
 export class MemmyMemoryTool extends Tool {
@@ -261,11 +252,6 @@ function formatMemmyToolResult(
 ): string {
   if (toolName === "memmy_memory_search") {
     return renderMemmyContextPacket(markdownFromSearchResult(result), "tool_search", currentUserRequest, turnId);
-  }
-  if (toolName === "search_team_trajectory") {
-    const lines = (result?.trajectories ?? []).map((row: JsonRecord) =>
-      [row.project_id, row.source_task_id, row.turn_id, String(row.content ?? "").slice(0, 600)].join(" / "));
-    return renderMemmyContextPacket(lines.join("\n"), "tool_search", currentUserRequest, turnId);
   }
   if (toolName === "memmy_memory_get") {
     const text = result?.memory_id ? JSON.stringify(result.content) : markdownFromMemoryDetail(result);

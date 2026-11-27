@@ -1,4 +1,4 @@
-import { DesktopProjectMemory, awaitLocalRecall, limitTrajectories, mixProjectRecall } from "./project-memory.js";
+import { DesktopProjectMemory, awaitLocalRecall, mixProjectRecall } from "./project-memory.js";
 import {localPanelRequest} from "../service/panel/local-read.js";
 import { assertLocalAgentSourceRequest, isAgentSourceScanPath, routeAgentSourceScan } from "./agent-source-api.js";
 import {PanelLogsInputSchema} from "../contracts/memory-runtime.js";
@@ -88,7 +88,6 @@ export const API_ROUTES = [
   "POST /api/v1/memory/search",
   "POST /api/v1/project-memory/item",
   "POST /api/v1/project-memory/compacted",
-  "POST /api/v1/project-memory/trajectory",
   "POST /api/v1/models/embedding/infer",
   "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
@@ -930,19 +929,15 @@ async function routeRequest(
     requireStringField(req, "sessionId", "compacted");
     return projects.call("sessions/compacted", projects.session(req, req.sessionId));
   }
-  if (method === "POST" && (path === "/api/v1/project-memory/item" || path === "/api/v1/project-memory/trajectory")) {
+  if (method === "POST" && path === "/api/v1/project-memory/item") {
     requireMemoryRead(principal);
     if (!projects) throw new MemoryServiceError("forbidden", "Local session required");
     const req = requestWithPrincipal<MemorySearchRequest>(body, "project-memory", principal);
     requireStringField(req, "sessionId", "project-memory");
     requireStringField(req, "turnId", "project-memory");
     const session = { ...projects.session(req, req.sessionId!), turn_id: req.turnId };
-    if (path.endsWith("/item")) {
-      const input = asObject(body, "project-memory.item");
-      return projects.call("read", { ...session, project_id: input.project_id, memory_id: input.memory_id }, true);
-    }
-    requireStringField(req, "query", "project-memory.trajectory");
-    return limitTrajectories(await projects.call("search", { ...session, view: "trajectory", query: req.query, limit: 5 }, true));
+    const input = asObject(body, "project-memory.item");
+    return projects.call("read", { ...session, project_id: input.project_id, memory_id: input.memory_id }, true);
   }
 
   if (method === "POST" && path === "/api/v1/models/embedding/infer") {

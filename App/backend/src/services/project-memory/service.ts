@@ -16,6 +16,11 @@ const segment = (id: string) => {
   return encodeURIComponent(id);
 };
 
+function interleave(batches: { items: Data[] }[]) {
+  return batches.flatMap(batch => batch.items.map((item, rank) => ({ item, rank })))
+    .sort((a, b) => a.rank - b.rank).map(({ item }) => item);
+}
+
 function cleanMessage(text: string) {
   // Only host-visible dialogue is eligible. Also strip packets quoted by an assistant.
   return text.replace(/<(memmy_memory_context|memmy_memory_status|memos_context|memory_context|project_memory_context|memmy_project_quote|memmy_internal_prompt)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
@@ -69,7 +74,7 @@ export class ProjectMemoryService {
         const code = codeOf(e);
         if (project_ids.length > 1 && (code === "forbidden" || code === "not_found")) {
           const allowed = await Promise.all(project_ids.map(id => read([id])));
-          return { items: allowed.flatMap(r => r.items), degraded: allowed.flatMap(r => r.degraded) };
+          return { items: interleave(allowed), degraded: allowed.flatMap(r => r.degraded) };
         }
         return { items: [], degraded: project_ids.map(project_id => ({ project_id, code })) };
       }
@@ -78,26 +83,40 @@ export class ProjectMemoryService {
     const current = this.scope.projects(a.id, s, turn);
     if (this.current()?.id !== a.id) return { items: [], degraded: ["account_changed"] };
     // Preserve each gateway ranking and interleave separate batches by rank.
-    const items = results.flatMap(r => r.items.map((item, rank) => ({ item, rank })))
-      .sort((x, y) => x.rank - y.rank).map(r => r.item).filter(row => current.includes(String(row.project_id)));
+    const items = interleave(results).filter(row => current.includes(String(row.project_id)));
     return { items, degraded: results.flatMap(r => r.degraded) };
   }
 
   async search(a: Account, s: ProjectSearch) {
     this.scope.open(a.id, s, true);
     const ids = this.scope.projects(a.id, s, s.turn_id, true);
-    const trajectory = s.view === "trajectory";
-    const wantIndex = s.include_index && !trajectory && this.scope.needsIndex(a.id, s);
+    const wantIndex = s.include_index && this.scope.needsIndex(a.id, s);
     const [found, index] = await Promise.all([
-      this.readBatches(a, s, ids, "search", { conversation_id: conversationId(s), query: s.query, domains: s.domains, limit: s.limit, view: s.view },
-        trajectory ? "trajectories" : "topics", s.turn_id),
+      this.readBatches(a, s, ids, "search", { conversation_id: conversationId(s), query: s.query, domains: s.domains, limit: s.limit },
+        "project_item_list", s.turn_id),
       wantIndex ? this.index(a, s, 8, s.turn_id) : { projects: [], degraded: [] }
     ]);
     if (wantIndex && ids.length && !index.degraded.length) this.scope.markIndex(a.id, s, false);
     const current = this.scope.projects(a.id, s, s.turn_id);
     const visible = (list: Data[]) => list.filter(item => this.current()?.id === a.id && current.includes(String(item.project_id)));
+    const items = visible(found.items).slice(0, s.limit);
+    const remember = this.db.prepare(`INSERT OR IGNORE INTO project_memory_references
+      (account,source,conversation,turn,project,memory,origin,kind) VALUES(?,?,?,?,?,?,?,?)`);
+    for (const item of items) {
+      if (typeof item.id !== "string" || typeof item.conversation_id !== "string") continue;
+      const kind = Array.isArray(item.message_ids) ? "turn" : item.message_id ? "message" : "episode";
+      const save = (id: string, type: string) => remember.run(a.id, s.source, s.conversation_id, s.turn_id,
+        String(item.project_id), id, String(item.conversation_id), type);
+      save(item.id, kind);
+      if (Array.isArray(item.message_ids)) {
+        for (const id of item.message_ids) {
+          // Add may use the first member ID as the Turn ID. Its direct hit denotes the skeleton.
+          if (typeof id === "string" && id !== item.id) save(id, "message");
+        }
+      }
+    }
     return {
-      [trajectory ? "trajectories" : "topics"]: visible(found.items).slice(0, s.limit),
+      project_item_list: items,
       ...(wantIndex ? { projects: visible(index.projects) } : {}), degraded: [...found.degraded, ...index.degraded]
     };
   }
@@ -110,7 +129,7 @@ export class ProjectMemoryService {
     try {
       for (const m of [...s.messages].sort((x,y) => Date.parse(x.chat_time) - Date.parse(y.chat_time))) {
         const message = { ...m, content: cleanMessage(m.content) };
-        if (!message.content) continue;
+        if (!message.content && message.role !== "tool") continue;
         const n = encoder.encode(JSON.stringify(message), [], []).length + 2;
         if (n > 40000) throw error("invalid_argument", "A history message exceeds 40000 tokens");
         if (!batches.length || size + n > 40000) { batches.push([]); size = 0; }
@@ -137,9 +156,9 @@ export class ProjectMemoryService {
     const times = this.db.prepare("UPDATE project_memory_turns SET completed=coalesce(completed,?) WHERE account=? AND source=? AND conversation=? AND turn=? RETURNING started,completed")
       .get(new Date().toISOString(), ...key)!;
     const messages = s.messages.map((m, i) => ({
-      role: m.role, content: cleanMessage(m.content), chat_time: m.chat_time ?? String(m.role === "user" ? times.started : times.completed),
+      ...m, content: cleanMessage(m.content), chat_time: m.chat_time ?? String(m.role === "user" ? times.started : times.completed),
       message_id: m.message_id ?? hash([s.source, s.conversation_id, s.turn_id, i]), role_id: m.role_id, role_name: m.role_name
-    })).filter(m => m.content);
+    })).filter(m => m.content || m.role === "tool");
     if (!messages.length) return { submissions: [] };
     const submissions = await Promise.all(ids.map(project_id => this.submit(a, s, project_id, {
       project_ids: [project_id], submission_id: hash([s.source, s.conversation_id, s.submission_id, project_id]),
@@ -225,12 +244,27 @@ export class ProjectMemoryService {
     return data;
   }
 
-  async item(a: Account, project: string, id: string) {
-    const key = [a.id, project, id];
+  readTurnItem(a: Account, s: Session & { turn_id: string; project_id: string; memory_id: string }) {
+    const refs = this.db.prepare(`SELECT origin,kind FROM project_memory_references
+      WHERE account=? AND source=? AND conversation=? AND turn=? AND project=? AND memory=? LIMIT 2`)
+      .all(a.id, s.source, s.conversation_id, s.turn_id, s.project_id, s.memory_id);
+    if (refs.length > 1) throw error("conflict", "Ambiguous project reference; specify the source conversation and kind");
+    const ref = refs[0];
+    return this.item(a, s.project_id, s.memory_id, ref && String(ref.origin), ref && String(ref.kind));
+  }
+
+  async item(a: Account, project: string, id: string, origin?: string, kind?: string) {
+    const key = [a.id, project, JSON.stringify([id, origin, kind])];
     const clear = () => this.db.prepare("DELETE FROM project_memory_cache WHERE account=? AND project=? AND memory=?").run(...key);
     const cached = this.db.prepare("SELECT data FROM project_memory_cache WHERE account=? AND project=? AND memory=?").get(...key);
     const fetchItem = async (view: string) => {
-      const data = await this.request(a, "items/" + segment(id) + "?project_id=" + segment(project) + "&view=" + view);
+      const params = new URLSearchParams({ project_id: project, view });
+      if (origin) params.set("source_conversation_id", origin);
+      if (kind) params.set("kind", kind);
+      const data = await this.request(a, "items/" + segment(id) + "?" + params);
+      const content = record.safeParse(data.content);
+      const source = data.conversation_id ?? (content.success ? content.data.conversation_id : undefined);
+      if ((origin && source && origin !== source) || (kind && data.kind !== kind)) throw error("not_found", "Project evidence mismatch");
       if (data.memory_id !== id || data.project_id !== project) throw error("not_found", "Project memory item unavailable");
       return data;
     };

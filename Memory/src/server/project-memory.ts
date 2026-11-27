@@ -6,6 +6,8 @@ import { countSummaryTokens } from "../model/llm.js";
 import type { InjectedContext, RecallHit, SessionOpenRequest, TurnStartRequest, TurnCompleteRequest, SourceTurnIdentity, RequestEnvelope } from "../types.js";
 import { createMemoryLogger } from "../logging/logger.js";
 
+import { normalizeOpenMemToolCalls, toolCallIdFromResult } from "../client/openmem-cloud-client.js";
+
 type Row = Record<string, unknown>;
 const logger = createMemoryLogger("project-memory");
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value.filter((r): r is Row => !!r && typeof r === "object") : [];
@@ -26,6 +28,7 @@ export class DesktopProjectMemory {
       });
       if (required && !res.ok) {
         if (res.status === 404 || res.status === 403) throw new MemoryServiceError("not_found", "Project memory unavailable");
+        if (res.status === 409) throw new MemoryServiceError("conflict", "Multiple project records match this reference");
         if (res.status === 401) throw new MemoryServiceError("unauthorized", "Sign in to use project memory");
         throw new MemoryServiceError("internal", "Desktop project memory request failed");
       }
@@ -67,8 +70,9 @@ export class DesktopProjectMemory {
       ...this.session(request, request.sessionId), turn_id: turnId, submission_id: native?.turnId ?? turnId,
       messages: [
         { role: "user", content: request.query, chat_time: native?.startedAt },
+        ...projectToolMessages(request.toolCalls, request.toolResults),
         { role: "assistant", content: request.answer, chat_time: native?.completedAt }
-      ]
+      ].filter(m => m.role === "tool" || m.content?.trim())
     });
   }
 
@@ -85,7 +89,7 @@ export class DesktopProjectMemory {
 export async function awaitLocalRecall<T>(local: Promise<T>, cloud: Promise<Row> | undefined) {
   const settled = local.then(value => ({ value }), error => ({ error }));
   const found = await cloud;
-  const canFallback = rows(found?.topics).length > 0 || rows(found?.projects).some(p => rows(p.topics).length > 0);
+  const canFallback = rows(found?.project_item_list).length > 0 || rows(found?.projects).some(p => rows(p.topics).length > 0);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = canFallback ? await Promise.race([settled, new Promise<{ error: Error }>(resolve => {
@@ -97,29 +101,47 @@ export async function awaitLocalRecall<T>(local: Promise<T>, cloud: Promise<Row>
   } finally { clearTimeout(timer); }
 }
 
-export function limitTrajectories(response: Row) {
-  let used = 0;
-  const trajectories: Row[] = [];
-  for (const row of rows(response.trajectories).slice(0, 5)) {
-    let content = Array.from(string(row.content)).slice(0, 600).join("");
-    const label = [row.project_id, row.source_task_id, row.turn_id, ""].join(" / ");
-    while (content && used + countSummaryTokens(label + content + "\n") > 1500) {
-      content = Array.from(content).slice(0, Math.floor(Array.from(content).length * 0.8)).join("");
-    }
-    if (!content) continue;
-    used += countSummaryTokens(label + content + "\n");
-    trajectories.push({ ...row, content });
+function projectToolMessages(inputs: unknown, outputs: unknown) {
+  const calls = normalizeOpenMemToolCalls(inputs);
+  const results: unknown[] = Array.isArray(outputs) ? outputs : [];
+  const byId = new Map(results.map(result => [toolCallIdFromResult(result), result]));
+  return calls.map((call, i) => {
+    const inline = rows(inputs)[i];
+    const positional = results[i];
+    const result = byId.get(call.id) ?? (toolCallIdFromResult(positional) ? undefined : positional);
+    const obj = result && typeof result === "object" ? result as Row : undefined;
+    const output = obj?.output ?? obj?.content ?? obj?.error ?? result ?? inline?.output ?? inline?.error ?? "";
+    return { role: "tool", tool_call_id: call.id, tool_calls: [call], content: typeof output === "string" ? output : JSON.stringify(output) };
+  });
+}
+
+function reference(project: string, id: string) {
+  return "project:" + encodeURIComponent(project) + ":" + encodeURIComponent(id);
+}
+
+function* evidenceRenderings(item: Row, key: string) {
+  const calls = rows(item.tool_calls).map(call => JSON.stringify(call.function));
+  const members = Array.isArray(item.message_ids) ? item.message_ids.map(id => reference(string(item.project_id), String(id))) : [];
+  const header = [key, string(item.role), ...calls, ...members].filter(Boolean).join(" ");
+  const content = Array.from(string(item.content));
+  let length = content.length;
+  for (;;) {
+    yield header + "\n" + content.slice(0, length).join("") + (length < content.length ? "…" : "");
+    if (length <= 32) return;
+    length = Math.floor(length / 2);
   }
-  return { ...response, trajectories };
 }
 
 type Section = InjectedContext["sections"][number];
 type Ranked = { key: string; parts: () => Iterable<string>; rank: number; project: boolean; exact: boolean; section?: Section };
 
 function* topicRenderings(topic: Row, key: string) {
-  const history = rows(topic.decisions).map(d => ({ ...d, ...(Array.isArray(d.history) ? { history: [...d.history] } : {}) }));
-  const experiences = [...(Array.isArray(topic.experiences) ? topic.experiences : [])];
-  const timeline = [...(Array.isArray(topic.timeline) ? topic.timeline : [])];
+  const entries = (field: string): Row[] => rows(topic[field]).map(item => ({
+    ...item, ...(typeof item.id === "string" ? { id: reference(string(topic.project_id), item.id) } : {})
+  }));
+  const history = entries("decisions").map(d => ({ ...d, ...(Array.isArray(d.history) ? { history: [...d.history] } : {}) }));
+  const experiences = entries("experiences");
+  const timeline = entries("timeline");
   const heading = [key, string(topic.topic_name), string(topic.topic_summary), string(topic.topic_description)].filter(Boolean);
   for (;;) {
     yield [...heading, ...[history, experiences, timeline].filter(a => a.length).map(a => JSON.stringify(a))].join("\n");
@@ -136,7 +158,7 @@ function* topicRenderings(topic: Row, key: string) {
 
 // Local retrieval's hits establish rank. Sections are the indivisible pieces actually shown to the model.
 export function mixProjectRecall(local: { injectedContext: InjectedContext; hits: RecallHit[]; sourceMemoryIds: string[] }, cloud: Row, query: string, budget = 3000) {
-  const topics = rows(cloud.topics);
+  const items = rows(cloud.project_item_list);
   const indices: Row[] = rows(cloud.projects).flatMap(p => rows(p.topics).map(t => ({
     ...t, project_id: p.project_id, topic_description: t.latest_progress ?? t.topic_description
   })));
@@ -145,13 +167,16 @@ export function mixProjectRecall(local: { injectedContext: InjectedContext; hits
     .map(m => ({ text: m[1] ?? m[2] ?? m[3]!, numeric: !!m[2] }));
   const exact = (text: string) => anchors.some(a => a.numeric ? new RegExp("\\b" + a.text + "\\b").test(text) : text.includes(a.text));
   const candidates: Ranked[] = [];
-  for (const topic of [...topics, ...indices]) {
-    const project = string(topic.project_id), id = string(topic.id ?? topic.topic_id);
+  for (const item of [...items, ...indices]) {
+    const project = string(item.project_id), id = string(item.id ?? item.topic_id);
     if (!project || !id) continue;
-    const key = "project:" + encodeURIComponent(project) + ":" + encodeURIComponent(id);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const parts = () => topicRenderings(topic, key);
+    const key = reference(project, id);
+    const isTopic = !("content" in item);
+    const kind = isTopic ? "topic" : Array.isArray(item.message_ids) ? "turn" : item.role ? "message" : "episode";
+    const identity = JSON.stringify([key, item.conversation_id, kind]);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    const parts = () => isTopic ? topicRenderings(item, key) : evidenceRenderings(item, key);
     candidates.push({ key, rank: candidates.length + 1, exact: exact(parts().next().value ?? ""), project: true, parts });
   }
   if (!candidates.length) return { injectedContext: local.injectedContext, sourceMemoryIds: local.sourceMemoryIds, degraded: cloud.degraded ?? [] };
