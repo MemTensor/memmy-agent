@@ -1,7 +1,7 @@
 import { recorderCheckpoints } from "./recorder-checkpoints.js";
 import { persistMacCheckpoint } from "./persisted-checkpoint.js";
 import { createRecorderWriter } from "../core/recorder-writer.js";
-import { CONTINUOUS_RECORDER_CAPABILITY } from "../core/recorder-rotation.js";
+import { CONTINUOUS_RECORDER_CAPABILITY, RECORDER_MARKER_REPAIR_EXIT } from "../core/recorder-rotation.js";
 // Record authorized foreground activity as a local JSONL event stream.
 
 import crypto from "node:crypto";
@@ -575,8 +575,16 @@ export async function run(
     privacy: "Text is retained from observed applications when enabled, except in password fields. An explicit allow-app narrows text capture. Excluded applications and sites are skipped; credential patterns are redacted.",
   });
 
+  const failWrite = (code = 1): never => {
+    if (!helper.killed) helper.kill("SIGTERM");
+    process.exit(code);
+  };
   const writer = createRecorderWriter(output, {
     metadata,
+    onUnrecoverableWrite(error) {
+      console.error("[recorder] " + error.message);
+      return failWrite(RECORDER_MARKER_REPAIR_EXIT);
+    },
     async flushPending() {
       await flushKeys();
       health.flush();
@@ -588,10 +596,6 @@ export async function run(
   });
   writer.append(metadata(args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow`, startedAt));
 
-  const failWrite = () => {
-    if (!helper.killed) helper.kill("SIGTERM");
-    process.exit(1);
-  };
   const health = recorderHealthReporter((line) => {
     const signal = JSON.parse(line.slice("[recorder-health] ".length));
     if (signal.code !== "heartbeat" && signal.code !== "event_recorded") {

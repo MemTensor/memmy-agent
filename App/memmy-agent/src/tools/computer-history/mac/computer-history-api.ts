@@ -1,7 +1,7 @@
 import type { EventCaptureSubscription, CaptureCheckpoint, CaptureRange } from "../core/event-capture-source.js";
 import { CaptureCoverageGaps } from "../core/coverage-gaps.js";
 import { persistedCheckpoint, type PersistedCheckpoint } from "../core/recorder-checkpoint.js";
-import { CONTINUOUS_RECORDER_CAPABILITY, RecorderRotationDeclined, rotateRecorderOutput } from "../core/recorder-rotation.js";
+import { CONTINUOUS_RECORDER_CAPABILITY, RECORDER_MARKER_REPAIR_EXIT, RecorderRotationDeclined, rotateRecorderOutput } from "../core/recorder-rotation.js";
 import { computerHistoryPermissionError } from "../../computer-use/mac-permission-settings.js";
 import { isMacNativeRuntimeSupported } from "../../computer-use/mac-native-runtime-support.js";
 import {
@@ -1839,7 +1839,8 @@ export class ComputerHistoryDemoService {
       this.clearRotationTimer();
       this.clearWeChatPolling();
       const message = segment.output.trim() || `recorder exited with code ${code}`;
-      if (!isHistoryStreamDisconnect(message) || computerHistoryPermissionError(message)) {
+      const markerRepairFailed = !!target && code === RECORDER_MARKER_REPAIR_EXIT;
+      if ((!markerRepairFailed && !isHistoryStreamDisconnect(message)) || computerHistoryPermissionError(message)) {
         this.observationError = message;
         this.observationState = "failed";
       }
@@ -1858,7 +1859,7 @@ export class ComputerHistoryDemoService {
         cancel();
         if (version !== this.recorderReconnectVersion || this.shuttingDown || this.segment?.child !== child) return;
         const completeMessage = segment.output.trim() || `recorder exited with code ${code}`;
-        if (!stopReason && isHistoryStreamDisconnect(completeMessage) && !computerHistoryPermissionError(completeMessage)) {
+        if (!stopReason && (markerRepairFailed || isHistoryStreamDisconnect(completeMessage)) && !computerHistoryPermissionError(completeMessage)) {
           this.scheduleRecorderReconnect(segment, completeMessage);
         } else {
           if (stopReason) this.saveRecordingIntent("stopped");

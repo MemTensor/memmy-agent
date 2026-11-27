@@ -5,6 +5,9 @@ import { recorderRotationRequest, recorderRotationResult } from "./recorder-chec
 /** Only current managed recorders advertise this; older CLIs keep their restart path. */
 export const CONTINUOUS_RECORDER_CAPABILITY = '[recorder-capabilities] {"continuousOutput":true}';
 
+// The failed marker is isolated from subsequent rows, but this process must stop writing.
+export const RECORDER_MARKER_REPAIR_EXIT = 74;
+
 export class RecorderRotationDeclined extends Error {}
 
 export function rotateRecorderOutput(child: ChildProcessWithoutNullStreams,

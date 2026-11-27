@@ -10,10 +10,49 @@ interface SegmentHooks {
   metadata(title: string, createdAt: string): unknown;
   flushPending(): Promise<void>;
   onSegmentChanged(): void;
+  onUnrecoverableWrite(error: Error): never;
 }
 
 function appendJsonLine(file: string | number, payload: unknown): void {
   fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+class MarkerRepairFailed extends Error {}
+
+// Other processes append compact JSON lines to the old file. Reserve the whole
+// line with one O_APPEND write: a short reservation is only leading JSON
+// whitespace, and a complete reservation separates even a torn marker from
+// the next browser event. Never truncate or shift bytes in this shared file.
+function appendStopMarker(fd: number, file: string, marker: unknown): void {
+  const json = Buffer.from(JSON.stringify(marker));
+  const slot = Buffer.alloc(json.length + 1, 0x20);
+  slot[0] = 0x09; // Compact JSON.stringify never emits a literal tab.
+  slot[json.length] = 0x0a;
+  let offset = fs.fstatSync(fd).size;
+  const appender = fs.openSync(file, "a");
+  try {
+    if (fs.writeSync(appender, slot) !== slot.length) throw new Error("Incomplete marker reservation");
+  } finally { fs.closeSync(appender); }
+  // A browser or WeChat append may have won the race after fstat.
+  const chunk = Buffer.alloc(4096);
+  for (;;) {
+    const count = fs.readSync(fd, chunk, 0, chunk.length, offset);
+    if (!count) throw new MarkerRepairFailed("Missing marker reservation");
+    const start = chunk.subarray(0, count).indexOf(0x09);
+    if (start >= 0) { offset += start; break; }
+    offset += count;
+  }
+  try {
+    if (fs.writeSync(fd, json, 0, json.length, offset) !== json.length) throw new Error("Incomplete stop marker");
+  } catch (error) {
+    // Turn only this reservation into whitespace before the next JSON row.
+    // Its newline stays in place until all preceding damaged bytes are clear.
+    slot.fill(0x20);
+    try {
+      if (fs.writeSync(fd, slot, 0, slot.length, offset) !== slot.length) throw new Error("Short repair");
+    } catch (cause) { throw new MarkerRepairFailed("Cannot repair the previous segment", { cause }); }
+    throw error;
+  }
 }
 
 /** Both native collectors serialize their input and checkpoint requests on this queue. */
@@ -90,11 +129,9 @@ export function createRecorderWriter(initialOutput: string, hooks: SegmentHooks)
           fs.fsyncSync(fd);
         } finally { fs.closeSync(fd); }
 
-        const oldFd = fs.openSync(output, "a");
+        const oldFd = fs.openSync(output, "r+");
         try {
-          appendJsonLine(oldFd, marker("recording_stopped", sequence + 1));
-          // Both markers exist. Later input belongs in next, even if closing or
-          // syncing the old file fails. A retry must only finish the old sync.
+          appendStopMarker(oldFd, output, marker("recording_stopped", sequence + 1));
           rollback = null;
           pendingStopSync = output;
           output = next;
@@ -102,7 +139,9 @@ export function createRecorderWriter(initialOutput: string, hooks: SegmentHooks)
           hooks.onSegmentChanged();
         } finally { fs.closeSync(oldFd); }
       } catch (error) {
-        restoreCandidate();
+        try { restoreCandidate(); } finally {
+          if (error instanceof MarkerRepairFailed) hooks.onUnrecoverableWrite(error);
+        }
         throw error;
       }
     }

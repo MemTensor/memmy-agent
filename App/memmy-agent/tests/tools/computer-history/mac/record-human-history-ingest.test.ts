@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, beforeEach, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { nativePrivacyFixture } from "./native-privacy-fixture.js";
 
 const helper = vi.hoisted(() => ({
@@ -485,4 +485,65 @@ test.each([
     control.destroy();
     vi.unstubAllEnvs();
   }
+});
+
+test.each([
+  ["local", "reservation"], ["native", "reservation"], ["local", "marker"], ["native", "marker"],
+  ["native", "repair failure"],
+])("preserves neighboring events across a %s rotation with a short %s write", async (mode, fault) => {
+  const { createRecorderWriter } = await import("../../../../src/tools/computer-history/core/recorder-writer.js");
+  const [old, next] = ["2026-11-25T01-00-00Z", "2026-11-25T01-10-00Z"].map(id => {
+    const dir = path.join(directory, id);
+    fs.mkdirSync(dir);
+    return path.join(dir, "events.jsonl");
+  });
+  const stop = vi.fn((): never => { throw new Error("recorder stopped"); });
+  const writer = createRecorderWriter(old, { metadata: () => ({ title: "next" }), flushPending: async () => {},
+    onSegmentChanged() {}, onUnrecoverableWrite: stop });
+  writer.append({ click: "before" });
+  const command = { kind: "rotate" as const, id: "00000000-0000-0000-0000-000000000001", title: "next", eventsFile: next };
+  const rotate = async () => {
+    if (mode === "native") return writer.nativeRotation(command, new Date().toISOString(), () => "a".repeat(32))
+      .then(() => true, () => false);
+    return new Promise<boolean>(resolve => writer.checkpoint(command, ack => resolve(ack.complete)));
+  };
+  const write = fs.writeSync;
+  const browser = (name: string) => fs.appendFileSync(old, JSON.stringify({ browser: name }) + "\n");
+  const spy = vi.spyOn(fs, "writeSync").mockImplementation((...args: any[]) => {
+    const [fd, data, , length, position] = args;
+    if (Buffer.isBuffer(data) && data[0] === 0x09) {
+      browser("before reservation");
+      if (fault === "reservation") {
+        const partial = write(fd, data, 0, Math.floor(data.length / 2));
+        browser("during repair");
+        return partial;
+      }
+    }
+    if (fault === "repair failure" && Buffer.isBuffer(data) && data[0] === 0x20) throw new Error("repair failed");
+    if (Buffer.isBuffer(data) && data.includes("recording_stopped") && typeof position === "number") {
+      const partial = write(fd, data, 0, Math.floor(length / 2), position);
+      browser("during repair");
+      return partial;
+    }
+    return Reflect.apply(write, fs, args);
+  });
+  expect(await rotate()).toBe(false);
+  spy.mockRestore();
+  if (fault === "repair failure") {
+    expect(stop).toHaveBeenCalledOnce();
+    expect(fs.statSync(next).size).toBe(0);
+    const lines = fs.readFileSync(old, "utf8").trimEnd().split("\n");
+    expect(JSON.parse(lines[0]!)).toEqual({ click: "before" });
+    expect(JSON.parse(lines[1]!)).toEqual({ browser: "before reservation" });
+    expect(JSON.parse(lines.at(-1)!)).toEqual({ browser: "during repair" });
+    return;
+  }
+  expect(stop).not.toHaveBeenCalled();
+  writer.append({ click: "after failure" });
+  expect(await rotate()).toBe(true);
+  writer.append({ click: "after retry" });
+  const rows = (file: string) => fs.readFileSync(file, "utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+  expect(rows(old)).toEqual([{ click: "before" }, { browser: "before reservation" }, { browser: "during repair" },
+    { click: "after failure" }, expect.objectContaining({ eventType: "recording_stopped" })]);
+  expect(rows(next)).toEqual([{ title: "next" }, expect.objectContaining({ eventType: "recording_started" }), { click: "after retry" }]);
 });

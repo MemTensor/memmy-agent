@@ -28,6 +28,7 @@ vi.mock("node:child_process", async (original) => ({
   ...await original<typeof import("node:child_process")>(),
   spawn: () => { const child = new SyntheticRecorder(); state.children.push(child); return child; },
 }));
+import { RECORDER_MARKER_REPAIR_EXIT } from "../../../../src/tools/computer-history/core/recorder-rotation.js";
 import { ComputerHistoryDemoService } from "../../../../src/tools/computer-history/mac/computer-history-api.js";
 import { recorderFailureMessage, WINDOWS_HISTORY_STREAM_DISCONNECT } from "../../../../src/tools/computer-history/mac/record-human-history.js";
 
@@ -114,6 +115,22 @@ describe("Computer History native event stream reconnect", () => {
     expect(service.snapshot().observation.startedAt).toBe(started.startedAt);
     expect(fs.readFileSync(eventsFile(), "utf8")).toContain(before);
     expect(fs.readFileSync(eventsFile(), "utf8")).toContain("After reconnect");
+  });
+
+  it("recovers in the next segment when the recorder cannot repair its stop marker", async () => {
+    vi.setSystemTime(new Date("2026-10-09T10:09:59Z"));
+    const previous = service.startObservation().observation.segmentId!;
+    appendActivity("Before failed repair");
+    const old = state.children[0]!;
+    old.stdout.write('[recorder-capabilities] {"continuousOutput":true}\n');
+    old.stdin.once("data", () => old.exit(RECORDER_MARKER_REPAIR_EXIT));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(old.exitCode).toBe(RECORDER_MARKER_REPAIR_EXIT);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(permissionReader).toHaveBeenCalledOnce();
+    expect(state.children).toHaveLength(2);
+    expect(service.snapshot().observation).toMatchObject({ state: "running", segmentId: "2026-10-09T10-10-00Z" });
+    expect(fs.readFileSync(eventsFile(previous), "utf8")).toContain("Before failed repair");
   });
 
   it("uses the final stderr received after exit before classifying the disconnect", async () => {
