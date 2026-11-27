@@ -305,7 +305,7 @@ describe("browser History bridge to canonical event stream", () => {
     expect(h.service.getBrowserCaptureIntent().generation).toBe(initialGeneration);
   }, 20_000);
 
-  it("rejects delayed browser events across a real segment rotation and records a reauthorized sensor in the new segment", async () => {
+  it("keeps the authorized sensor across a real segment rotation and writes each event once", async () => {
     let h!: Awaited<ReturnType<typeof harness>>;
     let releaseOldEvent!: () => void, oldPublished!: () => void;
     let receiveOldEvent!: (capture: { event: BrowserSemanticHistoryEvent; enabled: boolean; generation: string | null }) => void;
@@ -343,46 +343,42 @@ describe("browser History bridge to canonical event stream", () => {
     try { h = await harness("chrome", { rotateSegments: true, startBeforeBoundaryMs: 3_000 }); }
     finally { orderBrowserCleanup(); }
     const initialGeneration = h.service.getBrowserCaptureIntent().generation!;
-    const nextIntent = nextSocketMessage(h.socket, message => {
-      const current = h.service.getBrowserCaptureIntent();
-      if (message.type !== "browser_history_intent" || message.enabled !== true || !message.generation
-        || message.generation === initialGeneration || !current.enabled || current.generation !== message.generation) return false;
-      // The first real rotation is the behavior under test; a second wall-clock boundary is unrelated.
-      h.clearRotationTimer();
-      return true;
-    });
     await page.evaluate(browserHistorySensorScript({ generation: initialGeneration,
       documentId: h.context.documentId, captureText: true, bindingName: "__memmyFixturePublish" }));
     await page.click("#rotate");
     const captured = await observedOldEvent;
     expect(captured.enabled).toBe(true);
     expect(captured.generation).toBe(initialGeneration);
-    const stale = captured.event;
-    const rotatedMessage = await nextIntent;
+    const delayed = captured.event;
+    const nextSegmentId = await vi.waitFor(() => {
+      const id = h.service.snapshot().observation.segmentId;
+      expect(id).toBeTruthy();
+      expect(id).not.toBe(h.initialSegmentId);
+      expect(h.service.getBrowserCaptureIntent().enabled).toBe(true);
+      return id!;
+    }, { timeout: 8_000 });
+    h.clearRotationTimer();
     const currentIntent = h.service.getBrowserCaptureIntent();
     expect(currentIntent.enabled).toBe(true);
-    expect(currentIntent.generation).toBe(rotatedMessage.generation);
-    expect(currentIntent.generation).not.toBe(initialGeneration);
-    expect(stale).toMatchObject({ generation: initialGeneration, documentId: h.context.documentId,
+    expect(currentIntent.generation).toBe(initialGeneration);
+    expect(delayed).toMatchObject({ generation: initialGeneration, documentId: h.context.documentId,
       action: "click", phase: "observed", target: { tag: "button" } });
-    expect(Date.now() - stale.observedAt).toBeLessThan(15_000);
-    expect(stale.observedAt).toBeLessThanOrEqual(Date.now() + 1_000);
+    expect(Date.now() - delayed.observedAt).toBeLessThan(15_000);
+    expect(delayed.observedAt).toBeLessThanOrEqual(Date.now() + 1_000);
     const checkedAfterOldEvent = nextSocketMessage(h.socket, message => message.type === "browser_history_config" && message.id === "after-rotated-event");
     releaseOldEvent();
     await published;
     // WebSocket ordering makes this reply a barrier after the unchanged old payload was processed.
     h.send({ type: "browser_history_config_request", id: "after-rotated-event", ...h.context });
     expect(await checkedAfterOldEvent).toMatchObject({ enabled: true, generation: currentIntent.generation });
-    expect(h.records().some(event => event.details.eventId === stale.eventId)).toBe(false);
-    const generation = h.service.getBrowserCaptureIntent().generation!;
-    await page.evaluate(browserHistorySensorScript({ generation,
-      documentId: h.context.documentId, captureText: true, bindingName: "__memmyFixturePublish" }));
+    expect(h.recordsInSegment(nextSegmentId).filter(row => row.details?.eventId === delayed.eventId)).toHaveLength(1);
+    expect(h.recordsInSegment(h.initialSegmentId).some(row => row.details?.eventId === delayed.eventId)).toBe(false);
     const fresh = await awaitObservedBrowserEvent(h.bridge, event => event.action === "click" && event.target?.tag === "button"
-      && event.generation === generation && event.documentId === h.context.documentId, () => page.click("#rotate"));
-    const nextSegmentId = generation.split(":")[0];
-    expect(nextSegmentId).not.toBe(h.initialSegmentId);
-    expect(h.recordsInSegment(h.initialSegmentId).some(event => event.details.eventId === fresh.eventId)).toBe(false);
-    expect(h.recordsInSegment(nextSegmentId).find(event => event.details.eventId === fresh.eventId)?.details)
+      && event.generation === initialGeneration && event.documentId === h.context.documentId, () => page.click("#rotate"));
+    expect(h.recordsInSegment(h.initialSegmentId).some(event => event.details?.eventId === fresh.eventId)).toBe(false);
+    const freshRecords = h.recordsInSegment(nextSegmentId).filter(event => event.details?.eventId === fresh.eventId);
+    expect(freshRecords).toHaveLength(1);
+    expect(freshRecords[0].details)
       .toMatchObject({ eventId: fresh.eventId, documentId: h.context.documentId, action: "click", phase: "observed", target: { tag: "button" } });
   }, 20_000);
 
