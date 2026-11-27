@@ -135,7 +135,7 @@ describe("recorder transition ordering", () => {
     expect(service.snapshot().observation).toMatchObject({ state: "stopped", error: null });
   });
 
-  it("retries a rejected checkpoint without stopping the active recorder", async () => {
+  it.each([{}, { busy: true }])("retries a rejected checkpoint (%j) without stopping the active recorder", async refusal => {
     vi.setSystemTime(new Date("2026-09-13T00:09:59Z"));
     service.startObservation();
     const child = state.children[0];
@@ -143,7 +143,7 @@ describe("recorder transition ordering", () => {
     let attempts = 0;
     child.stdin.on("data", chunk => {
       const { id } = JSON.parse(chunk.toString());
-      child.stdout.write("[recorder-rotation] " + JSON.stringify({ id, complete: ++attempts > 1 }) + "\n");
+      child.stdout.write("[recorder-rotation] " + JSON.stringify(++attempts === 1 ? { id, complete: false, ...refusal } : { id, complete: true }) + "\n");
     });
     await vi.advanceTimersByTimeAsync(1_000);
     expect(service.snapshot().observation.segmentId).toBe("2026-09-13T00-00-00Z");
@@ -210,6 +210,10 @@ describe("recorder transition ordering", () => {
     child.stdout.write(pending + pending);
     await vi.advanceTimersByTimeAsync(250);
     expect(requests).toEqual([requests[0], requests[0]]);
+    child.stdout.write("[recorder-rotation] " + JSON.stringify({ id: requests[0].id, complete: false, busy: true }) + "\n");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(requests).toEqual([requests[0], requests[0], requests[0]]);
+    expect(child.signals).toEqual([]);
     expect(service.getBrowserCaptureIntent().enabled).toBe(true);
     const stop = service.stopObservation();
     expect(service.getBrowserCaptureIntent().enabled).toBe(false);
@@ -249,11 +253,20 @@ describe("recorder transition ordering", () => {
     expect(service.snapshot().observation.state).toBe("stopped");
   });
 
-  it("drains an unacknowledged handoff before resuming the new segment", async () => {
+  it.each(["silent", "busy during sync"])("drains an unconfirmed handoff (%s) at the original deadline", async mode => {
     vi.setSystemTime(new Date("2026-09-13T00:09:59Z"));
     service.startObservation();
     const child = state.children[0];
     child.stdout.write('[recorder-capabilities] {"continuousOutput":true}\n');
+    if (mode === "busy during sync") {
+      let first = true;
+      child.stdin.on("data", chunk => {
+        const { id } = JSON.parse(chunk.toString());
+        const status = first ? { retrySync: true } : { busy: true };
+        first = false;
+        child.stdout.write("[recorder-rotation] " + JSON.stringify({ id, complete: false, ...status }) + "\n");
+      });
+    }
     await vi.advanceTimersByTimeAsync(13_000);
     expect(child.signals).toEqual(["SIGTERM"]);
     expect(state.children).toHaveLength(1);

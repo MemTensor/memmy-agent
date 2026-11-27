@@ -15,6 +15,7 @@ export function rotateRecorderOutput(child: ChildProcessWithoutNullStreams,
   const command = recorderRotationRequest.parse({ kind: "rotate", id: crypto.randomUUID(), ...input });
   return new Promise((resolve, reject) => {
     let buffer = "", discard = false, done = false;
+    let writerSwitched = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
     const finish = (error?: Error) => {
       if (done) return;
@@ -41,8 +42,9 @@ export function rotateRecorderOutput(child: ChildProcessWithoutNullStreams,
           const result = JSON.parse(line.slice("[recorder-rotation] ".length));
           if (result.id !== command.id) continue;
           const ack = recorderRotationResult.parse(result);
-          if ("retrySync" in ack) {
-            // The writer has switched. Retry the same target under the original deadline.
+          if ("retrySync" in ack) writerSwitched = true;
+          // Busy rejects only this send. An earlier sync reply already placed the writer in the new file.
+          if ("retrySync" in ack || ("busy" in ack && writerSwitched)) {
             if (!done && !retry) retry = setTimeout(send, 250);
             continue;
           }

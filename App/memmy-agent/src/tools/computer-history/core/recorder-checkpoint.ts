@@ -23,6 +23,7 @@ export const recorderRotationRequest = z.object({ kind: z.literal("rotate"), id:
 }).strict();
 export const recorderRotationResult = z.union([
   z.object({ id: checkpointId, complete: z.boolean() }).strict(),
+  z.object({ id: checkpointId, complete: z.literal(false), busy: z.literal(true) }).strict(),
   z.object({ id: checkpointId, complete: z.literal(false), retrySync: z.literal(true) }).strict(),
 ]);
 

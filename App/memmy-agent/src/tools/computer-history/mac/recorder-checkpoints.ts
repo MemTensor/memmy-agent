@@ -40,7 +40,7 @@ export function recorderCheckpoints(options: {
     if (!closed) options.write((request.rotation ? "[recorder-rotation] " : "[recorder-checkpoint] ") + JSON.stringify(result));
   };
   lines.on("line", line => {
-    if (closed || line.length > 32_768 || pending.size >= 16) return;
+    if (closed || line.length > 32_768) return;
     try {
       const value = JSON.parse(line);
       const rotation = value.kind === "rotate" ? recorderRotationRequest.parse(value) : undefined;
@@ -48,6 +48,11 @@ export function recorderCheckpoints(options: {
       const command = rotation ? { kind: "checkpoint" as const, id: rotation.id, from: undefined, through: undefined }
         : checkpointRequest.parse(value);
       if (pending.has(command.id)) return;
+      if (pending.size >= 16) {
+        const prefix = rotation ? "[recorder-rotation] " : "[recorder-checkpoint] ";
+        options.write(prefix + JSON.stringify({ id: command.id, complete: false, busy: true }));
+        return;
+      }
       if (rotation && options.rotateLocally?.(rotation)) return;
       if (rotation && (!options.rotate || [...pending.values()].some(request => request.rotation))) {
         options.write("[recorder-rotation] " + JSON.stringify({ id: command.id, complete: false })); return;
