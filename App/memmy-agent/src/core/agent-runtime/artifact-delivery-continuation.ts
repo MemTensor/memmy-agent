@@ -38,8 +38,10 @@ export function createArtifactDeliveryContinuation(getDeliveredMediaPaths: () =>
       + "The tool result's file list is an inventory, not a delivery checklist. Review the user's requested outcome, "
       + "choose the files needed for that outcome, and include any files required to use the chosen deliverables. "
       + "Do not send every generated file merely because it appears in the inventory. "
-      + "Send the chosen files to this conversation with one message(media=[absolute paths]) call and a brief note. "
-      + "If you already sent a text-only summary, do not repeat it when attaching the files. Do not send another summary after successful attachment delivery. "
+      + "Send the chosen files to this conversation with one message(media=[absolute paths]) call, and write your complete reply to the user in its content: "
+      + "that message is shown as your reply, and text written after it in this turn is not shown. "
+      + "The text you wrote before this check has not been shown to the user, so include what it needs to say in that message. "
+      + "Do not send another summary after successful attachment delivery. "
       + "If no file should be sent, explain the specific reason; do not say an automatic delivery card will appear. "
       + "Plugin artifact events alone do not create conversation attachments.";
   };

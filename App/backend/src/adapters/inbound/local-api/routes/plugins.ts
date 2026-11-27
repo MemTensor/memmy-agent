@@ -36,7 +36,6 @@ const ArtifactParamsSchema = PluginParamsSchema.extend({ token: z.string().uuid(
 
 export function registerPluginRoutes(app: FastifyInstance, options: RegisterPluginRoutesOptions): void {
   const protectedRoute = { preHandler: options.authenticateRuntimeToken };
-
   app.get("/api/v1/plugins/catalog", protectedRoute, withErrorEnvelope(async (_request, reply) =>
     reply.send(PluginCatalogSchema.parse(await options.plugins.catalog()))
   ));
@@ -121,10 +120,18 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
     withErrorEnvelope(async (request, reply) => {
       const { id, capabilityId } = CapabilityParamsSchema.parse(request.params);
       const input = InvokePluginCapabilityInputSchema.parse(request.body);
+      if (input.background) {
+        const declared = options.plugins.get(id).manifest.conversation;
+        const action = (input.input as { action?: unknown } | null)?.action;
+        if (input.origin !== "user" || declared?.recordingCapabilityId !== capabilityId || !["status", "list"].includes(String(action))) {
+          throw Object.assign(new Error("Background invocation is limited to declared conversation status queries"), { code: "invalid_argument" });
+        }
+      }
       const callId = randomUUID();
       const cancel = () => void options.plugins.cancel(id, callId).catch(() => undefined);
       request.raw.once("aborted", cancel);
       let terminal: CapabilityEvent | undefined;
+      const artifacts: CapabilityEvent[] = [];
       try {
         for await (const event of options.plugins.invoke({
           callId,
@@ -134,7 +141,7 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
           input: input.input,
           deadline: input.deadline
         })) {
-          options.progressBus.emit("plugin.capability_event", {
+          if (!input.background) options.progressBus.emit("plugin.capability_event", {
             pluginId: id,
             capabilityId,
             callId,
@@ -143,12 +150,13 @@ export function registerPluginRoutes(app: FastifyInstance, options: RegisterPlug
             event
           });
           if (event.type === "result" || event.type === "error") terminal = event;
+          if (event.type === "artifact") artifacts.push(event);
         }
       } finally {
         request.raw.off("aborted", cancel);
       }
       if (!terminal) throw Object.assign(new Error("Plugin ended without a terminal event"), { code: "plugin_runtime_error" });
-      return reply.send({ callId, event: terminal });
+      return reply.send({ callId, event: terminal, ...(artifacts.length ? { events: artifacts } : {}) });
     })
   );
 

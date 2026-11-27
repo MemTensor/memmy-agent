@@ -1,7 +1,7 @@
-import { CONTINUOUS_RECORDER_CAPABILITY } from "../core/recorder-rotation.js";
+import { recorderCheckpoints } from "./recorder-checkpoints.js";
+import { persistMacCheckpoint } from "./persisted-checkpoint.js";
 import { createRecorderWriter } from "../core/recorder-writer.js";
-import { recorderRotationRequest } from "../core/recorder-checkpoint.js";
-
+import { CONTINUOUS_RECORDER_CAPABILITY } from "../core/recorder-rotation.js";
 // Record authorized foreground activity as a local JSONL event stream.
 
 import crypto from "node:crypto";
@@ -938,8 +938,8 @@ export async function run(
       if (pendingKeyTimer) clearTimeout(pendingKeyTimer);
       // Let the Windows supervisor remove its temporary worker and close its
       // child job before falling back to termination if it cannot respond.
-      if (windows && helper.stdin && !helper.stdin.destroyed) {
-        helper.stdin.end('{"kind":"stop"}\n');
+      if (helper.stdin && !helper.stdin.destroyed) {
+        helper.stdin.end(windows ? '{"kind":"stop"}\n' : undefined);
       } else if (!helper.killed) helper.kill("SIGTERM");
       await Promise.race([
         childClosed,
@@ -961,25 +961,42 @@ export async function run(
   };
 
   if (windows) command.args.push("--wechat-consent", defaultWeChatConsentFile());
-  const helper = spawn(command.binary, command.args, { stdio: [windows ? "pipe" : "ignore", "pipe", "pipe"], windowsHide: true,
+  const helper = spawn(command.binary, command.args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
     ...(command.env ? { env: command.env } : {}) });
   helper.stdin?.on("error", () => { /* A closed stop pipe is covered by the child-exit handler. */ });
   if (!helper.stdout || !helper.stderr) throw new Error("history observer pipes are unavailable");
   let helperClosed = false;
   helper.once("close", () => { helperClosed = true; childClosedResolve(); });
-  // Both native collectors feed this ordered queue. Insert the checkpoint
-  // into it synchronously so later lines cannot overtake an async key flush.
-  const controls = process.env.MEMMY_HISTORY_CONTINUOUS_OUTPUT === "1" && !process.stdin.isTTY && !args.screenshots
-    ? readline.createInterface({ input: process.stdin }) : null;
-  if (controls) {
-    controls.on("line", line => {
-      if (stopping || line.length > 8192) return;
-      let request;
-      try { request = recorderRotationRequest.parse(JSON.parse(line)); } catch { return; }
+  const localRotation = (windows || !helper.stdin) && process.env.MEMMY_HISTORY_CONTINUOUS_OUTPUT === "1";
+  const checkpoints = !process.stdin.isTTY ? recorderCheckpoints({
+    input: process.stdin,
+    requestNative: (id: string, range?: import("../core/event-capture-source.js").CaptureRange) => {
+      if (!helper.stdin?.writable) throw new Error("native checkpoint unavailable");
+      helper.stdin.write(JSON.stringify({ kind: "checkpoint", id, ...range }) + "\n");
+    },
+    persist: (event, through) => {
+      // Enqueue synchronously at receipt of the marker. Awaiting the mutable
+      // processing tail would include later observations in the saved position.
+      return writer.boundary(async () => {
+        await flushKeys();
+        health.flush();
+        if (!windows && event && through) return persistMacCheckpoint({ file: writer.output, event, through, sequence: writer.nextSequence() });
+        const fd = fs.openSync(writer.output, "r+");
+        try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      }, () => health.report("event_processing_error"));
+    },
+    rotateLocally(request) {
+      if (args.screenshots || (!localRotation && !writer.awaitingSync(request))) return false;
       writer.checkpoint(request, result => console.log("[recorder-rotation] " + JSON.stringify(result)));
-    });
-    console.log(CONTINUOUS_RECORDER_CAPABILITY);
-  }
+      return true;
+    },
+    rotate: windows || args.screenshots ? undefined : (request, event, through) =>
+      writer.nativeRotation(request, through, () => persistMacCheckpoint({
+        file: writer.output, event, through, sequence: writer.nextSequence(),
+      }).watermark.nativeSessionId),
+    write: line => console.log(line),
+  }) : null;
+  if (checkpoints && !args.screenshots && (!windows || process.env.MEMMY_HISTORY_CONTINUOUS_OUTPUT === "1")) console.log(CONTINUOUS_RECORDER_CAPABILITY);
   const lines = readline.createInterface({ input: helper.stdout });
   let queuedWindowsEvents = 0;
   lines.on("line", (line: string) => {
@@ -990,6 +1007,7 @@ export async function run(
         health.report("helper_parse_error");
         return;
       }
+      if (checkpoints?.acknowledge(event)) return;
       if (event.type === "recorder.diagnostic") {
         const signal = nativeRecorderDiagnostic(event);
         if (signal) writer.enqueue(safely(async () => {
@@ -1055,7 +1073,7 @@ export async function run(
     return { output: writer.output, recordingId, events: writer.sequence };
   } finally {
     // A short session or Stop must still publish the last successful write.
-    controls?.close();
+    checkpoints?.close();
     health.close();
   }
 }

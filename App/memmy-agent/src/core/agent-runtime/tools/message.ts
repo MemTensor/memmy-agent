@@ -81,6 +81,7 @@ export class MessageTool extends Tool {
       "Use this for reminders, cross-channel delivery, or explicit proactive sends. " +
       "Do not use this for a text-only normal reply in the current chat: answer naturally instead. " +
       "Use the media parameter to attach existing files when sending them. " +
+      "When you attach files to the current chat, that message is your reply for this turn: put your complete answer in content, because text written after it in this turn is not shown. " +
       "When generate_image creates images in the current chat, attach the generated artifact paths in media. " +
       "Do not include local file paths in cross-channel delivery text. " +
       "Do NOT use read_file to send files - that only reads content for your own analysis."

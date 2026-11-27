@@ -22,6 +22,10 @@ afterEach(() => {
 });
 
 describe("MessageTool", () => {
+  it("tells the model that an attachment message is the visible reply for the turn", () => {
+    // The runtime drops final text after a message call; the model must know before choosing where to write.
+    expect(new MessageTool().description).toContain("put your complete answer in content");
+  });
   it("returns an error when no target context is available", async () => {
     const tool = new MessageTool();
 

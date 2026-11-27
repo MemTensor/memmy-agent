@@ -91,9 +91,16 @@ export type ExternalBrowserLabels = {
   fallbackDragStep?: string;
 };
 
-function BrowserInstallDemo({ browser, labels, onClose }: {
+export type BrowserInstallDemoLabels = {
+  chrome: string; edge: string;
+  demoTitle?: string; demoBack?: string; demoInstruction?: string; demoDescription?: string;
+  dragCardTitle?: string; demoExtensionsHeading?: string; demoDeveloperMode?: string; installTarget?: string;
+  demoDragging?: string; demoRelease?: string; demoReplay?: string;
+};
+
+export function BrowserInstallDemo({ browser, labels, onClose }: {
   browser: Browser;
-  labels: ExternalBrowserLabels;
+  labels: BrowserInstallDemoLabels;
   onClose(): void;
 }) {
   const [replay, setReplay] = useState(0);

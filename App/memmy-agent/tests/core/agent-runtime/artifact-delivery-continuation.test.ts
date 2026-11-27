@@ -23,6 +23,9 @@ describe("plugin file inventory", () => {
     const reminder = continuation({ finalContent: "全部产物已交付", messages });
     expect(reminder).toContain("message(media=[absolute paths])");
     expect(reminder).toContain("choose the files needed for that outcome");
+    // A message call ends what the user sees this turn, so the reminder asks for the whole reply there.
+    expect(reminder).toContain("write your complete reply to the user in its content");
+    expect(reminder).not.toContain("brief note");
     expect(reminder).not.toContain("memmy-logo.png");
     expect(continuation({ finalContent: "已完成", messages })).toBeNull();
     expect(createArtifactDeliveryContinuation(() => ["/workspace/review.pdf"])(
@@ -58,4 +61,16 @@ describe("plugin file inventory", () => {
       "mcp_plugins_plugin_review_render_12345678", "message"
     ]);
   });
+});
+
+
+it("asks for model delivery of a saved skill and stops after the main file was attached", () => {
+  const paths = ["note/references/source.json", "note/references/teaching-gaps.json", "note/references/events.jsonl", "note/SKILL.md"];
+  const messages = [{ role: "user", content: "保存技能" }, { role: "tool", name: "mcp_plugins_create_skill_test", content: JSON.stringify({
+    saved: true, publishedFiles: paths.map(name => ({ name, path: `/workspace/${name}` }))
+  }) }];
+  const reminder = createArtifactDeliveryContinuation(() => [])({ messages, finalContent: "已保存" });
+  expect(reminder).toContain("message(media=[absolute paths])");
+  expect(reminder).toContain("Do not send every generated file");
+  expect(createArtifactDeliveryContinuation(() => ["/workspace/note/SKILL.md"])({ messages, finalContent: "已附上" })).toBeNull();
 });

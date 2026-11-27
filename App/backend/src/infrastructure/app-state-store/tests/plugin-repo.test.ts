@@ -40,16 +40,24 @@ describe("PluginRepository", () => {
     repository.setApprovedPermissions(manifest.id, manifest.permissions);
     repository.setConfig(manifest.id, { database: "crossref" });
     repository.setState(manifest.id, "active");
+    repository.setDesiredEnabled(manifest.id, true);
 
     store.close();
     store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
     expect(store.repositories.plugins.get(manifest.id)).toMatchObject({
       id: manifest.id,
       state: "active",
+      desiredEnabled: true,
       artifactHash: "abc",
       config: { database: "crossref" },
       approvedPermissions: manifest.permissions
     });
+    store.repositories.plugins.setState(manifest.id, "failed", "fetch failed");
+    expect(store.repositories.plugins.get(manifest.id)).toMatchObject({ state: "failed", desiredEnabled: true });
+    store.repositories.plugins.setDesiredEnabled(manifest.id, false);
+    store.repositories.plugins.setState(manifest.id, "failed", "disable cleanup failed");
+    store.close(); store = createAppStateStore({ databasePath: join(root, "app.sqlite") });
+    expect(store.repositories.plugins.get(manifest.id)).toMatchObject({ state: "failed", desiredEnabled: false });
 
     store.repositories.plugins.recordCall({
       callId: "call-1",
