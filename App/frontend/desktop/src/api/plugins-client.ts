@@ -21,7 +21,7 @@ import { userTimeZone } from "../lib/user-time-zone.js";
 
 export interface PluginsClient {
   list(): Promise<InstalledPlugin[]>;
-  catalog?(): Promise<PluginCatalogEntry[]>;
+  catalog(): Promise<PluginCatalogEntry[]>;
   install(pluginId: string, version?: string): Promise<InstalledPlugin>;
   update(pluginId: string, version: string): Promise<InstalledPlugin>;
   approvePermissions(pluginId: string, permissions: PluginPermission[]): Promise<InstalledPlugin>;
@@ -91,11 +91,17 @@ export function createHttpPluginsClient(config: RuntimeConfig): PluginsClient {
         body: { permissions }
       });
     },
-    enable(pluginId) {
-      return requestJson({ config, path: pluginEndpointPaths.enable(pluginId), schema: InstalledPluginSchema, body: {} });
+    async enable(pluginId) {
+      const plugin = await requestJson({ config, path: pluginEndpointPaths.enable(pluginId), schema: InstalledPluginSchema, body: {} });
+      // Lifecycle changes invalidate every cached plugin list, including the ones
+      // that drive per-conversation capability polling.
+      notifyPluginChange();
+      return plugin;
     },
-    disable(pluginId) {
-      return requestJson({ config, path: pluginEndpointPaths.disable(pluginId), schema: InstalledPluginSchema, body: {} });
+    async disable(pluginId) {
+      const plugin = await requestJson({ config, path: pluginEndpointPaths.disable(pluginId), schema: InstalledPluginSchema, body: {} });
+      notifyPluginChange();
+      return plugin;
     },
     async uninstall(pluginId) {
       await requestJson({ config, path: pluginEndpointPaths.plugin(pluginId), init: { method: "DELETE" }, schema: OkResponseSchema });

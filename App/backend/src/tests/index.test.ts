@@ -53,6 +53,12 @@ vi.mock("../infrastructure/memmy-config/index.js", async (importOriginal) => {
   };
 });
 
+// Local API fixtures own their Cloud and Memory clients; keep plugin discovery local too.
+vi.mock("../adapters/outbound/plugin-registry/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../adapters/outbound/plugin-registry/index.js")>();
+  return { ...actual, createHttpPluginRegistry: () => actual.createInMemoryPluginRegistry([]) };
+});
+
 let tempDir: string | undefined;
 let backend: LocalBackend | undefined;
 let integrationServer: ReturnType<typeof createServer> | undefined;
@@ -431,7 +437,7 @@ describe("local api", () => {
     backend = await createLocalBackend(fixture.options);
     expect(fixture.reload).not.toHaveBeenCalled();
     expect(fixture.timers.scheduled).toHaveLength(1);
-    fixture.timers.scheduled[0].run();
+    fixture.timers.scheduled[0]!.run();
 
     await vi.waitFor(() => expect(fixture.reload).toHaveBeenCalledOnce());
     const config = YAML.parse(readFileSync(fixture.memmyConfigPath, "utf8"));
@@ -452,7 +458,7 @@ describe("local api", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     backend = await createLocalBackend(fixture.options);
     expect(fixture.timers.scheduled).toHaveLength(1);
-    fixture.timers.scheduled[0].run();
+    fixture.timers.scheduled[0]!.run();
 
     await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
       expect.stringContaining("MCP bridge config retry failed after backend startup")
@@ -466,7 +472,7 @@ describe("local api", () => {
   it("retries current bridge configuration without reloading an Agent that the caller will start", async () => {
     const fixture = prepareMcpBridgeLock("plugins");
     backend = await createLocalBackend({ ...fixture.options, skipAgentMcpReload: true });
-    fixture.timers.scheduled[0].run();
+    fixture.timers.scheduled[0]!.run();
 
     await vi.waitFor(() => expect(mcpBridgeWrites.events.slice(-2)).toEqual(["written:composio", "written:plugins"]));
     const config = YAML.parse(readFileSync(fixture.memmyConfigPath, "utf8"));
@@ -477,7 +483,7 @@ describe("local api", () => {
   it("cancels the pending bridge retry when Backend closes, including an already queued callback", async () => {
     const fixture = prepareMcpBridgeLock("plugins");
     backend = await createLocalBackend(fixture.options);
-    const retry = fixture.timers.scheduled[0];
+    const retry = fixture.timers.scheduled[0]!;
     await backend.close();
     backend = undefined;
     expect(fixture.timers.clear).toHaveBeenCalledWith(retry.handle);
@@ -497,7 +503,7 @@ describe("local api", () => {
       runtimeConfigPath: join(notDirectory, "runtime.json")
     })).rejects.toThrow(/EEXIST|ENOTDIR/);
 
-    const retry = fixture.timers.scheduled[0];
+    const retry = fixture.timers.scheduled[0]!;
     expect(fixture.timers.clear).toHaveBeenCalledWith(retry.handle);
     const calls = [...mcpBridgeWrites.calls];
     retry.run();
@@ -516,7 +522,7 @@ describe("local api", () => {
     mcpBridgeWrites.beforePatch = async () => { markStarted(); await heldWrite; };
 
     try {
-      fixture.timers.scheduled[0].run();
+      fixture.timers.scheduled[0]!.run();
       await started;
       await backend.close();
       backend = undefined;
@@ -540,7 +546,7 @@ describe("local api", () => {
     mcpBridgeWrites.afterCommitGuard = async () => { markCommitting(); await heldCommit; };
 
     try {
-      fixture.timers.scheduled[0].run();
+      fixture.timers.scheduled[0]!.run();
       await committing;
       let closed = false;
       const closing = backend.close().then(() => { closed = true; });
@@ -993,6 +999,7 @@ describe("local api", () => {
     backend = await createTempBackend({
       memoryClient: createMockMemoryClient({
         health: {
+          ...await createMockMemoryClient().health(),
           ok: false,
           version: "test-0.0.0",
           uptimeMs: 0,
@@ -1701,7 +1708,7 @@ function createRecordingCloudClient() {
 
     async deleteIntegrationConnection(input: { machineComposioToken?: string; id: string }): Promise<{ ok: true }> {
       calls.push(`deleteIntegrationConnection:${input.machineComposioToken ?? "no-machine-token"}:${input.id}`);
-      return { ok: true };
+      return { ok: true as const };
     }
   };
 }

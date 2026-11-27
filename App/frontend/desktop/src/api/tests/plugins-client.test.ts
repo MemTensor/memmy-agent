@@ -57,6 +57,20 @@ describe("plugins client", () => {
     ]);
   });
 
+  it("broadcasts lifecycle changes so cached plugin lists refresh", async () => {
+    const plugin = installedPlugin();
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(plugin)));
+    const dispatch = vi.fn();
+    vi.stubGlobal("window", { dispatchEvent: dispatch });
+    const client = createHttpPluginsClient(config);
+
+    await client.enable(plugin.id);
+    await client.disable(plugin.id);
+
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect(dispatch.mock.calls.every(([event]) => event.type === "memmy:plugin-change")).toBe(true);
+  });
+
   it("reads Host-managed artifacts with local authentication and rejects foreign URLs", async () => {
     const fetchMock = vi.fn(async (_request: URL, init?: RequestInit) => {
       expect(init?.headers).toMatchObject({ "x-memmy-local-token": "token" });

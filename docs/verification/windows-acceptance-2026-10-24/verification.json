@@ -1,0 +1,459 @@
+{
+  "baseline": "5af599511d7236f9db6d3557cc0906046f1e1ed7",
+  "acceptanceDate": "2026-10-24",
+  "runtimeConfirmedAt": "2026-10-24T08:54:52.446Z",
+  "scope": "Isolated real Windows development runtime; not formal package acceptance",
+  "pdf": {
+    "file": "REPORT.pdf",
+    "sha256": "39b01221ba872729397653e21a6b592560bebbb3166f0f03bafcbe729c0432ab",
+    "pages": 7
+  },
+  "runtime": {
+    "platform": "win32",
+    "node": "22.20.0",
+    "electron": "38.4.0",
+    "abi": "139"
+  },
+  "runtimeFileChecks": [
+    {
+      "relative": "App/memmy-agent/dist/tools/computer-history/win/policy.js",
+      "sha256": "f434cf481e8e2e40d516d78c96e5b8571f7b917ae5a84e2019ed7ce1d7222e0c",
+      "matchesCompiledSource": true,
+      "matchesRecordedRuntime": true
+    },
+    {
+      "relative": "App/memmy-agent/dist/tools/computer-history/win/document-regions.js",
+      "sha256": "cafe491f106619da33b3496e1ea69e4c37da30e9e987ef3c883acb2818957430",
+      "matchesCompiledSource": true,
+      "matchesRecordedRuntime": true
+    },
+    {
+      "relative": "App/memmy-agent/dist/tools/computer-history/win/normalize.js",
+      "sha256": "4591abb9680af257d658cc5b8ae6d4b97950900b9b019c7cfd9c9e29eda3fcbf",
+      "matchesCompiledSource": true,
+      "matchesRecordedRuntime": true
+    },
+    {
+      "relative": "App/memmy-agent/dist/tools/computer-history/core/recording.js",
+      "sha256": "b544be98f4cc54244a7c0bf5fbbd68b1c94c7620df18dc55caccff160fa042f7",
+      "matchesCompiledSource": true,
+      "matchesRecordedRuntime": true
+    },
+    {
+      "relative": "App/memmy-agent/dist/tools/computer-history/core/summary-writer.js",
+      "sha256": "426f69c0448e3da7eddd2ca7b6bdb85d04730c00538daffa2714d127f7f94e07",
+      "matchesCompiledSource": true,
+      "matchesRecordedRuntime": true
+    },
+    {
+      "relative": "Memory/dist/src/algorithm/plugin-algorithms.js",
+      "sha256": "44f7eac32e58b34d9c51e522cfaf76b28491bfa3cff749b096fd9b5e67452c8b",
+      "matchesCompiledSource": true,
+      "matchesRecordedRuntime": true
+    },
+    {
+      "relative": "Memory/dist/src/service/retrieval/retrieval-service.js",
+      "sha256": "93f32b27ed6ed95882f853770459f39488b1943d03f0c46790bf561ec776ebe0",
+      "matchesCompiledSource": true,
+      "matchesRecordedRuntime": true
+    },
+    {
+      "relative": "Memory/dist/src/model/llm.js",
+      "sha256": "97e4b8626e83076938f8b458b67577008c7f30c410fad6027ed3562f4b0b1b14",
+      "matchesCompiledSource": true,
+      "matchesRecordedRuntime": true
+    },
+    {
+      "relative": "App/memmy-agent/dist/tools/computer-history/win/memmy-history-recorder.exe",
+      "sha256": "dab14b33f746035fea8a929d7b6babdecb9b980f7721c845d911735f2cb17935",
+      "matchesFinalBuild": true
+    }
+  ],
+  "runtimeChecks": {
+    "productionModuleImports": true,
+    "notepadDefaultAndExplicitOptOut": true,
+    "finalStoredEventsAndCurrentProductionRenderer": true,
+    "savedDocumentStillMatches": true
+  },
+  "sourceFiles": [
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/core/recording.ts",
+      "sha256": "bb9c44473da2bb9c882ea9d12586b143ffb0b24db9b43956905ed8b656966758"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/core/summary-writer.ts",
+      "sha256": "cab44ec610e82a70a4151c15ce1e60485ee47a855ff55503e62c84d333b123e8"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/README.md",
+      "sha256": "6f5a486d612663c37d4773d6b04314de2010efd33b4ac0e5bf771cd0a717f11e"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/document-regions.ts",
+      "sha256": "9de1edadf3199e7807c4d6c6d4e9c3c89701eb5142f505dc122efe11937edcdb"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/native/PROTOCOL.md",
+      "sha256": "d339aabd9e9772fc2772cd1d5899c9b33f018db59fada660344b69331df70a0d"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/native/src/common/classify.cpp",
+      "sha256": "5e9149a466e55c905698e5fc394a3e38da1c564799576d797761b9212bd5cee2"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/native/src/common/policy.cpp",
+      "sha256": "749b64cdb905073b7d804cd0c3c6cd320dac0ba827577363e6cdea39b483bcef"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/native/src/common/policy.h",
+      "sha256": "6410340b9e03930f221ee3ef4847255c984421616c8e12a5186cbeca458b40b6"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/native/src/common/protocol.cpp",
+      "sha256": "07391ffbc73688375d7bf55fe6ec83ca432f50c4dc713a04815a305ee9aed2d6"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/native/src/common/protocol.h",
+      "sha256": "a07bed7ab75970eeec1b81150c5602a9f2f5b5bf1c3bfcda391056762a87591b"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/native/src/win/uia_reader.cpp",
+      "sha256": "38b81c22457f4504ba7553287b7f6bc11f1e9fa4f6fe38b7999277ca1b557c03"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/native/tests/unit/unit_tests.cpp",
+      "sha256": "02fa789e1f7233ce7d31c9768293461dd017b93804a2f432ff1a10d2474a8565"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/normalize.ts",
+      "sha256": "e76a99808719a1b3ef23ec9bbc961d30bfec897da61ab60130a41ad7e69e3dda"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-history/win/policy.ts",
+      "sha256": "80fcce05f119fd07a03eca5b922d2c8491bef22bd21991d2e30e23942a5d719b"
+    },
+    {
+      "file": "App/memmy-agent/tests/tools/computer-history/win/document-evidence.test.ts",
+      "sha256": "3c0243e77b8791df509a3fbd3c64869a234b8ede9ebf01cf07879fa018cda219"
+    },
+    {
+      "file": "App/memmy-agent/tests/tools/computer-history/win/notepad-document.test.ts",
+      "sha256": "4af9d887675c1db04533925ae9772afee6f1420236dc4cf633d656e79b773542"
+    },
+    {
+      "file": "Memory/src/algorithm/plugin-algorithms.ts",
+      "sha256": "e060bca7c512cd1d7f8cd6f875a5b91362a46789d9fc5572ab386b25797f85f7"
+    },
+    {
+      "file": "Memory/src/model/llm.ts",
+      "sha256": "577f86f76f26cbf0bd4899f9d1c2120b8e02af12f2dfe8400256f165e51c4590"
+    },
+    {
+      "file": "Memory/src/model/types.ts",
+      "sha256": "24e1b14a843df3f9db0c9ad24b0f99b98979f65fc8817154222a50afb6845373"
+    },
+    {
+      "file": "Memory/src/service/retrieval/retrieval-service.ts",
+      "sha256": "0b0af24d1ac3e4980162049c34def25493071ef5f5878d5b530a884a9b892fd2"
+    },
+    {
+      "file": "Memory/tests/algorithm/plugin-algorithms.test.ts",
+      "sha256": "0e59c5b9ceebbf7138bb08e459e4bf7642d567a47b7fb9ddc3d3450d916d03f0"
+    },
+    {
+      "file": "Memory/tests/llm-json-retry.test.ts",
+      "sha256": "f6b515a7181ead1c3ccecd3f6e936fac399b057889bc6b3fb5818b5f4add05c2"
+    },
+    {
+      "file": "Memory/tests/service/retrieval/query-and-filter.test.ts",
+      "sha256": "2df9d76778816b57c903e5001e7bb8ce120179e7d8b4d1824d4a044edf92a476"
+    },
+    {
+      "file": "App/memmy-agent/src/skills/skill-creator/SKILL.md",
+      "sha256": "a540c088da6f2671d72a8d2e261b6f7882c2c53b5e20bd7791dcbd0d042f542e"
+    },
+    {
+      "file": "App/memmy-agent/src/skills/computer-use/SKILL.md",
+      "sha256": "42f82448d1c88b658860ff93cc8cd52a4b815dd1c2c184b05f7699e18f4c5811"
+    },
+    {
+      "file": "App/backend/src/services/error-envelope.ts",
+      "sha256": "3ee3ad8c4c606d544ca968b53111faf05c879622047bfbe3acdc2dfb51722aa4"
+    },
+    {
+      "file": "App/backend/src/services/tests/error-envelope.test.ts",
+      "sha256": "6d84ab58b123005351ce83edb69f9c27ff8d8f8b09882afa6dfb053c23ba8c71"
+    },
+    {
+      "file": "App/memmy-agent/src/core/agent-runtime/tools/filesystem.ts",
+      "sha256": "50f8967919ca799754ad9ff7bc3a34d5ee3e953c600828c3a3a43d2259ea290b"
+    },
+    {
+      "file": "App/memmy-agent/src/tools/computer-use/managed-ocu-session.ts",
+      "sha256": "e43ce858529358f6237a72b7b4e04b1f8de6effd40df049cb4b5e97890231e6c"
+    },
+    {
+      "file": "App/memmy-agent/tests/core/agent-runtime/tools/filesystem-tools.test.ts",
+      "sha256": "c1888e6e4fb89969ad36167e1bf4961e2239adc7cc833dfa226e70afe6dba7c7"
+    },
+    {
+      "file": "App/memmy-agent/tests/tools/computer-use/managed-ocu-windows-app-identity.test.ts",
+      "sha256": "8460b3b9428937591f14c17196507a917fe5a3cfbe05f928e1036acd72bebaa9"
+    }
+  ],
+  "firstBatch": {
+    "automatedTests": {
+      "plugin": 43,
+      "backend": 6,
+      "agentIdentity": 38,
+      "fileTools": 106,
+      "totalPassed": 193
+    },
+    "finalTrial": {
+      "passed": true,
+      "session": "websocket_bd13e4a2-1d93-4aa4-8444-ee2e245ed7ef.jsonl",
+      "startedFromEmptyFile": true,
+      "initialActiveDocument": "demo-note.txt",
+      "userMessages": 1,
+      "toolCalls": {
+        "read_file": 8,
+        "mcp_memmy_computer_use_get_app_state": 5,
+        "mcp_memmy_computer_use_list_apps": 1,
+        "mcp_memmy_computer_use_perform_secondary_action": 1,
+        "mcp_memmy_computer_use_set_value": 1,
+        "mcp_memmy_computer_use_press_key": 4,
+        "mcp_memmy_computer_use_type_text": 2
+      },
+      "targetFinalNewlineFacts": [
+        "none",
+        "CRLF"
+      ],
+      "strictVerification": "reports/trial-verification-final.json",
+      "checks": {
+        "targetNonEmpty": true,
+        "targetContentExact": true,
+        "earlierDemoUnchanged": true,
+        "editorShowsTarget": true,
+        "editorShowsRequestedParameters": true
+      },
+      "outputBytes": 86,
+      "outputSha256": "804dbd1bbb31660543ec993294989d4211833f1f2377147cbeaa1ccd354a41ed",
+      "demoSha256Unchanged": "890f0ea65cc74a5971f0e8d4fb2fa7e9fe1c458edbd03da258be46e43c59b572"
+    }
+  },
+  "followup": {
+    "automatedTests": {
+      "agent": 99,
+      "memory": 182,
+      "totalPassed": 281
+    },
+    "nativeUniqueCasesPassed": 13,
+    "nativePassEvidence": {
+      "unit": "native-final.xml",
+      "win.boundaries": "native-final.xml",
+      "win.metadata": "native-final.xml",
+      "integration.policy_strict": "native-final.xml",
+      "integration.snapshot_content": "native-final.xml",
+      "integration.race_aba": "native-final.xml",
+      "integration.race_policy": "native-final.xml",
+      "integration.timeout_reap": "native-final.xml",
+      "integration.commit_races": "native-final.xml",
+      "integration.partial_baseline": "native-final.xml",
+      "integration.observe_checkpoint": "native-final.xml",
+      "integration.observe_checkpoint_origin": "native-final.xml",
+      "integration.observe_ui_hang_recovery": "native-final-hang.xml"
+    },
+    "liveCapture": {
+      "at": "2026-10-24T08:34:27.833Z",
+      "passed": true,
+      "session": {
+        "schemaVersion": 1,
+        "id": "a480d936-f863-4f83-9908-e8fa28ce9c81",
+        "pluginId": "teach-mode",
+        "conversationId": "8f35b943-dc3c-47b8-804c-b53837337f01",
+        "goal": "仅记录本轮专用 Notepad 测试文档的正文与保存；不观察其他应用，不生成或执行技能。",
+        "state": "ready",
+        "startedAt": "2026-10-24T08:31:46.264Z",
+        "endedAt": "2026-10-24T08:33:27.258Z",
+        "eventCount": 5,
+        "eventTypes": {
+          "mouse_click": 1,
+          "accessibility_snapshot": 3,
+          "key_press": 1
+        },
+        "applications": [
+          "Notepad.exe"
+        ],
+        "eventsSha256": "421fc3a456d3505cd11e55e1be624e6efbc89a8339f3b8b38db0bb819df2b4dc",
+        "availability": "available",
+        "limitations": [
+          "foreground_events_and_accessibility_only",
+          "screenshots_and_audio_not_recorded"
+        ],
+        "error": null,
+        "ranges": [
+          {
+            "stream": "2026-10-24T08-30-00Z",
+            "startByte": 9119,
+            "endByte": 64219
+          }
+        ]
+      },
+      "sha256": "421fc3a456d3505cd11e55e1be624e6efbc89a8339f3b8b38db0bb819df2b4dc",
+      "bodyObservations": 3,
+      "bodyMarkerPresent": true,
+      "actualHostReadPageContainsBody": true,
+      "actualTeachingSummaryContainsBody": true,
+      "eventsStableAfterStop": true,
+      "generatedSkills": [
+        "windows-acceptance-invoice-note-fixed"
+      ],
+      "documentEvidence": [
+        {
+          "adapter": "notepad.document",
+          "labelKind": "document_label",
+          "labelSource": "uia.name",
+          "textSource": "uia.document_range",
+          "visibleTextSource": "uia.visible_ranges",
+          "providerFocused": true
+        },
+        {
+          "adapter": "notepad.document",
+          "labelKind": "document_label",
+          "labelSource": "uia.name",
+          "textSource": "uia.document_range",
+          "visibleTextSource": "uia.visible_ranges",
+          "providerFocused": true
+        },
+        {
+          "adapter": "notepad.document",
+          "labelKind": "document_label",
+          "labelSource": "uia.name",
+          "textSource": "uia.document_range",
+          "visibleTextSource": "uia.visible_ranges",
+          "providerFocused": true
+        }
+      ],
+      "scope": "Real native collector -> TS validation/normalization -> durable plugin fragment -> Host event read -> production teaching evidence renderer. No new skill generation or execution."
+    },
+    "wideWindow": {
+      "samples": 6,
+      "emittedNodes": 229,
+      "workerMeanMs": {
+        "before": 570.66,
+        "after": 535.5513333333333
+      },
+      "queryBudgetMs": 650,
+      "workerTimeoutMs": 1500,
+      "truncated": 0,
+      "interpretation": "Small interleaved A/B sample, not a statistical guarantee for arbitrary providers."
+    },
+    "stop": {
+      "modelBusyAtClick": true,
+      "dispatchMs": 49.64500000000004,
+      "completeMs": 679.4959999999999,
+      "boundary": "Direct GUI control; does not establish the latency of a natural-language stop message."
+    },
+    "memoryDeadlines": {
+      "at": "2026-10-24T08:19:06.308Z",
+      "runtime": {
+        "node": "22.20.0",
+        "electron": "38.4.0",
+        "abi": "139"
+      },
+      "provider": "Controlled local HTTP fault fixture; no real model request",
+      "cases": [
+        {
+          "name": "relation-default-6s",
+          "elapsedMs": 6129.1993,
+          "result": {
+            "relation": "follow_up",
+            "confidence": 0.8,
+            "reason": "follow-up phrase (fallback)",
+            "signals": [
+              "r4_follow_phrase",
+              "llm_skipped"
+            ]
+          },
+          "requests": 1,
+          "httpCancelled": true
+        },
+        {
+          "name": "query-extract-transport-3s",
+          "elapsedMs": 3001.6422000000002,
+          "error": "AbortError: This operation was aborted",
+          "requests": 1,
+          "httpCancelled": true
+        },
+        {
+          "name": "recovery-after-timeout",
+          "elapsedMs": 8.990900000000693,
+          "result": {
+            "relation": "follow_up",
+            "confidence": 0.8,
+            "reason": "same task",
+            "signals": [
+              "llm",
+              "heuristic:r4_follow_phrase(weak)",
+              "heuristic:r7_domain_shift(weak)"
+            ],
+            "llmModel": "controlled-latency-fixture"
+          }
+        }
+      ],
+      "passed": true,
+      "requests": [
+        {
+          "mode": "hang",
+          "at": 1792829946442,
+          "closedAt": 1792829952438
+        },
+        {
+          "mode": "hang",
+          "at": 1792829952591,
+          "closedAt": 1792829955591
+        },
+        {
+          "mode": "success",
+          "at": 1792829955745,
+          "closedAt": 1792829955746
+        }
+      ]
+    },
+    "cleanup": {
+      "at": "2026-10-24T08:34:30.924Z",
+      "scope": "D:/memmy-remediation-20261024",
+      "notepad": {
+        "otherTabCount": 3,
+        "sharedNotepadPreserved": true,
+        "closed": [
+          "memmy-followup-small-20261024.txt",
+          "memmy-followup-small-20261024-final.txt",
+          "memmy-followup-multiline-20261024-final.txt"
+        ]
+      },
+      "applicationExit": {
+        "code": 0,
+        "at": "2026-10-24T08:34:33.239Z"
+      },
+      "remainingOwnedProcesses": [],
+      "scheduledTasksRemoved": true,
+      "passed": true,
+      "completedAt": "2026-10-24T08:35:47.293Z",
+      "isolatedMemoryRetainedAfterAppQuit": true,
+      "memoryShutdown": {
+        "method": "stopInstalledMemoryService with stopUserService omitted by explicit no-op; authenticated local admin shutdown only",
+        "result": {
+          "ok": true,
+          "action": "stop",
+          "pid": 25724
+        }
+      }
+    }
+  },
+  "remaining": [
+    "W7: formal candidate package, clean Windows without system Node, full release regression",
+    "Natural-language recording control still depends on the model/preceding processing; immediate GUI stop bypasses that path."
+  ],
+  "relatedPluginChangesIncludedInThisRepository": false
+}

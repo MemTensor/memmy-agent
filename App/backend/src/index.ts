@@ -71,6 +71,8 @@ const MCP_BRIDGE_CONFIG_RETRY_DELAY_MS = 5_000;
 const COLLAB_SYNC_INTERVAL_MS = 60_000;
 
 export interface CreateLocalBackendOptions {
+  /** Agent gateway readiness for plugin Host lifecycle recovery. */
+  agentGatewayReady?: Promise<void>;
   databasePath: string;
   localToken?: string;
   bootstrapScenario?: BootstrapScenario;
@@ -117,6 +119,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
   let server: Awaited<ReturnType<typeof createLocalApiServer>> | null = null;
   let collabSyncTimer: ReturnType<typeof setInterval> | undefined;
   let pluginService: PluginService | null = null;
+  let pluginLifecycle: import("./services/index.js").BackendServices["pluginLifecycle"];
   let mcpBridgeRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let mcpBridgeClosed = false;
   let committingMcpBridgeWrite: Promise<void> | undefined;
@@ -203,6 +206,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       scanPreferencesStore,
       accountChannel: options.accountChannel,
       memmyAgentAdminClient: options.memmyAgentAdminClient,
+      agentGatewayReady: options.agentGatewayReady,
       memmyAgentAdminBootstrapSecret: await readAgentGatewayBootstrapSecret(memmyConfigPath),
       pluginRegistry: configuredPluginRegistry(process.env, bundledCatalog?.registry, (): Record<string, string> => {
         const cloudUuid = appStateStore.repositories.accountSession.getCloudUuid();
@@ -211,6 +215,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       trustedBundledPluginRoots: bundledCatalog ? [bundledCatalog.trustedArtifactRoot] : undefined
     });
     pluginService = services.plugins;
+    pluginLifecycle = services.pluginLifecycle;
+    await pluginLifecycle?.start();
     if (bundledCatalog) {
       const failures = await suppressBundledPlugins({
         plugins: services.plugins,
@@ -462,6 +468,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
       });
     const boundServer = server;
     const boundPluginService = services.plugins;
+    pluginLifecycle?.startUpdates();
     return {
       runtimeConfig,
       getAppSettings() {
@@ -476,7 +483,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
         try {
           await boundServer.close();
         } finally {
-          await boundPluginService.shutdown();
+          if (pluginLifecycle) await pluginLifecycle.close();
+          else await boundPluginService.shutdown();
           appStateStore.close();
         }
       }
@@ -485,7 +493,8 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     clearInterval(collabSyncTimer);
     await stopMcpBridgeWrites();
     await server?.close().catch(() => undefined);
-    await pluginService?.shutdown();
+    if (pluginLifecycle) await pluginLifecycle.close();
+    else await pluginService?.shutdown();
     appStateStore.close();
     throw error;
   }
@@ -497,7 +506,16 @@ function configuredPluginRegistry(
   authHeaders?: () => Record<string, string>
 ): PluginRegistry | undefined {
   const baseUrl = resolvePluginRegistryBaseUrl(env);
-  const remoteRegistry = baseUrl ? createHttpPluginRegistry({ baseUrl, authHeaders }) : undefined;
+  const officialOrigin = new URL(resolveCloudClientConfig(env).baseUrl).origin;
+  const explicit = env.MEMMY_PLUGIN_REGISTRY_URL?.trim();
+  let trustedNativeOrigin = officialOrigin;
+  if (explicit && env.MEMMY_TRUST_LOCAL_PLUGIN_REGISTRY === "1") {
+    const local = new URL(explicit);
+    if (local.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(local.hostname)) {
+      trustedNativeOrigin = local.origin;
+    }
+  }
+  const remoteRegistry = baseUrl ? createHttpPluginRegistry({ baseUrl, authHeaders, trustedNativeOrigin }) : undefined;
   // Explicit remote distribution must never fall back to a locally bundled package.
   if (env.MEMMY_PLUGIN_REGISTRY_URL?.trim()) return remoteRegistry;
   return bundledRegistry ? createCompositePluginRegistry(bundledRegistry, remoteRegistry) : remoteRegistry;

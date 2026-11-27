@@ -102,14 +102,15 @@ const EMPTY_LABELS: ReadonlyMap<string, string> = new Map();
 export const PluginCapabilityLabelsContext = createContext<ReadonlyMap<string, string>>(EMPTY_LABELS);
 const capabilityKey = (id: string) => id.toLowerCase().replace(/[^a-z0-9_]+/g, "_");
 
-export function buildPluginCapabilityLabels(plugins: readonly InstalledPlugin[]): ReadonlyMap<string, string> {
+export function buildPluginCapabilityLabels(plugins: readonly InstalledPlugin[], language = "zh-CN"): ReadonlyMap<string, string> {
   const labels = new Map<string, string>();
   const ambiguous = new Set<string>();
   for (const plugin of plugins) for (const capability of plugin.manifest.capabilities) {
     const key = capabilityKey(capability.id);
+    const label = capability.nameLocalized?.[language] ?? capability.name;
     const previous = labels.get(key);
-    if (previous && previous !== capability.name) ambiguous.add(key);
-    else labels.set(key, capability.name);
+    if (previous && previous !== label) ambiguous.add(key);
+    else labels.set(key, label);
   }
   for (const key of ambiguous) labels.delete(key);
   return labels;

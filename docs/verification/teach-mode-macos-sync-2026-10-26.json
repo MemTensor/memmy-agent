@@ -1,0 +1,131 @@
+{
+  "schema": "memmy.teach-mode-macos-sync/v1",
+  "recordedAt": "2026-10-26T05:36:49.846903+00:00",
+  "scope": "Synchronize Windows Teach Mode fixes into shared/macOS source; prepare for subsequent physical Mac acceptance.",
+  "host": {
+    "repository": "Jovianix/memmy-agent",
+    "branch": "pxlin/dev",
+    "windowsSourceCommit": "1854d2f56c81386cbc7bb80960f5ec21086b329a",
+    "mergedBaseline": "216c77d4",
+    "nativeStandaloneAndPackagedSourceIdentical": true
+  },
+  "plugin": {
+    "repository": "Jovianix/teach-mode",
+    "branch": "main",
+    "version": "0.4.1",
+    "sourceCommit": "11df9450bc1b1c84e3b41ca0b296ac14772439ba"
+  },
+  "synchronizedFeatures": [
+    "Teaching tab departure revokes content immediately and drains the previous document before tab-left; missing close proof remains partial.",
+    "Shared browser/desktop session APIs, plugin lifecycle, preparation timer and compact teaching evidence.",
+    "macOS native enrichment barrier, ordered normalization and fsync-backed exact byte watermark.",
+    "macOS continuous output rotation at the native barrier without restarting capture; bounded failure and overlapping checkpoints/stops.",
+    "Each macOS segment re-establishes a full sanitized AX snapshot/page context; native capture state and coverage gaps remain continuous.",
+    "Packaged macOS History recorder matches the current standalone source, including the upstream application/website observation policy.",
+    "Prototype data migration canonicalizes macOS parent directory aliases while retaining symlink, containment and hash checks; reproduced and validated on a real macOS CI runner."
+  ],
+  "checks": [
+    {
+      "name": "Agent history/capture/plugin/managed-observation regression",
+      "passed": 628,
+      "failed": 2,
+      "skipped": 16
+    },
+    {
+      "name": "Mac rotation/normalization/controller suites (included in Agent total)",
+      "passed": 57,
+      "failed": 0
+    },
+    {
+      "name": "Browser extension recorder/page/history/packaging",
+      "passed": 156,
+      "failed": 0
+    },
+    {
+      "name": "Conversation recording UI",
+      "passed": 9,
+      "failed": 0
+    },
+    {
+      "name": "Teach Mode plugin tests",
+      "passed": 53,
+      "failed": 0
+    },
+    {
+      "name": "Plugin release validation cases (also verified in three-platform CI)",
+      "passed": 4,
+      "failed": 0
+    },
+    {
+      "name": "Agent build and full typecheck",
+      "status": "passed"
+    },
+    {
+      "name": "Backend, frontend and plugin typechecks",
+      "status": "passed"
+    },
+    {
+      "name": "Plugin development ZIP build",
+      "status": "passed"
+    }
+  ],
+  "preExistingFailures": [
+    {
+      "test": "uses the Windows icon reader for Windows History application IDs",
+      "impact": "Windows icon display; unrelated to macOS capture/teaching.",
+      "baselineReproducedBeforeThisSync": true
+    },
+    {
+      "test": "writes no summary for a window with only lifecycle/checkpoint records (marker=true)",
+      "impact": "A control-only segment can produce an empty History summary; capture remains available.",
+      "baselineReproducedBeforeThisSync": true
+    }
+  ],
+  "physicalMacAcceptance": {
+    "status": "pending_user_test",
+    "notExecutedHere": [
+      "Swift native app compilation",
+      "TCC permissions and recovery",
+      "Real Chrome/Edge teaching window lifecycle",
+      "Real continuous desktop capture across a ten-minute boundary",
+      "Model-generated skill and independent replay validation"
+    ]
+  },
+  "macHandoff": {
+    "required": [
+      "macOS 14 or later",
+      "Node 22 for development",
+      "Rebuild/install the native Mac app from this Host branch",
+      "Reload the bundled browser extension 1.2.2",
+      "Build/install plugin 0.4.1 from the listed plugin branch"
+    ],
+    "steps": [
+      "Start a browser-only teaching session; move a tab out and back, then stop immediately after departure. Check range exclusion, coverage and frozen fragment.",
+      "Start desktop capture just before a ten-minute clock boundary and continue typing/clicking across it. Confirm one nativeSessionId, both segment markers, frozen old file and a full AX snapshot/page context in the new file.",
+      "Check stop hotkey/API stop, denied/recovered permissions, background History intent, skill generation and independent execution."
+    ]
+  },
+  "ci": {
+    "host": {
+      "status": "not_run",
+      "reason": "GitHub Actions is disabled for Jovianix/memmy-agent. Manual workflow dispatch returned HTTP 422: Actions has been disabled for this repository."
+    },
+    "plugin": {
+      "status": "passed",
+      "run": "https://github.com/Jovianix/teach-mode/actions/runs/40274963468",
+      "validatedRuntimeCommit": "2dc7de366705c5cd625d1586ea9ff60e2421a92d",
+      "matrix": {
+        "macos-latest": "passed",
+        "windows-latest": "passed",
+        "ubuntu-latest": "passed"
+      },
+      "checks": [
+        "typecheck",
+        "53 plugin tests",
+        "4 release validation cases",
+        "ZIP build"
+      ],
+      "headDifference": "Only documentation changed after the validated runtime commit: the minimum Host version and canonical target branches."
+    }
+  }
+}

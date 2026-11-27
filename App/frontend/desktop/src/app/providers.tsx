@@ -8,6 +8,7 @@ import { ThemeProvider } from "../theme/theme-provider.js";
 import { useWindowFullScreenSync } from "../utils/window-fullscreen.js";
 import { resolveDesktopDisplayLanguage } from "./account-channel.js";
 import { PluginUiProvider } from "./plugin-ui-context.js";
+import { TeachModeRecordingController } from "./teach-mode-recording-controller.js";
 
 /** Contract for api clients context value. */
 export interface ApiClientsContextValue {
@@ -50,7 +51,7 @@ function VisualProviders(props: { children: ReactNode }) {
 
   return (
     <I18nProvider language={language}>
-      <ThemeProvider theme={theme}>{props.children}</ThemeProvider>
+      <ThemeProvider theme={theme}>{props.children}<TeachModeRecordingController /></ThemeProvider>
     </I18nProvider>
   );
 }

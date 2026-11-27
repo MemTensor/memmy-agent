@@ -4,7 +4,8 @@ import { createRoot } from "react-dom/client";
 import { expect, it } from "vitest";
 import { I18nProvider } from "../../i18n/i18n-provider.js";
 import { PluginUiProvider, usePluginUi } from "../../app/plugin-ui-context.js";
-import { PluginToolActivity } from "../plugin-tool-activity.js";
+import conversationFeaturesSource from "../conversation-features.tsx?raw";
+import { buildPluginCapabilityLabels, PluginToolActivity } from "../plugin-tool-activity.js";
 import { AgentThreadMessages } from "../agent-thread-messages.js";
 
 it("keeps overlapping legal questions attached to their exact calls after a history reload", async () => {
@@ -142,4 +143,13 @@ it("keeps a completed literature import action on the timeline baseline", async 
     await act(async () => root.unmount());
     container.remove();
   }
+});
+
+it("keeps localized tool labels wired to the conversation language", () => {
+  const plugins = [{ manifest: { capabilities: [{ id: "recording_start", name: "开始录制",
+    nameLocalized: { "en-US": "Start recording" } }] } }] as Parameters<typeof buildPluginCapabilityLabels>[0];
+  expect(buildPluginCapabilityLabels(plugins, "zh-CN").get("recording_start")).toBe("开始录制");
+  expect(buildPluginCapabilityLabels(plugins, "en-US").get("recording_start")).toBe("Start recording");
+  // Guard the hook call: testing only the helper missed the removed language argument.
+  expect(conversationFeaturesSource).toContain("buildPluginCapabilityLabels(plugins, language), [plugins, language]");
 });

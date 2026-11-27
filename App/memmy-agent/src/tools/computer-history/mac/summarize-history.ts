@@ -677,7 +677,7 @@ export function renderHumanSummary({
   const hasInterruption = records.some(isCaptureInterruptionRecord);
   if (!events.length && !hasInterruption) throw new Error("no human operation events found in the selected recording");
   const interruptionOnly = hasInterruption && !events.some((event) =>
-    typeof event.eventType === "string" && !["recording_started", "recording_stopped"].includes(event.eventType));
+    typeof event.eventType === "string" && !["recording_started", "recording_stopped", "recording_checkpoint", "recording_gap"].includes(event.eventType));
   const stopped = events.some((record) => record.eventType === "recording_stopped");
   const status = stopped ? "completed" : "incomplete";
   const applications = humanApplications(events, explicitApplications);
