@@ -9,7 +9,7 @@ const BRIDGE_PORTS = [47321, 47322, 47323];
 // Memmy updates replace these files in place, but Chrome keeps running the worker script it
 // registered at install, even across browser restarts, until the extension reloads.
 // Must equal "version" in manifest.json.
-const EXTENSION_VERSION = "1.2.2";
+const EXTENSION_VERSION = "1.2.3";
 // Chrome stops an idle MV3 worker about 30 seconds after Memmy goes away, which ends
 // the setTimeout retries. The alarm wakes the worker so it reconnects once Memmy is back.
 const RECONNECT_ALARM = "memmy-reconnect";
@@ -909,7 +909,9 @@ chrome.alarms?.onAlarm?.addListener(alarm => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
-  if (message?.action === "status") {
+  // Popup and auth requests use action. Leave typed History messages to their own listener.
+  if (typeof message?.action !== "string") return;
+  if (message.action === "status") {
     checkReconnectAlarmAfterActivity();
     respond({ ok: true, connected: socket?.readyState === WebSocket.OPEN,
       controllableTabCount: [...tabStatuses.values()].filter(tab => tab.status === "ready").length,
@@ -917,14 +919,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       tabStatuses: [...tabStatuses.values()] });
     return;
   }
-  if (message?.action === "refresh" && sender.id === chrome.runtime.id) {
+  if (message.action === "refresh" && sender.id === chrome.runtime.id) {
     pausedTabs.clear();
     void ensureReconnectAlarm(true);
     void connect().then(() => discoverOpenTabs()).then(() => respond({ ok: true }),
       () => respond({ ok: false, error: "无法重新连接，请确认 Memmy 已打开。" }));
     return true;
   }
-  if (typeof message?.action === 'string' && message.action.startsWith('auth:')) {
+  if (message.action.startsWith('auth:')) {
     if (sender.id !== chrome.runtime.id || typeof message.authId !== 'string') {
       respond({ ok: false }); return;
     }
