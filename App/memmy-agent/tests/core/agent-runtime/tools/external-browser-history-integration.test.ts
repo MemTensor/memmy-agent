@@ -15,8 +15,13 @@ import { createTeachingBrowserEnhancement } from "../../../../src/tools/plugin-h
 const resources: Array<() => Promise<unknown> | unknown> = [];
 afterEach(async () => { for (const close of resources.splice(0).reverse()) await close(); });
 
-interface HistoryIntegrationInternals { clearRotationTimer(): void; }
-interface HarnessOptions { rotateSegments?: boolean; startBeforeBoundaryMs?: number; }
+interface HistoryIntegrationInternals {
+  clearRotationTimer(): void;
+  rotateSegment(): void;
+  segment: { child: object } | null;
+  continuousRecorderChildren: WeakSet<object>;
+}
+interface HarnessOptions { continuousRecorder?: boolean; startBeforeBoundaryMs?: number; }
 
 async function syntheticPage() {
   const { chromium } = await import("playwright");
@@ -41,7 +46,23 @@ async function harness(browser: "chrome" | "edge" = "chrome", options: HarnessOp
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-history-integration-"));
   resources.push(() => fs.rmSync(root, { recursive: true, force: true }));
   const recorder = path.join(root, "stub-recorder.mjs"), settingsFile = path.join(root, "settings.json");
-  fs.writeFileSync(recorder, "process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000);");
+  fs.writeFileSync(recorder, `
+    import fs from "node:fs";
+    import readline from "node:readline";
+    const report = file => fs.appendFileSync(file, JSON.stringify({ fixtureRecorderPid: process.pid }) + "\\n");
+    if (${options.continuousRecorder !== undefined}) report(process.argv[process.argv.indexOf("--out") + 1]);
+    if (${options.continuousRecorder === true}) {
+      console.log('[recorder-capabilities] {"continuousOutput":true}');
+      readline.createInterface({ input: process.stdin }).on("line", line => {
+        const command = JSON.parse(line);
+        if (command.kind !== "rotate") return;
+        report(command.eventsFile);
+        console.log("[recorder-rotation] " + JSON.stringify({ id: command.id, complete: true }));
+      });
+    }
+    process.on("SIGTERM", () => process.exit(0));
+    setInterval(() => {}, 1000);
+  `);
   const service = new ComputerHistoryDemoService({ recorderScript: recorder, observationSettingsFile: settingsFile,
     historyDirectory: path.join(root, "histories"), recordingDirectory: path.join(root, "recordings"), workflowDirectory: path.join(root, "workflows") });
   resources.push(() => service.shutdown());
@@ -68,15 +89,17 @@ async function harness(browser: "chrome" | "edge" = "chrome", options: HarnessOp
     } else started = service.startObservation();
     // Sensor semantics must not race an unrelated wall-clock segment boundary. Rotation has
     // explicit coverage below and in computer-history-transitions.test.ts / computer-history-child-process.test.ts.
-    if (!options.rotateSegments) clearRotationTimer();
+    clearRotationTimer();
     return started;
   };
   const resumeObservation = () => {
     const resumed = service.resumeObservation();
-    if (!options.rotateSegments) clearRotationTimer();
+    clearRotationTimer();
     return resumed;
   };
   const started = startObservation(); connection.refresh();
+  if (options.continuousRecorder) await vi.waitFor(() =>
+    expect(internals.continuousRecorderChildren.has(internals.segment!.child)).toBe(true));
   const initialSegmentId = started.observation.segmentId!;
   const segmentsDirectory = path.join(root, "recordings", "segments");
   const context = { browser, tabId: 7, windowId: 8, frameId: 0, documentId: "fixture-document",
@@ -95,7 +118,7 @@ async function harness(browser: "chrome" | "edge" = "chrome", options: HarnessOp
     generation: event.generation, actor: "human", payload: event, ...extra });
   const settle = () => new Promise<void>(resolve => setTimeout(resolve, 20));
   return { service, bridge, socket, connection, connectionId, messages, context, payload, emit, records, recordsInSegment,
-    initialSegmentId, startObservation, resumeObservation, clearRotationTimer, send, settle, settingsFile };
+    rotateSegment: () => internals.rotateSegment(), initialSegmentId, startObservation, resumeObservation, clearRotationTimer, send, settle, settingsFile };
 }
 
 function nextSocketMessage(socket: WebSocket, matches: (message: any) => boolean): Promise<any> {
@@ -305,7 +328,7 @@ describe("browser History bridge to canonical event stream", () => {
     expect(h.service.getBrowserCaptureIntent().generation).toBe(initialGeneration);
   }, 20_000);
 
-  it("rejects delayed browser events across a real segment rotation and records a reauthorized sensor in the new segment", async () => {
+  it("keeps the authorized sensor across a real segment rotation and writes each event once", async () => {
     let h!: Awaited<ReturnType<typeof harness>>;
     let releaseOldEvent!: () => void, oldPublished!: () => void;
     let receiveOldEvent!: (capture: { event: BrowserSemanticHistoryEvent; enabled: boolean; generation: string | null }) => void;
@@ -339,52 +362,79 @@ describe("browser History bridge to canonical event stream", () => {
         oldPublished();
       } else if (publicationActive) h.emit(event);
     });
-    // Finish cold Chromium/navigation/binding setup before arming the real three-second rotation.
-    try { h = await harness("chrome", { rotateSegments: true, startBeforeBoundaryMs: 3_000 }); }
+    // Set up the browser before starting capture. Trigger rotation after the first attempt reaches disk.
+    try { h = await harness("chrome", { continuousRecorder: true, startBeforeBoundaryMs: 3_000 }); }
     finally { orderBrowserCleanup(); }
     const initialGeneration = h.service.getBrowserCaptureIntent().generation!;
-    const nextIntent = nextSocketMessage(h.socket, message => {
-      const current = h.service.getBrowserCaptureIntent();
-      if (message.type !== "browser_history_intent" || message.enabled !== true || !message.generation
-        || message.generation === initialGeneration || !current.enabled || current.generation !== message.generation) return false;
-      // The first real rotation is the behavior under test; a second wall-clock boundary is unrelated.
-      h.clearRotationTimer();
-      return true;
-    });
     await page.evaluate(browserHistorySensorScript({ generation: initialGeneration,
       documentId: h.context.documentId, captureText: true, bindingName: "__memmyFixturePublish" }));
     await page.click("#rotate");
     const captured = await observedOldEvent;
     expect(captured.enabled).toBe(true);
     expect(captured.generation).toBe(initialGeneration);
-    const stale = captured.event;
-    const rotatedMessage = await nextIntent;
+    const delayed = captured.event;
+    expect(delayed.interactionId).toEqual(expect.any(String));
+    const interactionIn = (segment: string) => h.recordsInSegment(segment)
+      .filter(row => row.details?.interactionId === delayed.interactionId).map(row => row.details);
+    const [attempt] = await vi.waitFor(() => {
+      const rows = interactionIn(h.initialSegmentId);
+      expect(rows.map(row => row.phase)).toEqual(["attempt"]);
+      return rows;
+    });
+    expect(attempt.eventId).not.toBe(delayed.eventId);
+    const pidsIn = (segment: string) => h.recordsInSegment(segment).flatMap(row => row.fixtureRecorderPid ?? []);
+    await vi.waitFor(() => expect(pidsIn(h.initialSegmentId)).toEqual([expect.any(Number)]));
+    h.rotateSegment();
+    const nextSegmentId = await vi.waitFor(() => {
+      const id = h.service.snapshot().observation.segmentId;
+      expect(id).toBeTruthy();
+      expect(id).not.toBe(h.initialSegmentId);
+      expect(h.service.getBrowserCaptureIntent().enabled).toBe(true);
+      return id!;
+    }, { timeout: 8_000 });
+    h.clearRotationTimer();
     const currentIntent = h.service.getBrowserCaptureIntent();
     expect(currentIntent.enabled).toBe(true);
-    expect(currentIntent.generation).toBe(rotatedMessage.generation);
-    expect(currentIntent.generation).not.toBe(initialGeneration);
-    expect(stale).toMatchObject({ generation: initialGeneration, documentId: h.context.documentId,
+    expect(currentIntent.generation).toBe(initialGeneration);
+    expect(delayed).toMatchObject({ generation: initialGeneration, documentId: h.context.documentId,
       action: "click", phase: "observed", target: { tag: "button" } });
-    expect(Date.now() - stale.observedAt).toBeLessThan(15_000);
-    expect(stale.observedAt).toBeLessThanOrEqual(Date.now() + 1_000);
+    expect(Date.now() - delayed.observedAt).toBeLessThan(15_000);
+    expect(delayed.observedAt).toBeLessThanOrEqual(Date.now() + 1_000);
     const checkedAfterOldEvent = nextSocketMessage(h.socket, message => message.type === "browser_history_config" && message.id === "after-rotated-event");
     releaseOldEvent();
     await published;
     // WebSocket ordering makes this reply a barrier after the unchanged old payload was processed.
     h.send({ type: "browser_history_config_request", id: "after-rotated-event", ...h.context });
     expect(await checkedAfterOldEvent).toMatchObject({ enabled: true, generation: currentIntent.generation });
-    expect(h.records().some(event => event.details.eventId === stale.eventId)).toBe(false);
-    const generation = h.service.getBrowserCaptureIntent().generation!;
-    await page.evaluate(browserHistorySensorScript({ generation,
-      documentId: h.context.documentId, captureText: true, bindingName: "__memmyFixturePublish" }));
+    expect(pidsIn(nextSegmentId)).toEqual(pidsIn(h.initialSegmentId));
+    expect(interactionIn(h.initialSegmentId)).toEqual([attempt]);
+    expect(interactionIn(nextSegmentId)).toEqual([expect.objectContaining({ eventId: delayed.eventId, phase: "observed" })]);
     const fresh = await awaitObservedBrowserEvent(h.bridge, event => event.action === "click" && event.target?.tag === "button"
-      && event.generation === generation && event.documentId === h.context.documentId, () => page.click("#rotate"));
-    const nextSegmentId = generation.split(":")[0];
-    expect(nextSegmentId).not.toBe(h.initialSegmentId);
-    expect(h.recordsInSegment(h.initialSegmentId).some(event => event.details.eventId === fresh.eventId)).toBe(false);
-    expect(h.recordsInSegment(nextSegmentId).find(event => event.details.eventId === fresh.eventId)?.details)
+      && event.generation === initialGeneration && event.documentId === h.context.documentId, () => page.click("#rotate"));
+    expect(h.recordsInSegment(h.initialSegmentId).some(event => event.details?.eventId === fresh.eventId)).toBe(false);
+    const freshRecords = h.recordsInSegment(nextSegmentId).filter(event => event.details?.eventId === fresh.eventId);
+    expect(freshRecords).toHaveLength(1);
+    expect(freshRecords[0].details)
       .toMatchObject({ eventId: fresh.eventId, documentId: h.context.documentId, action: "click", phase: "observed", target: { tag: "button" } });
   }, 20_000);
+
+  it("restarts a legacy recorder at the segment boundary", async () => {
+    const h = await harness("chrome", { continuousRecorder: false, startBeforeBoundaryMs: 3_000 });
+    const pidIn = (segment: string) => h.recordsInSegment(segment).find(row => row.fixtureRecorderPid)?.fixtureRecorderPid;
+    const original = await vi.waitFor(() => {
+      const pid = pidIn(h.initialSegmentId);
+      expect(pid).toEqual(expect.any(Number));
+      return pid;
+    });
+    h.rotateSegment();
+    await vi.waitFor(() => {
+      const id = h.service.snapshot().observation.segmentId!;
+      expect(id).not.toBe(h.initialSegmentId);
+      const replacement = pidIn(id);
+      expect(replacement).toEqual(expect.any(Number));
+      expect(replacement).not.toBe(original);
+    });
+  });
 
   it("captures actual checkbox/input transitions from a synthetic headless Chromium page without an Agent session", async () => {
     const h = await harness();

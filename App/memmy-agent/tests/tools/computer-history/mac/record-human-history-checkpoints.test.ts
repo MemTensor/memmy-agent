@@ -104,6 +104,38 @@ it.each([false, true])("continues one native collector through output rotation a
   if (faults) expect(point.issues).toContain("ax_snapshot_budget_exceeded");
 });
 
+it("retries the old file sync after a native handoff without issuing a second rotation barrier", async () => {
+  fixture.faults = false;
+  const first = path.join(root, "first", "events.jsonl");
+  const next = path.join(root, "next", "events.jsonl");
+  fixture.rotation = { eventsFile: next, title: "next" };
+  const fsync = fs.fsyncSync;
+  let injected = false;
+  const sync = vi.spyOn(fs, "fsyncSync").mockImplementation(fd => {
+    if (!injected && fs.existsSync(first) && fs.readFileSync(first, "utf8").includes('"reason":"segment_rotation"')) {
+      injected = true;
+      throw new Error("old segment sync failed");
+    }
+    fsync(fd);
+  });
+  const replies: unknown[] = [];
+  vi.spyOn(console, "log").mockImplementation(line => {
+    if (!String(line).startsWith("[recorder-rotation] ")) return;
+    const reply = JSON.parse(String(line).slice("[recorder-rotation] ".length));
+    replies.push(reply);
+    fixture.input!.write(JSON.stringify(reply.retrySync
+      ? { kind: "rotate", id, ...fixture.rotation }
+      : { kind: "checkpoint", id: "b3fd24a5-fb7d-4c2c-8d1a-706ff73607d1" }) + "\n");
+  });
+  try {
+    await run(["node", "controlled", "--out", first, "--no-screenshots", "--capture-text"]);
+    expect(replies).toEqual([{ id, complete: false, retrySync: true }, { id, complete: true }]);
+    expect(fixture.commands).toHaveLength(2);
+    expect(fs.readFileSync(next, "utf8").match(/"eventType":"recording_started"/g)).toHaveLength(1);
+    expect(fixture.spawns).toBe(1);
+  } finally { sync.mockRestore(); }
+});
+
 it("finishes a stop hotkey delivered with a rotation marker in the new file", async () => {
   fixture.faults = false; fixture.stopAtRotation = true;
   const first = path.join(root, "first", "events.jsonl"), next = path.join(root, "next", "events.jsonl");

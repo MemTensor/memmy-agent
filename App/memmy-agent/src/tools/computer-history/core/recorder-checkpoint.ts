@@ -21,7 +21,11 @@ export type PersistedCheckpoint = z.infer<typeof persistedCheckpoint>;
 export const recorderRotationRequest = z.object({ kind: z.literal("rotate"), id: checkpointId,
   eventsFile: z.string().min(1).max(4096), title: z.string().max(200),
 }).strict();
-export const recorderRotationResult = z.object({ id: checkpointId, complete: z.boolean() }).strict();
+export const recorderRotationResult = z.union([
+  z.object({ id: checkpointId, complete: z.boolean() }).strict(),
+  z.object({ id: checkpointId, complete: z.literal(false), busy: z.literal(true) }).strict(),
+  z.object({ id: checkpointId, complete: z.literal(false), retrySync: z.literal(true) }).strict(),
+]);
 
 export const recordingCheckpointRecord = z.object({ recordType: z.literal("human_event"), sequence: count.min(1),
   eventType: z.literal("recording_checkpoint"), timestamp: checkpointTime,

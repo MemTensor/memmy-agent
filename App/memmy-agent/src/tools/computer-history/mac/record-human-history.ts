@@ -1,6 +1,7 @@
 import { recorderCheckpoints } from "./recorder-checkpoints.js";
 import { persistMacCheckpoint } from "./persisted-checkpoint.js";
-import { CONTINUOUS_RECORDER_CAPABILITY } from "../core/recorder-rotation.js";
+import { createRecorderWriter } from "../core/recorder-writer.js";
+import { CONTINUOUS_RECORDER_CAPABILITY, RECORDER_MARKER_REPAIR_EXIT } from "../core/recorder-rotation.js";
 // Record authorized foreground activity as a local JSONL event stream.
 
 import crypto from "node:crypto";
@@ -524,10 +525,6 @@ async function captureScreenshot(file: string, width: number): Promise<string> {
   return file;
 }
 
-function appendJsonLine(file: string, payload: unknown): void {
-  fs.appendFileSync(file, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 });
-}
-
 export async function run(
   argv: string[] = process.argv,
 ): Promise<{ output: string; recordingId: string; events: number } | null> {
@@ -553,7 +550,7 @@ export async function run(
       (binary, mode, extra = []) => helperJson(binary, mode, [...command.args, ...extra], command.env));
   const recordingId = `human:${crypto.randomUUID()}`;
   const contextUrl = normalizedContextUrl(args.contextUrl);
-  let output = path.resolve(expandHome(args.out ?? defaultOutput(args, recordingId)));
+  const output = path.resolve(expandHome(args.out ?? defaultOutput(args, recordingId)));
   const recordingDir = path.dirname(output);
   const screenshotDir = path.join(recordingDir, "screenshots");
   fs.mkdirSync(recordingDir, { recursive: true, mode: 0o700 });
@@ -561,7 +558,7 @@ export async function run(
   if (fs.existsSync(output)) fs.chmodSync(output, 0o600);
 
   const startedAt = new Date().toISOString();
-  const writeMetadata = (file: string, title: string, createdAt: string) => appendJsonLine(file, {
+  const metadata = (title: string, createdAt: string) => ({
     recordType: "human_history_metadata",
     schemaVersion: 1,
     recordingId,
@@ -577,19 +574,34 @@ export async function run(
       ? { contextUrl } : {}),
     privacy: "Text is retained from observed applications when enabled, except in password fields. An explicit allow-app narrows text capture. Excluded applications and sites are skipped; credential patterns are redacted.",
   });
-  writeMetadata(output, args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow`, startedAt);
 
-  let sequence = 0;
-  const failWrite = () => {
+  const failWrite = (code = 1): never => {
     if (!helper.killed) helper.kill("SIGTERM");
-    process.exit(1);
+    process.exit(code);
   };
+  const writer = createRecorderWriter(output, {
+    metadata,
+    onUnrecoverableWrite(error) {
+      console.error("[recorder] " + error.message);
+      return failWrite(RECORDER_MARKER_REPAIR_EXIT);
+    },
+    async flushPending() {
+      await flushKeys();
+      health.flush();
+    },
+    onSegmentChanged() {
+      invalidateObservation();
+      lastPageContextUrl = null;
+    },
+  });
+  writer.append(metadata(args.title ?? `Human-operated ${windows ? "Windows 11" : "macOS"} workflow`, startedAt));
+
   const health = recorderHealthReporter((line) => {
     const signal = JSON.parse(line.slice("[recorder-health] ".length));
     if (signal.code !== "heartbeat" && signal.code !== "event_recorded") {
       // Retain content-free capture quality beside its events. Current health
       // cannot tell a later reader which historical intervals were incomplete.
-      try { appendJsonLine(output, { recordType: "capture_health", ...signal }); }
+      try { writer.append({ recordType: "capture_health", ...signal }); }
       catch {
         // Do not try to report a failed write through the same failing sink.
         console.error("[recorder] cannot persist capture health; stopping recording");
@@ -634,7 +646,6 @@ export async function run(
   };
   let pendingKeys: HelperEvent[] = [];
   let pendingKeyTimer: ReturnType<typeof setTimeout> | null = null;
-  let processing: Promise<void> = Promise.resolve();
   let stopping = false;
   let finishPromise: Promise<void> | null = null;
   let terminalLines: readline.Interface | null = null;
@@ -666,7 +677,7 @@ export async function run(
   ) => {
     const permitted = () => !subjects || subjects.every(canObserve);
     if (!permitted()) return;
-    sequence += 1;
+    const sequence = writer.nextSequence();
     let screenshotPath = null;
     if (args.screenshots && screenshot) {
       screenshotPath = path.join(screenshotDir, `${String(sequence).padStart(4, "0")}-${eventType}.jpg`);
@@ -704,7 +715,7 @@ export async function run(
     }
     // Every event is written through here, so this is where accessibility
     // text is scrubbed: a new event type cannot forget to.
-    appendJsonLine(output, {
+    writer.append({
       recordType: "human_event",
       sequence,
       timestamp: timestamp ?? new Date().toISOString(),
@@ -736,7 +747,7 @@ export async function run(
   const scheduleKeyFlush = () => {
     if (pendingKeyTimer) clearTimeout(pendingKeyTimer);
     pendingKeyTimer = setTimeout(() => {
-      processing = processing.then(safely(flushKeys));
+      writer.enqueue(safely(flushKeys));
     }, TEXT_IDLE_MS);
   };
 
@@ -939,7 +950,7 @@ export async function run(
         new Promise<void>((resolve) => setTimeout(resolve, 500)),
       ]);
       if (!helper.killed && !helperClosed) helper.kill("SIGTERM");
-      await processing;
+      await writer.drain();
       await flushKeys();
       // Shutdown has no fresh native app/window envelope to authorize a
       // screenshot; keep its control marker without capturing the desktop.
@@ -947,8 +958,8 @@ export async function run(
         eventType: "recording_stopped",
         details: { reason },
       });
-      console.log(`\nrecording written: ${output}`);
-      console.log(`events: ${sequence}`);
+      console.log(`\nrecording written: ${writer.output}`);
+      console.log(`events: ${writer.sequence}`);
     })();
     return finishPromise;
   };
@@ -960,6 +971,7 @@ export async function run(
   if (!helper.stdout || !helper.stderr) throw new Error("history observer pipes are unavailable");
   let helperClosed = false;
   helper.once("close", () => { helperClosed = true; childClosedResolve(); });
+  const localRotation = (windows || !helper.stdin) && process.env.MEMMY_HISTORY_CONTINUOUS_OUTPUT === "1";
   const checkpoints = !process.stdin.isTTY ? recorderCheckpoints({
     input: process.stdin,
     requestNative: (id: string, range?: import("../core/event-capture-source.js").CaptureRange) => {
@@ -969,52 +981,26 @@ export async function run(
     persist: (event, through) => {
       // Enqueue synchronously at receipt of the marker. Awaiting the mutable
       // processing tail would include later observations in the saved position.
-      const boundary = processing.then(async () => {
+      return writer.boundary(async () => {
         await flushKeys();
         health.flush();
-        if (!windows && event && through) return persistMacCheckpoint({ file: output, event, through, sequence: ++sequence });
-        const fd = fs.openSync(output, "r+");
+        if (!windows && event && through) return persistMacCheckpoint({ file: writer.output, event, through, sequence: writer.nextSequence() });
+        const fd = fs.openSync(writer.output, "r+");
         try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-      });
-      processing = boundary.then(() => undefined, () => { health.report("event_processing_error"); });
-      return boundary;
+      }, () => health.report("event_processing_error"));
     },
-    ...(!windows && !args.screenshots ? { rotate: (command, event, through) => {
-      // Register the handoff at receipt of the native barrier, before any later
-      // observation in the same stdout chunk joins the normalization queue.
-      const boundary = processing.then(async () => {
-        await flushKeys();
-        health.flush();
-        const next = command.eventsFile;
-        if (!path.isAbsolute(next) || path.resolve(next) === output) throw new Error("Invalid recorder output");
-        if (fs.existsSync(next) && (!fs.lstatSync(next).isFile() || fs.lstatSync(next).isSymbolicLink())) {
-          throw new Error("Invalid recorder output");
-        }
-        const durable = persistMacCheckpoint({ file: output, event, through, sequence: ++sequence });
-        const details = { nativeSessionId: durable.watermark.nativeSessionId, collectorContinues: true };
-        fs.mkdirSync(path.dirname(next), { recursive: true, mode: 0o700 });
-        fs.chmodSync(path.dirname(next), 0o700);
-        if (fs.existsSync(next)) fs.chmodSync(next, 0o600);
-        writeMetadata(next, command.title, through);
-        appendJsonLine(output, { recordType: "human_event", sequence: ++sequence, eventType: "recording_stopped",
-          timestamp: through, details: { reason: "segment_rotation", ...details } });
-        const previousFd = fs.openSync(output, "r+");
-        try { fs.fsyncSync(previousFd); } finally { fs.closeSync(previousFd); }
-        appendJsonLine(next, { recordType: "human_event", sequence: ++sequence, eventType: "recording_started",
-          timestamp: through, details });
-        const nextFd = fs.openSync(next, "r+");
-        try { fs.fsyncSync(nextFd); } finally { fs.closeSync(nextFd); }
-        output = next;
-        // Each file needs its own full sanitized snapshot and page context.
-        // Native sampling, input hooks, policy state and the health ledger stay alive.
-        axBaseline = null; lastPageContextUrl = null;
-      });
-      processing = boundary.then(() => undefined, () => { health.report("event_processing_error"); });
-      return boundary;
-    } } : {}),
+    rotateLocally(request) {
+      if (args.screenshots || (!localRotation && !writer.awaitingSync(request))) return false;
+      writer.checkpoint(request, result => console.log("[recorder-rotation] " + JSON.stringify(result)));
+      return true;
+    },
+    rotate: windows || args.screenshots ? undefined : (request, event, through) =>
+      writer.nativeRotation(request, through, () => persistMacCheckpoint({
+        file: writer.output, event, through, sequence: writer.nextSequence(),
+      }).watermark.nativeSessionId),
     write: line => console.log(line),
   }) : null;
-  if (checkpoints && !windows && !args.screenshots) console.log(CONTINUOUS_RECORDER_CAPABILITY);
+  if (checkpoints && !args.screenshots && (!windows || process.env.MEMMY_HISTORY_CONTINUOUS_OUTPUT === "1")) console.log(CONTINUOUS_RECORDER_CAPABILITY);
   const lines = readline.createInterface({ input: helper.stdout });
   let queuedWindowsEvents = 0;
   lines.on("line", (line: string) => {
@@ -1028,7 +1014,7 @@ export async function run(
       if (checkpoints?.acknowledge(event)) return;
       if (event.type === "recorder.diagnostic") {
         const signal = nativeRecorderDiagnostic(event);
-        if (signal) processing = processing.then(safely(async () => {
+        if (signal) writer.enqueue(safely(async () => {
           if (signal.code === "ax_snapshot_failed") snapshotHealthy = false;
           health.report(signal.code, signal);
         }));
@@ -1037,8 +1023,8 @@ export async function run(
       }
       if (event.type === "recorder.capture_gap") {
         const gap = captureGapRecord(event);
-        if (gap) processing = processing.then(safely(async () => {
-          appendJsonLine(output, gap);
+        if (gap) writer.enqueue(safely(async () => {
+          writer.append(gap);
         }));
         else health.report("helper_parse_error");
         return;
@@ -1050,9 +1036,10 @@ export async function run(
       if (stopping) return;
       if (windows && queuedWindowsEvents >= 64) { health.report("enrichment_backlog"); return; }
       if (windows) queuedWindowsEvents++;
-      processing = processing.then(safely(() => ingest(event))).finally(() => {
-        if (windows) queuedWindowsEvents--;
-      });
+      writer.enqueue(safely(async () => {
+        try { await ingest(event); }
+        finally { if (windows) queuedWindowsEvents--; }
+      }));
     } catch {
       health.report("helper_parse_error");
       console.error("[recorder] ignored malformed helper event");
@@ -1087,7 +1074,7 @@ export async function run(
         }, reject);
       });
     });
-    return { output, recordingId, events: sequence };
+    return { output: writer.output, recordingId, events: writer.sequence };
   } finally {
     // A short session or Stop must still publish the last successful write.
     checkpoints?.close();

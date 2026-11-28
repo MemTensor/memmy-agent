@@ -10,7 +10,8 @@ type DurablePosition = Pick<PersistedCheckpoint, "through" | "watermark" | "issu
 export function recorderCheckpoints(options: {
   input: Readable; requestNative?: (id: string, range?: CaptureRange) => void;
   persist: (event?: Record<string, unknown>, through?: string) => Promise<DurablePosition | void>;
-  rotate?: (command: z.infer<typeof recorderRotationRequest>, event: Record<string, unknown>, through: string) => Promise<void>;
+  rotateLocally?: (command: z.infer<typeof recorderRotationRequest>) => boolean;
+  rotate?: (command: z.infer<typeof recorderRotationRequest>, event: Record<string, unknown>, through: string) => Promise<void | { retrySync: true }>;
   write: (line: string) => void; timeoutMs?: number;
 }) {
   const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; through: string; finishing: boolean;
@@ -25,8 +26,8 @@ export function recorderCheckpoints(options: {
     try {
       if (request.rotation) {
         if (!complete || !event || !options.rotate) throw new Error("Native rotation boundary unavailable");
-        await options.rotate(request.rotation, event, request.through);
-        result = { id, complete: true };
+        const retry = await options.rotate(request.rotation, event, request.through);
+        result = retry ? { id, complete: false, ...retry } : { id, complete: true };
       } else {
         const durable = await options.persist(event, request.through);
         if (durable?.issues.length) complete = false;
@@ -39,7 +40,7 @@ export function recorderCheckpoints(options: {
     if (!closed) options.write((request.rotation ? "[recorder-rotation] " : "[recorder-checkpoint] ") + JSON.stringify(result));
   };
   lines.on("line", line => {
-    if (closed || line.length > 32_768 || pending.size >= 16) return;
+    if (closed || line.length > 32_768) return;
     try {
       const value = JSON.parse(line);
       const rotation = value.kind === "rotate" ? recorderRotationRequest.parse(value) : undefined;
@@ -47,6 +48,12 @@ export function recorderCheckpoints(options: {
       const command = rotation ? { kind: "checkpoint" as const, id: rotation.id, from: undefined, through: undefined }
         : checkpointRequest.parse(value);
       if (pending.has(command.id)) return;
+      if (pending.size >= 16) {
+        const prefix = rotation ? "[recorder-rotation] " : "[recorder-checkpoint] ";
+        options.write(prefix + JSON.stringify({ id: command.id, complete: false, busy: true }));
+        return;
+      }
+      if (rotation && options.rotateLocally?.(rotation)) return;
       if (rotation && (!options.rotate || [...pending.values()].some(request => request.rotation))) {
         options.write("[recorder-rotation] " + JSON.stringify({ id: command.id, complete: false })); return;
       }

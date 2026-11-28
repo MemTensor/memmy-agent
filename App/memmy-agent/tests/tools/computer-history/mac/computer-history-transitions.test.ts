@@ -108,6 +108,174 @@ describe("recorder transition ordering", () => {
     expect(state.children[0].signals).toEqual([]);
   });
 
+  it("keeps one recorder through two checkpoints and reads a hotkey from its current segment", async () => {
+    vi.setSystemTime(new Date("2026-09-13T00:09:59Z"));
+    service.startObservation();
+    const child = state.children[0];
+    child.stdout.write('[recorder-capabilities] {"continuousOutput":true}\n');
+    const outputs: string[] = [];
+    child.stdin.on("data", chunk => {
+      const request = JSON.parse(chunk.toString());
+      outputs.push(request.eventsFile);
+      // Unrelated and split acknowledgements may arrive on the same pipe.
+      child.stdout.write('[recorder-rotation] {"id":"unrelated","complete":false}\n');
+      child.stdout.write("[recorder-rota");
+      child.stdout.write("tion] " + JSON.stringify({ id: request.id, complete: true }) + "\n");
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(outputs.map(file => path.basename(path.dirname(file)))).toEqual([
+      "2026-09-13T00-10-00Z", "2026-09-13T00-20-00Z",
+    ]);
+    expect(state.children).toHaveLength(1);
+    expect(child.signals).toEqual([]);
+    writeStop("stop_hotkey");
+    child.exit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(service.snapshot().observation).toMatchObject({ state: "stopped", error: null });
+  });
+
+  it.each([{}, { busy: true }])("retries a rejected checkpoint (%j) without stopping the active recorder", async refusal => {
+    vi.setSystemTime(new Date("2026-09-13T00:09:59Z"));
+    service.startObservation();
+    const child = state.children[0];
+    child.stdout.write('[recorder-capabilities] {"continuousOutput":true}\n');
+    let attempts = 0;
+    child.stdin.on("data", chunk => {
+      const { id } = JSON.parse(chunk.toString());
+      child.stdout.write("[recorder-rotation] " + JSON.stringify(++attempts === 1 ? { id, complete: false, ...refusal } : { id, complete: true }) + "\n");
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(service.snapshot().observation.segmentId).toBe("2026-09-13T00-00-00Z");
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(attempts).toBe(2);
+    expect(child.signals).toEqual([]);
+    expect(state.children).toHaveLength(1);
+    expect(service.snapshot().observation).toMatchObject({ state: "running", segmentId: "2026-09-13T00-10-00Z", error: null });
+  });
+
+  it("persists authorized browser events once across a declined checkpoint and a delayed retry", async () => {
+    vi.setSystemTime(new Date("2026-09-13T00:09:59Z"));
+    const oldId = service.startObservation().observation.segmentId!;
+    const generation = service.getBrowserCaptureIntent().generation;
+    const child = state.children[0];
+    child.stdout.write('[recorder-capabilities] {"continuousOutput":true}\n');
+    const requests: { id: string; eventsFile: string }[] = [];
+    child.stdin.on("data", chunk => requests.push(JSON.parse(chunk.toString())));
+    const context = { connectionId: "c", browser: "chrome" as const, tabId: 3, windowId: 4,
+      documentId: "doc", url: "https://example.test/form", privateBrowsing: false, protected: false };
+    const send = (eventId: string, privateBrowsing = false) => service.ingestBrowserSemanticEvent({
+      version: 1, eventId, generation, observedAt: Date.now(), documentId: "doc", action: "change",
+      target: { role: "checkbox", checked: true },
+    }, { ...context, privateBrowsing });
+    const acknowledge = (index: number, complete: boolean) =>
+      child.stdout.write("[recorder-rotation] " + JSON.stringify({ id: requests[index].id, complete }) + "\n");
+    const eventIds = (file: string) => fs.readFileSync(file, "utf8").trim().split("\n")
+      .map(line => JSON.parse(line)).filter(row => row.eventType === "browser_action").map(row => row.details.eventId);
+
+    expect(send("before")).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(requests).toHaveLength(1);
+    expect(service.getBrowserCaptureIntent().generation).toBe(generation);
+    expect(send("during-decline")).toBe(true);
+    acknowledge(0, false);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(requests).toHaveLength(2);
+    expect(send("during-retry")).toBe(true);
+    expect(send("private", true)).toBe(false);
+    acknowledge(1, true);
+    await vi.advanceTimersByTimeAsync(0);
+    // A sensor configured before the ACK may still deliver after the file changes.
+    expect(send("after")).toBe(true);
+    expect(send("during-retry")).toBe(false);
+    expect(eventIds(path.join(root, "recordings", "segments", oldId, "events.jsonl")))
+      .toEqual(["before", "during-decline", "during-retry"]);
+    expect(eventIds(requests[1].eventsFile)).toEqual(["after"]);
+    expect(state.children).toHaveLength(1);
+    const stop = service.stopObservation();
+    expect(send("after-stop")).toBe(false);
+    child.exit();
+    await stop;
+  });
+
+  it("resends the same checkpoint while sync is pending and revokes browser capture immediately on Stop", async () => {
+    vi.setSystemTime(new Date("2026-09-13T00:09:59Z"));
+    service.startObservation();
+    const child = state.children[0];
+    child.stdout.write('[recorder-capabilities] {"continuousOutput":true}\n');
+    const requests: { id: string; eventsFile: string }[] = [];
+    child.stdin.on("data", chunk => requests.push(JSON.parse(chunk.toString())));
+    await vi.advanceTimersByTimeAsync(1000);
+    const pending = "[recorder-rotation] " + JSON.stringify({ id: requests[0].id, complete: false, retrySync: true }) + "\n";
+    child.stdout.write(pending + pending);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(requests).toEqual([requests[0], requests[0]]);
+    child.stdout.write("[recorder-rotation] " + JSON.stringify({ id: requests[0].id, complete: false, busy: true }) + "\n");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(requests).toEqual([requests[0], requests[0], requests[0]]);
+    expect(child.signals).toEqual([]);
+    expect(service.getBrowserCaptureIntent().enabled).toBe(true);
+    const stop = service.stopObservation();
+    expect(service.getBrowserCaptureIntent().enabled).toBe(false);
+    child.stdout.write("[recorder-rotation] " + JSON.stringify({ id: requests[0].id, complete: true }) + "\n");
+    await vi.advanceTimersByTimeAsync(0);
+    child.exit();
+    await stop;
+    expect(child.signals).toEqual(["SIGTERM"]);
+    expect(service.snapshot().observation.state).toBe("stopped");
+  });
+
+  it("honors a hotkey in the new file while its checkpoint is awaiting sync", async () => {
+    vi.setSystemTime(new Date("2026-09-13T00:09:59Z"));
+    service.startObservation();
+    const child = state.children[0];
+    child.stdout.write('[recorder-capabilities] {"continuousOutput":true}\n');
+    child.stdin.on("data", chunk => {
+      const { id, eventsFile } = JSON.parse(chunk.toString());
+      child.stdout.write("[recorder-rotation] " + JSON.stringify({ id, complete: false, retrySync: true }) + "\n");
+      fs.appendFileSync(eventsFile, JSON.stringify({ recordType: "human_event", eventType: "recording_stopped",
+        details: { reason: "stop_hotkey" } }) + "\n");
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    child.exit();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(service.snapshot().observation).toMatchObject({ state: "stopped", error: null });
+    expect(state.children).toHaveLength(1);
+  });
+
+  it("recognizes a native hotkey stop followed by a browser event", async () => {
+    const segment = service.startObservation().observation.segmentId!;
+    writeStop("stop_hotkey");
+    const eventsFile = path.join(root, "recordings", "segments", segment, "events.jsonl");
+    fs.appendFileSync(eventsFile, JSON.stringify({ recordType: "human_event", eventType: "browser_action" }) + "\n");
+    state.children[0].exit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(service.snapshot().observation.state).toBe("stopped");
+  });
+
+  it.each(["silent", "busy during sync"])("drains an unconfirmed handoff (%s) at the original deadline", async mode => {
+    vi.setSystemTime(new Date("2026-09-13T00:09:59Z"));
+    service.startObservation();
+    const child = state.children[0];
+    child.stdout.write('[recorder-capabilities] {"continuousOutput":true}\n');
+    if (mode === "busy during sync") {
+      let first = true;
+      child.stdin.on("data", chunk => {
+        const { id } = JSON.parse(chunk.toString());
+        const status = first ? { retrySync: true } : { busy: true };
+        first = false;
+        child.stdout.write("[recorder-rotation] " + JSON.stringify({ id, complete: false, ...status }) + "\n");
+      });
+    }
+    await vi.advanceTimersByTimeAsync(13_000);
+    expect(child.signals).toEqual(["SIGTERM"]);
+    expect(state.children).toHaveLength(1);
+    child.exit();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.children).toHaveLength(2);
+    expect(service.snapshot().observation).toMatchObject({ state: "running", segmentId: "2026-09-13T00-10-00Z", error: null });
+  });
+
   it("coalesces a stop hotkey with a simultaneous API Stop", async () => {
     service.startObservation();
     writeStop("stop_hotkey");

@@ -34,6 +34,34 @@ describe("recorder native-to-disk checkpoint", () => {
       expect(rotate).toHaveBeenCalledTimes(failure === "disk-failure" ? 1 : 0);
     } finally { queue.close(); input.destroy(); }
   });
+  it("answers new valid controls immediately at capacity and preserves pending requests", async () => {
+    const input = new PassThrough(), write = vi.fn(), requestNative = vi.fn();
+    const queue = recorderCheckpoints({ input, write, requestNative, persist: async () => {}, rotate: async () => {} });
+    const ids = Array.from({ length: 16 }, (_, i) => `00000000-0000-0000-0000-${String(i).padStart(12, "0")}`);
+    const send = (command: object) => input.write(JSON.stringify(command) + "\n");
+    const rotation = { kind: "rotate", id, title: "next", eventsFile: "/tmp/next/events.jsonl" };
+    try {
+      for (const pending of ids) send({ kind: "checkpoint", id: pending });
+      send({ kind: "checkpoint", id: ids[0] });
+      send({ ...rotation, eventsFile: "" });
+      expect(write).not.toHaveBeenCalled();
+      send(rotation);
+      send({ kind: "checkpoint", id });
+      expect(write.mock.calls.map(([line]) => line)).toEqual([
+        "[recorder-rotation] " + JSON.stringify({ id, complete: false, busy: true }),
+        "[recorder-checkpoint] " + JSON.stringify({ id, complete: false, busy: true }),
+      ]);
+      expect(requestNative).toHaveBeenCalledTimes(16);
+      queue.acknowledge({ kind: "session.checkpoint", id: ids[0], complete: true });
+      await delay(0);
+      send(rotation);
+      expect(requestNative).toHaveBeenCalledTimes(17);
+      expect(requestNative).toHaveBeenLastCalledWith(id);
+      queue.acknowledge({ kind: "session.checkpoint", id, complete: true });
+      await delay(0);
+      expect(write).toHaveBeenLastCalledWith("[recorder-rotation] " + JSON.stringify({ id, complete: true }));
+    } finally { queue.close(); input.destroy(); }
+  });
   it("forwards a bounded interval and preserves its native completeness scope after fsync", async () => {
     const input = new PassThrough(), write = vi.fn(), requestNative = vi.fn();
     const range = { from: "2026-10-21T00:00:00.000Z", through: "2026-10-21T00:00:01.000Z" };
