@@ -188,7 +188,7 @@ describe("layered summaries", () => {
     )).toBeNull();
   });
 
-  it("covers only completed narrated captures and records their exact history ids", () => {
+  it("covers completed captures independently of narration and records their exact history ids", () => {
     const rollup = buildSixHourSummary([
       tenMinute("2026-09-08T00-10-00Z"),
       tenMinute("2026-09-08T00-20-00Z", { sourceType: "human_computer_history" }),
@@ -201,11 +201,12 @@ describe("layered summaries", () => {
     expect(rollup.coveredHistoryIds).toEqual([
       "2026-09-08T00-10-00Z-10min-summary",
       "2026-09-08T00-20-00Z-10min-summary",
+      "2026-09-08T00-30-00Z-10min-summary",
     ]);
     expect(rollup.markdown).toContain(`covered_history_ids: ${JSON.stringify(rollup.coveredHistoryIds)}`);
     expect(rollup.citedSummaries).toEqual(rollup.coveredHistoryIds.map((id) => `${id}.md`));
     expect(buildSixHourSummary([
-      tenMinute("2026-09-08T00-30-00Z", { summaryState: "pending" }),
+      tenMinute("2026-09-08T00-30-00Z", { status: "incomplete" }),
     ], new Date("2026-09-08T00:00:00Z"))).toBeNull();
   });
 

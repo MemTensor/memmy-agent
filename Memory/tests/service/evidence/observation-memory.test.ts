@@ -174,9 +174,22 @@ describe("History meaningful-memory processing", () => {
   });
 
   it("skips incidental activity without causing repeated source upload or recall", async () => {
-    const { service, db } = createTestService({ llm: model(() => ({ keep: false, reason: "Only incidental window switching was observed." })) });
+    const extract = vi.fn(() => ({ keep: false, reason: "Only incidental window switching was observed." }));
+    const { service, db } = createTestService({ llm: model(extract) });
     const row = service.syncExternalEvidence(evidence);
-    await runWorkerRounds(service, 2);
+    const rollup = { ...evidence, sourceRecordId: "window-6h-summary", parentSourceRecordIds: [evidence.sourceRecordId],
+      revision: "2026-10-09T12:00:00.000Z" };
+    service.syncExternalEvidence(rollup);
+    const request = { source: evidence.source, namespace, sourceRecordIds: [evidence.sourceRecordId, rollup.sourceRecordId], includeSummary: true };
+    const results = () => service.externalEvidenceStatus(request).evidence;
+    expect(results().map(item => item.skippedSummaryRevision)).toEqual([undefined, undefined]);
+    await service.runWorkerOnce(1, { targetMemoryIds: [row.id] });
+    expect(results().map(item => item.skippedSummaryRevision)).toEqual([evidence.revision, undefined]);
+    await runWorkerRounds(service, 3);
+    expect(results().map(item => item.skippedSummaryRevision)).toEqual([evidence.revision, rollup.revision]);
+    expect(results().every(item => item.l1Summary === undefined)).toBe(true);
+    expect(extract).toHaveBeenCalledTimes(2);
+    expect(service.externalEvidenceStatus({ ...request, includeSummary: false }).evidence[0]).not.toHaveProperty("skippedSummaryRevision");
     const repos = new Repositories(db.db), saved = repos.memories.get(row.id)!;
     expect(saved.status).toBe("archived");
     expect(saved.memoryValue).toBe("");
@@ -337,6 +350,32 @@ describe("History meaningful-memory processing", () => {
     expect(languages).toEqual(["en-US", "zh-CN"]);
     expect(repos.memories.get(later.id)?.memoryValue).toContain("## 阻碍与未决问题");
     expect(repos.memories.get(row.id)?.memoryValue).toContain("## Blockers and open questions");
+  });
+
+  it("returns each window's processed L1 summary without scheduling more extraction", async () => {
+    const calls: boolean[] = [];
+    const { service } = createTestService({ llm: model((input) => {
+      calls.push(input.aggregate);
+      return { ...(semantic(input) as object), summary: input.aggregate ? "Six-hour approval review." : "Ten-minute approval review." };
+    }) });
+    const parent = service.syncExternalEvidence(evidence);
+    const rollup = { ...evidence, sourceRecordId: "window-6h-summary", content: "Six-hour window.",
+      parentSourceRecordIds: [evidence.sourceRecordId] };
+    const child = service.syncExternalEvidence(rollup);
+    const request = { source: evidence.source, namespace, sourceRecordIds: [rollup.sourceRecordId, evidence.sourceRecordId], includeSummary: true };
+    const status = () => service.externalEvidenceStatus(request).evidence;
+    expect(status().map((row) => row.l1Summary)).toEqual([undefined, undefined]);
+    await service.runWorkerOnce(10, { targetMemoryIds: [parent.id] });
+    expect(status().map((row) => row.l1Summary?.text)).toEqual([undefined, "Ten-minute approval review."]);
+    await runWorkerRounds(service, 3);
+    expect(status()).toMatchObject([
+      { id: child.id, l1Summary: { revision: rollup.revision, text: "Six-hour approval review." } },
+      { id: parent.id, l1Summary: { revision: evidence.revision, text: "Ten-minute approval review." } },
+    ]);
+    expect(service.externalEvidenceStatus({ ...request, includeSummary: false }).evidence[0]).not.toHaveProperty("l1Summary");
+    expect(service.externalEvidenceStatus({ ...request, namespace: { ...namespace, projectId: "another-project" } }).evidence[0]).not.toHaveProperty("l1Summary");
+    await runWorkerRounds(service, 2);
+    expect(calls).toEqual([false, true]);
   });
 
   it("consolidates processed parents and invalidates derived memory when a parent changes", async () => {

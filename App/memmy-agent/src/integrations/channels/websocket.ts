@@ -2,7 +2,6 @@ import { agentTaskActivity } from "../../core/agent-runtime/task-activity.js";
 import { invokeNativePluginService, shutdownNativePlugins } from "../../tools/plugin-host/native-services.js";
 import { SkillsLoader } from "../../core/agent-runtime/skills.js";
 import { PluginUpdateLease } from "../../core/agent-runtime/plugin-update-lease.js";
-import { historySummaryRuntime } from "../../providers/history-summary-runtime.js";
 import crypto from "node:crypto";
 import * as childProcess from "node:child_process";
 import fs from "node:fs";
@@ -960,20 +959,14 @@ export class WebSocketChannel extends BaseChannel {
     try {
       const selection = this.modelSelectionResolver?.({ capability: "memory_summary" });
       if (!selection) throw new Error("summary_model_selection_unavailable");
-      // Include credentials through the provider signature, retaining only a
-      // digest so unchanged polling does not restart summaries or expose keys.
-      const signature = crypto.createHash("sha256").update(JSON.stringify([
-        selection.presetId, selection.source, selection.ownerAccountId, selection.snapshot.signature,
-      ])).digest("hex");
-      if (signature !== this.computerHistoryModelSignature) {
-        this.computerHistory.setLlmRuntime(historySummaryRuntime(selection), selection.source);
-        this.computerHistoryModelSignature = signature;
+      if (selection.source !== this.computerHistoryModelSignature) {
+        this.computerHistory.setSummaryModelSource(selection.source);
+        this.computerHistoryModelSignature = selection.source;
       }
       return true;
     } catch {
       if (this.computerHistoryModelSignature !== "unavailable") {
-        this.computerHistory.setLlmRuntime(null, null,
-          "Computer History summary model is unavailable. Configure a Memory summary model in Memmy settings.");
+        this.computerHistory.setSummaryModelSource(null);
         this.computerHistoryModelSignature = "unavailable";
       }
       return false;

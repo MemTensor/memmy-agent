@@ -25,13 +25,6 @@ console.log('recording written: '+file);
       historyDirectory: path.join(root, "histories"), recordingDirectory: path.join(root, "recordings"),
       workflowDirectory: path.join(root, "workflows"), observationSettingsFile: path.join(root, "settings.json"),
     });
-    let resolveNarration!: (value: { content: string }) => void;
-    const pendingNarration = new Promise<{ content: string }>((resolve) => { resolveNarration = resolve; });
-    const response = { content: JSON.stringify({ title: "Finished work", description: "LATE_FINISHED_ACTION", body: "## Memory summary\n\nLATE_FINISHED_ACTION" }) };
-    const chat = vi.fn<(...args: unknown[]) => Promise<{ content: string }>>()
-      .mockImplementationOnce(() => pendingNarration)
-      .mockResolvedValue(response);
-    service.setLlmRuntime((() => ({ model: "stub", provider: { chatWithRetry: chat } })) as unknown as Parameters<typeof service.setLlmRuntime>[0]);
     try {
       const snapshot = service.startObservation();
       const id = `${snapshot.observation.segmentId}-10min-summary`;
@@ -43,18 +36,12 @@ console.log('recording written: '+file);
       await new Promise<void>((resolve, reject) => { child.once("exit", () => resolve()); child.once("error", reject); });
       await vi.waitFor(() => expect(service.snapshot().observation).toMatchObject({ state: "stopped", segmentId: null, error: null }));
       expect(child.exitCode).toBe(0);
-      expect(chat).toHaveBeenCalledTimes(1);
-      expect(JSON.stringify(chat.mock.calls)).toContain("LATE_FINISHED_ACTION");
-      if (hasEarlierSummary) expect(service.snapshot().histories.find((entry) => entry.id === id)?.title).toBe("Early work");
-      resolveNarration(response);
-      await vi.waitFor(() => expect(service.snapshot().histories.find((entry) => entry.id === id)?.title).toBe("Finished work"));
+      expect(service.snapshot().histories.find((entry) => entry.id === id)).toMatchObject({ summaryStatus: "pending" });
+      expect(fs.readFileSync(file, "utf8")).toContain("LATE_FINISHED_ACTION");
       expect(service.snapshot().histories.some((entry) => entry.summaryWindow === "6h")).toBe(false);
       expect(fs.readFileSync(file, "utf8")).toContain("capture_complete: true");
       expect(fs.existsSync(`${file}.staging`)).toBe(false);
-      await service.backfillUnwrittenSummaries();
-      expect(chat).toHaveBeenCalledTimes(1); // The open six-hour window is not narrated incrementally.
     } finally {
-      resolveNarration(response);
       await service.shutdown();
       fs.rmSync(root, { recursive: true, force: true });
     }

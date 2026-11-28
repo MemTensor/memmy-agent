@@ -860,7 +860,7 @@ describe("ComputerHistorySubPage", () => {
     await act(async () => root.render(page(client, true)));
     expect(container.querySelector(".ch__recording-status")?.textContent).toBe("Token 已用完");
     expect(container.textContent).toContain("My recording");
-    expect(container.querySelector('[aria-label="打开 My recording 的完整 Markdown"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="打开 My recording 的来源 Markdown"]')).not.toBeNull();
   });
 
   it("opens history directly without an introduction or automatic recording on a fresh installation", async () => {
@@ -954,7 +954,7 @@ describe("ComputerHistorySubPage", () => {
     expect(container.querySelector('[aria-label="com.apple.Notes"]')).not.toBeNull();
   });
 
-  it("opens an entry's complete Markdown file through the desktop bridge", async () => {
+  it("opens an entry's source Markdown file through the desktop bridge", async () => {
     const openComputerHistoryMarkdown = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(window, "memmy", {
       configurable: true,
@@ -963,7 +963,7 @@ describe("ComputerHistorySubPage", () => {
     await renderWith(snapshot());
 
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[aria-label="打开 My recording 的完整 Markdown"]')?.click();
+      container.querySelector<HTMLButtonElement>('[aria-label="打开 My recording 的来源 Markdown"]')?.click();
     });
 
     expect(openComputerHistoryMarkdown).toHaveBeenCalledWith("/tmp/history-1.md");
@@ -978,7 +978,7 @@ describe("ComputerHistorySubPage", () => {
     await renderWith(snapshot());
 
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[aria-label="打开 My recording 的完整 Markdown"]')?.click();
+      container.querySelector<HTMLButtonElement>('[aria-label="打开 My recording 的来源 Markdown"]')?.click();
     });
 
     expect(container.textContent).toContain("打开 Markdown 失败：no default editor");
@@ -1072,6 +1072,36 @@ describe("ComputerHistorySubPage", () => {
     // Deleting the open window removed the directory the recorder writes to.
     expect(container.querySelector<HTMLButtonElement>('[aria-label="删除 Being recorded"]')?.disabled).toBe(true);
     expect(container.querySelector<HTMLButtonElement>('[aria-label="删除 A morning"]')?.disabled).toBe(false);
+  });
+
+  it("refreshes each L1 summary independently and only collapses segments once their rollup is ready", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-03T12:00:00Z"));
+    const base = snapshot().histories[0]!;
+    const segment = { ...base, id: "segment", title: "分段", summaryWindow: "10min" as const, description: "旧分段文字",
+      summaryStatus: "pending" as const, pinned: false };
+    const aggregate = { ...base, id: "window", title: "六小时窗口", summaryWindow: "6h" as const, sourceType: "rollup" as const,
+      coveredHistoryIds: [segment.id], summaryStatus: "pending" as const, description: "旧汇总文字" };
+    const initial = snapshot({ histories: [segment, aggregate] });
+    const getComputerHistory = vi.fn().mockResolvedValue(initial);
+    await renderWith(initial, { getComputerHistory });
+    const summaries = () => Array.from(container.querySelectorAll(".ch-entry__summary"), (item) => item.textContent);
+    expect(summaries()).toEqual(["摘要生成中", "摘要生成中"]);
+    const skipped = { ...segment, summaryStatus: "skipped" as const };
+    const skippedRollup = { ...aggregate, summaryStatus: "skipped" as const };
+    getComputerHistory.mockResolvedValue(snapshot({ histories: [skipped, aggregate] }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(summaries().sort()).toEqual(["无摘要", "摘要生成中"].sort());
+    getComputerHistory.mockResolvedValue(snapshot({ histories: [skipped, skippedRollup] }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(summaries()).toEqual(["无摘要", "无摘要"]);
+    const ready = { ...segment, summaryStatus: "ready" as const, description: "分段 L1 原文" };
+    getComputerHistory.mockResolvedValue(snapshot({ histories: [ready, skippedRollup] }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(summaries().sort()).toEqual(["分段 L1 原文", "无摘要"].sort());
+    getComputerHistory.mockResolvedValue(snapshot({ histories: [ready, { ...aggregate, description: "汇总 L1 原文", summaryStatus: "ready" }] }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(summaries()).toEqual(["汇总 L1 原文"]);
   });
 
   it("lets a closed rollup stand in for the segments it covers", async () => {

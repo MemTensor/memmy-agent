@@ -68,7 +68,7 @@ export const ComputerHistoryEntrySchema = z.object({
   pinned: z.boolean(),
   eventStreamPath: z.string().nullable(),
   sourceType: z.enum(["captured", "rollup", "imported", "demo_fixture"]),
-  summaryStatus: z.enum(["ready", "pending"]).optional(),
+  summaryStatus: z.enum(["ready", "pending", "skipped"]).optional(),
   createdAt: z.string(),
   // Left out of what the desktop client receives: the timeline never renders a
   // summary's body, and it was most of every response. The agent reads bodies

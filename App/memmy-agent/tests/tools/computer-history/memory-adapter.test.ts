@@ -28,7 +28,7 @@ test("passive History only reaches Memory after opt-in, and deletion survives re
   await adapter.flushNow();
   expect(sent).toMatchObject([{ action: "upsert", sourceRecordId: entry.id, content: entry.content,
     summary: entry.summary, provenance: {
-      historyId: entry.id, summarySource: "model_narrated_computer_history",
+      historyId: entry.id, summarySource: "computer_history_evidence",
       summaryFactCheck: "not_independently_verified"
     } }]);
   await adapter.flushNow();

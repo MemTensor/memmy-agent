@@ -186,7 +186,7 @@ describe("ComputerHistoryDemoService", () => {
       .toThrow(/passed the retention window/);
   });
 
-  it("keeps a written summary through the live pass instead of overwriting it", () => {
+  it("refreshes the local evidence for a reopened window", () => {
     const { service, root } = createService();
     const segmentId = "2026-09-09T06-10-00Z";
     const directory = path.join(root, "recordings", "segments", segmentId);
@@ -245,11 +245,11 @@ describe("ComputerHistoryDemoService", () => {
       output: "",
     });
 
-    expect(fs.readFileSync(historyFile, "utf8")).toBe(written);
+    expect(fs.readFileSync(historyFile, "utf8")).toContain("status: incomplete");
     expect(service.snapshot().histories.map((entry) => entry.id)).toContain(`${segmentId}-10min-summary`);
   });
 
-  it("keeps a mechanical rollup off the timeline until it is written", () => {
+  it("shows a pending closed rollup until its L1 is ready", () => {
     const { service, root } = createService();
     const historyDirectory = path.join(root, "histories");
     fs.mkdirSync(historyDirectory, { recursive: true });
@@ -269,37 +269,10 @@ describe("ComputerHistoryDemoService", () => {
       "",
     ].join("\n"), "utf8");
 
-    expect(service.snapshot().histories).toHaveLength(0);
+    expect(service.snapshot().histories).toMatchObject([{ summaryStatus: "pending", description: null }]);
   });
 
-  it("writes the summaries the model never reached, so their history returns", async () => {
-    const { service, root } = createService();
-    const historyDirectory = path.join(root, "histories");
-    fs.mkdirSync(historyDirectory, { recursive: true });
-    fs.writeFileSync(path.join(historyDirectory, "2026-09-08T11-30-00Z-10min-summary.md"), [
-      "---",
-      'title: "Computer History Review"',
-      "source_type: captured",
-      "---",
-      "",
-      "## Memory summary",
-      "",
-      "用户完成了一组电脑操作。",
-      "",
-    ].join("\n"), "utf8");
-    expect(service.snapshot().histories).toHaveLength(0);
-
-    service.setLlmRuntime(narratingRuntime());
-    const written = await service.backfillUnwrittenSummaries();
-
-    expect(written).toBe(1);
-    const histories = service.snapshot().histories;
-    expect(histories).toHaveLength(1);
-    expect(histories[0].markdown).toContain("summary_state: ready");
-    expect(histories[0].markdown).not.toContain("用户完成了一组电脑操作。");
-  });
-
-  it("never replaces a written summary with a placeholder while finalizing", async () => {
+  it("finalizes reopened evidence without presenting the earlier account as current", async () => {
     const { service, root } = createService();
     const segmentId = "2026-09-10T02-10-00Z";
     const directory = path.join(root, "recordings", "segments", segmentId);
@@ -348,10 +321,9 @@ describe("ComputerHistoryDemoService", () => {
       output: "",
     });
 
-    expect(fs.readFileSync(historyFile, "utf8")).toBe(standing);
-    expect(service.snapshot().histories.map((entry) => entry.title)).toContain("What the model wrote");
-    // Keep the replacement evidence for retry while the standing account stays visible.
-    expect(fs.existsSync(`${historyFile}.staging`)).toBe(true);
+    expect(fs.readFileSync(historyFile, "utf8")).toContain("capture_complete: true");
+    expect(service.snapshot().histories.find((entry) => entry.id.startsWith(segmentId))).toMatchObject({ summaryStatus: "pending" });
+    expect(fs.existsSync(`${historyFile}.staging`)).toBe(false);
   });
 
   it("dates a summary by the window it covers, not by when it was last written", () => {
@@ -529,22 +501,6 @@ describe("ComputerHistoryDemoService", () => {
     expect(notes!.history.replayPlan?.status).toBe("not_replayable");
   });
 });
-
-/** A model that always writes, so the backfill can be checked without one. */
-function narratingRuntime() {
-  return (() => ({
-    model: "test-model",
-    provider: {
-      chatWithRetry: async () => ({
-        content: JSON.stringify({
-          title: "Computer History review",
-          description: "You looked over earlier Computer History entries.",
-          body: "## Memory summary\n\nYou looked over earlier Computer History entries.",
-        }),
-      }),
-    },
-  })) as unknown as Parameters<ComputerHistoryDemoService["setLlmRuntime"]>[0];
-}
 
 /** Closes a segment the way rotation and stopping both do. */
 function finalize(service: ComputerHistoryDemoService, segment: unknown): Promise<void> {

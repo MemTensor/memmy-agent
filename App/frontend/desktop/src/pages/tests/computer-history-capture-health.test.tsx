@@ -72,7 +72,7 @@ describe("Computer History capture coverage", () => {
     expect(document.body.textContent).not.toContain("ax_snapshot_budget_exceeded");
     expect(document.body.textContent).not.toContain("部分活动可能未记录");
     expect(document.body.textContent).not.toContain("本次采集尚无已写入的活动记录");
-    expect(document.querySelector(".ch-entry__body")?.textContent).toContain("原始活动已保存，摘要正在整理或更新");
+    expect(document.querySelector(".ch-entry__body")?.textContent).toContain("摘要生成中");
   });
 
   it("limits the enable notice to readable foreground activity in both languages", () => {

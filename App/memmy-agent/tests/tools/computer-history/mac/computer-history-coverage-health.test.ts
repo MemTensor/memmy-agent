@@ -27,6 +27,7 @@ vi.mock("node:child_process", async (original) => ({
 vi.mock("../../../../src/tools/computer-history/memory-adapter.js", () => ({
   HistoryMemoryAdapter: class {
     status() { return { lastSyncedAt: null, error: null }; }
+    summaryFor() { return undefined; }
     memoryIdFor() { return undefined; }
     schedule() {}
     remove() {}
@@ -46,14 +47,10 @@ interface Internals {
   writeSegmentSummary(segment: FixtureSegment, destination?: string, closed?: boolean): string | null;
   canExpireRaw(directory: string): boolean;
   retentionCheckpointPath(id: string): string | null;
-  summaryJobs: Map<string, { promise: Promise<boolean> }>;
 }
 let root: string;
 let service: ComputerHistoryDemoService;
 const internal = () => service as unknown as Internals;
-const runtime = (chat: (...args: unknown[]) => Promise<{ content: string }>) =>
-  (() => ({ model: "synthetic", provider: { chatWithRetry: chat } })) as unknown as Parameters<ComputerHistoryDemoService["setLlmRuntime"]>[0];
-const narrative = (marker: string) => ({ content: JSON.stringify({ title: marker, description: marker, body: `## Memory summary\n\n${marker}` }) });
 const checkpointPath = (segment: FixtureSegment) => `${segment.historyFile}.evidence.json`;
 
 beforeEach(() => {
@@ -99,7 +96,6 @@ function append(segment: FixtureSegment, marker: string, padding = "") {
     application: { name: `Synthetic ${marker}`, bundleId: "com.example.synthetic" }, details: {},
     ax: { mode: "fullTree", text: `AXStaticText||${marker} ${padding}|||` } }) + "\n");
 }
-async function settle() { await Promise.all([...internal().summaryJobs.values()].map((job) => job.promise)); }
 function health(code: string, count?: number, timestamp = new Date().toISOString()) {
   transport.children.at(-1)!.stdout.write(`[recorder-health] ${JSON.stringify({ timestamp, code, ...(count === undefined ? {} : { count }) })}\n`);
 }
@@ -131,46 +127,14 @@ describe("live raw visibility and summary refresh", () => {
     expect(service.searchHistories("Synthetic")).toEqual([]);
   });
 
-  it("keeps the standing body while searching newer same-id raw and swaps on success", async () => {
-    const segment = active(); append(segment, "FIRST", "readable fixture ".repeat(400));
-    let finish!: (value: { content: string }) => void;
-    const chat = vi.fn(async () => narrative("FIRST_ACCOUNT"));
-    chat.mockImplementationOnce(async () => narrative("FIRST_ACCOUNT"));
-    chat.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
-    service.setLlmRuntime(runtime(chat)); await settle();
-    const standing = fs.readFileSync(segment.historyFile, "utf8");
-    append(segment, "LAST_ACTION");
-    expect(service.snapshot().histories[0]).toMatchObject({ title: "FIRST_ACCOUNT", summaryStatus: "pending" });
-    const matches = service.searchHistories("LAST_ACTION");
-    expect(matches).toHaveLength(1);
-    expect(matches[0].history.markdown).toContain("LAST_ACTION");
-    expect(matches[0].history.summaryStatus).toBe("pending");
-    expect(fs.readFileSync(segment.historyFile, "utf8")).toBe(standing);
-    finish(narrative("LAST_ACTION_ACCOUNT")); await settle();
-    expect(service.snapshot().histories[0]).toMatchObject({ title: "LAST_ACTION_ACCOUNT", summaryStatus: "ready" });
-    expect(fs.existsSync(`${segment.historyFile}.staging`)).toBe(false);
-    internal().writeLiveSummary(segment); await settle();
-    expect(chat).toHaveBeenCalledTimes(2);
-  });
-
-  it("retrieves newly appended raw while an older model request is still in flight", async () => {
-    const segment = active(); append(segment, "EARLY", "evidence ".repeat(600));
-    let finish!: (value: { content: string }) => void;
-    service.setLlmRuntime(runtime(() => new Promise((resolve) => { finish = resolve; })));
-    append(segment, "WHILE_MODEL_BUSY");
-    expect(service.searchHistories("WHILE_MODEL_BUSY")[0].history.markdown).toContain("WHILE_MODEL_BUSY");
-    finish(narrative("EARLY_ACCOUNT")); await settle();
-    expect(service.snapshot().histories[0].summaryStatus).toBe("pending");
-  });
-
   it("reports a failed live write, preserves ready prose, and still locates raw", async () => {
     const segment = active(); append(segment, "EARLY", "evidence ".repeat(600));
-    service.setLlmRuntime(runtime(async () => narrative("READY_BODY"))); await settle();
+    internal().writeLiveSummary(segment);
     const standing = fs.readFileSync(segment.historyFile, "utf8");
     append(segment, "RAW_WRITE_FAILURE_MARKER");
     const original = fs.writeFileSync;
     const writes = vi.spyOn(fs, "writeFileSync").mockImplementation(((file, ...args) => {
-      if (String(file).startsWith(`${segment.historyFile}.staging.`)) throw Object.assign(new Error("synthetic disk full"), { code: "ENOSPC" });
+      if (String(file).startsWith(`${segment.historyFile}.`)) throw Object.assign(new Error("synthetic disk full"), { code: "ENOSPC" });
       return original(file, ...args);
     }) as typeof fs.writeFileSync);
     const matches = service.searchHistories("RAW_WRITE_FAILURE_MARKER");
@@ -180,35 +144,12 @@ describe("live raw visibility and summary refresh", () => {
     writes.mockRestore();
   });
 
-  it("retries failed live narration without losing the previous readable body", async () => {
-    const segment = active(); append(segment, "EARLY", "evidence ".repeat(600));
-    const chat = vi.fn(async () => narrative("NEW_ACCOUNT"));
-    chat.mockImplementationOnce(async () => narrative("OLD_ACCOUNT"));
-    chat.mockImplementationOnce(async () => ({ content: "" }));
-    service.setLlmRuntime(runtime(chat)); await settle();
-    append(segment, "NEW_ACTION"); internal().writeLiveSummary(segment); await settle();
-    expect(service.snapshot().histories[0]).toMatchObject({ title: "OLD_ACCOUNT", summaryStatus: "pending" });
-    expect(service.snapshot().observation.narrationError).toMatch(/no content/u);
-    await vi.advanceTimersByTimeAsync(60_000); await settle();
-    expect(service.snapshot().histories[0]).toMatchObject({ title: "NEW_ACCOUNT", summaryStatus: "ready" });
-    expect(service.snapshot().observation.narrationError).toBeNull();
-  });
-
-  it("makes the missing model explicit for a prepared live summary", () => {
-    const segment = active(); append(segment, "OFFLINE", "evidence ".repeat(600));
-    service.searchHistories("OFFLINE");
-    expect(service.snapshot().observation.narrationError).toMatch(/no model runtime/u);
-    expect(service.snapshot().histories[0].summaryStatus).toBe("pending");
-  });
-
   it("preserves pending source visibility and newer same-id retrieval after stop", async () => {
     const segment = active(); append(segment, "EARLY", "evidence ".repeat(600));
-    const chat = vi.fn(async () => ({ content: "" }));
-    chat.mockImplementationOnce(async () => narrative("EARLIER_ACCOUNT"));
-    service.setLlmRuntime(runtime(chat)); await settle();
+    internal().writeLiveSummary(segment);
     append(segment, "CLOSED_LATE_ACTION");
-    await service.stopObservation(); await settle();
-    expect(service.snapshot().histories[0]).toMatchObject({ title: "EARLIER_ACCOUNT", summaryStatus: "pending" });
+    await service.stopObservation();
+    expect(service.snapshot().histories[0]).toMatchObject({ summaryStatus: "pending" });
     const matches = service.searchHistories("CLOSED_LATE_ACTION");
     expect(matches).toHaveLength(1);
     expect(matches[0].history).toMatchObject({ id: `${segment.id}-10min-summary`, summaryStatus: "pending" });
@@ -242,7 +183,7 @@ describe("durable semantic evidence before raw retention", () => {
     fs.writeFileSync(segment.historyFile, `---\ntitle: Earlier account\nsource_type: captured\nstatus: completed\nsummary_state: ready\ncapture_complete: true\nsummary_input_bytes: ${fs.statSync(segment.eventsFile).size}\n---\n\nEarlier account.\n`);
     service.snapshot();
     expect(JSON.parse(fs.readFileSync(checkpointPath(segment), "utf8")).evidence).toContain("FULL_RAW_VERSION");
-    expect(fs.readFileSync(segment.historyFile, "utf8")).toContain("Earlier account.");
+    expect(fs.readFileSync(segment.historyFile, "utf8")).toContain("FULL_RAW_VERSION");
   });
 
   it.each(["{\"recordType\":", "{}\n", JSON.stringify({ recordType: "human_event", eventType: "future_unknown", timestamp: "2026-10-09T10:02:00Z", details: { text: "UNSUPPORTED_CONTENT" } }) + "\n",

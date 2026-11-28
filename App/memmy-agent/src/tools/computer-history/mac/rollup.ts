@@ -22,7 +22,7 @@ export interface RollupResult {
   fileName: string;
   markdown: string;
   citedSummaries: string[];
-  /** Ready, completed ten-minute entries actually used by this rollup. */
+  /** Completed ten-minute captures that supply the L1 parents for this rollup. */
   coveredHistoryIds: string[];
 }
 
@@ -116,7 +116,6 @@ export function rollupCoveredHistoryIds(markdown: string, historyId: string): st
 export function isCompletedCapturedSummary(summary: SummaryInput): boolean {
   const source = frontmatterValue(summary.markdown, "source_type");
   return (source === "captured" || source === "human_computer_history")
-    && frontmatterValue(summary.markdown, "summary_state") === "ready"
     && frontmatterValue(summary.markdown, "status") === "completed";
 }
 

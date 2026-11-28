@@ -1863,9 +1863,10 @@ export class MemoryService {
     return this.importJobs.addMemory(this.withTimeZone(request));
   }
 
-  /** Let an optional producer discover deletions made in Memory's own UI. */
+  /** Reconcile a producer's links and optionally return its processed L1 summaries. */
   externalEvidenceStatus(request: ExternalEvidenceStatusRequest): {
-    evidence: Array<{ sourceRecordId: string; id?: string; status: "activated" | "deleted" | "missing" }>;
+    evidence: Array<{ sourceRecordId: string; id?: string; status: "activated" | "deleted" | "missing";
+      l1Summary?: { revision: string; title: string; text: string }; skippedSummaryRevision?: string }>;
     skills: Array<{ id: string; status: "activated" | "resolving" | "archived" | "deleted" | "missing" }>;
   } {
     const invalid = (message: string): never => { throw new MemoryServiceError("invalid_argument", message); };
@@ -1886,8 +1887,17 @@ export class MemoryService {
       if (!memory || kindFromMemory(memory) !== "observed_activity") {
         return { sourceRecordId, status: "missing" as const };
       }
-      return { sourceRecordId, id: memory.id,
-        status: memory.status === "deleted" || memory.deletedAt ? "deleted" as const : "activated" as const };
+      if (memory.status === "deleted" || memory.deletedAt) return { sourceRecordId, id: memory.id, status: "deleted" as const };
+      const state = observationMemoryState(memory);
+      const revision = state?.source_revision;
+      if (request.includeSummary === true && state?.status === "skipped" && typeof revision === "string") {
+        return { sourceRecordId, id: memory.id, status: "activated" as const, skippedSummaryRevision: revision };
+      }
+      const { title, summary } = memory.info;
+      const l1Summary = request.includeSummary === true && isObservationMemoryProcessed(memory)
+        && typeof revision === "string" && typeof title === "string" && typeof summary === "string" && summary.trim()
+        ? { revision, title, text: summary } : undefined;
+      return { sourceRecordId, id: memory.id, status: "activated" as const, ...(l1Summary ? { l1Summary } : {}) };
     });
     const skills = [...new Set(request.skillIds ?? [])].map((id) => {
       const memory = this.repos.memories.getIncludingDeleted(id);

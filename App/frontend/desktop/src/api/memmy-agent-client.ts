@@ -99,7 +99,7 @@ export type ComputerHistoryEntry = {
   id: string;
   title: string;
   sourceType: ComputerHistorySourceType;
-  summaryStatus?: "ready" | "pending";
+  summaryStatus?: "ready" | "pending" | "skipped";
   createdAt: string;
   /** Not sent to the client: the timeline shows the description, never the body. */
   markdown?: string;

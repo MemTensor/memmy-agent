@@ -6,7 +6,7 @@ import { MessageBus } from "../../../src/core/runtime-messages/index.js";
 import { WebSocketChannel } from "../../../src/integrations/channels/websocket.js";
 import { ComputerHistoryDemoService, type ComputerHistorySnapshot } from "../../../src/tools/computer-history/mac/computer-history-api.js";
 
-const history = vi.hoisted(() => ({ snapshot: vi.fn(), observationStatus: vi.fn(), setLlmRuntime: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), setWeChatChatAccess: vi.fn(), connectWeChat: vi.fn(), prepareWeChatReader: vi.fn(), startObservationWithPermissions: vi.fn(), restoreObservationOnLaunch: vi.fn(), applicationIcon: vi.fn(), listApplications: vi.fn(), getObservationSettings: vi.fn(), updateObservationSettings: vi.fn(), deleteHistory: vi.fn(), importMarkdown: vi.fn(), pauseObservation: vi.fn(), stopObservation: vi.fn(), createWorkflow: vi.fn() }));
+const history = vi.hoisted(() => ({ snapshot: vi.fn(), observationStatus: vi.fn(), setSummaryModelSource: vi.fn(), clearHistories: vi.fn(), pinSegment: vi.fn(), checkPermissions: vi.fn(), openPermission: vi.fn(), setWeChatChatAccess: vi.fn(), connectWeChat: vi.fn(), prepareWeChatReader: vi.fn(), startObservationWithPermissions: vi.fn(), restoreObservationOnLaunch: vi.fn(), applicationIcon: vi.fn(), listApplications: vi.fn(), getObservationSettings: vi.fn(), updateObservationSettings: vi.fn(), deleteHistory: vi.fn(), importMarkdown: vi.fn(), pauseObservation: vi.fn(), stopObservation: vi.fn(), createWorkflow: vi.fn() }));
 
 // Keep routing, authentication and clientSnapshot real without constructing a
 // service that can read or remove the user's Computer History files.
@@ -309,24 +309,20 @@ describe("Computer History summary assignment", () => {
     const input = request({ path: "/api/computer-history/model", body: JSON.stringify({ model_preset: "custom-model" }) });
     expect((await instance.dispatchHttp({}, input))?.status).toBe(200);
     expect(instance.modelSelectionResolver).toHaveBeenCalledWith({ capability: "memory_summary" });
-    expect(history.setLlmRuntime).toHaveBeenCalledOnce();
-    expect(history.setLlmRuntime.mock.calls[0][1]).toBe("byok");
-    const runtime = history.setLlmRuntime.mock.calls[0][0]();
-    expect(runtime.model).toBe("summary-model");
-    // BYOK summaries are wrapped so usage and the Memory budget are enforced.
-    expect(runtime.provider).not.toBe(provider);
-    expect(runtime.provider.getDefaultModel()).toBe("summary-model");
+    expect(history.setSummaryModelSource).toHaveBeenCalledOnce();
+    expect(history.setSummaryModelSource).toHaveBeenCalledWith("byok");
+    expect(provider.chatWithRetry).not.toHaveBeenCalled();
     await instance.dispatchHttp({}, request({ path: "/api/computer-history/model", body: JSON.stringify({ model_preset: "another-task" }) }));
-    expect(history.setLlmRuntime).toHaveBeenCalledOnce();
+    expect(history.setSummaryModelSource).toHaveBeenCalledOnce();
     revision = "key-2";
     await instance.dispatchHttp({}, input);
-    expect(history.setLlmRuntime).toHaveBeenCalledTimes(2);
+    expect(history.setSummaryModelSource).toHaveBeenCalledOnce();
   });
 
   it.each(["", 42, {}])("rejects a malformed legacy preset %j", async (model_preset) => {
     const result = await channel().dispatchHttp({}, request({ path: "/api/computer-history/model", body: JSON.stringify({ model_preset }) }));
     expect(result?.status).toBe(422);
-    expect(history.setLlmRuntime).not.toHaveBeenCalled();
+    expect(history.setSummaryModelSource).not.toHaveBeenCalled();
   });
 
   it("requires authentication and refuses unavailable selections", async () => {
@@ -336,7 +332,7 @@ describe("Computer History summary assignment", () => {
     expect((await instance.dispatchHttp({}, { ...input, headers: {} }))?.status).toBe(401);
     expect(instance.modelSelectionResolver).not.toHaveBeenCalled();
     expect((await instance.dispatchHttp({}, input))?.status).toBe(422);
-    expect(history.setLlmRuntime).toHaveBeenCalledWith(null, null, expect.stringContaining("Memory summary model"));
+    expect(history.setSummaryModelSource).toHaveBeenCalledWith(null);
   });
 
   it.each([{}, { model_preset: null }])("accepts refresh-only and legacy default bodies %j", async (body) => {
@@ -363,10 +359,10 @@ describe("Computer History summary assignment", () => {
     expect(instance.refreshComputerHistorySummaryModel()).toBe(true);
     expect(instance.refreshComputerHistorySummaryModel()).toBe(false);
     expect(instance.refreshComputerHistorySummaryModel()).toBe(false);
-    expect(history.setLlmRuntime).toHaveBeenCalledTimes(2);
-    expect(history.setLlmRuntime.mock.calls[1]).toEqual([null, null, expect.stringContaining("Memory summary model")]);
+    expect(history.setSummaryModelSource).toHaveBeenCalledTimes(2);
+    expect(history.setSummaryModelSource.mock.calls[1]).toEqual([null]);
     expect(instance.refreshComputerHistorySummaryModel()).toBe(true);
-    expect(history.setLlmRuntime).toHaveBeenCalledTimes(3);
+    expect(history.setSummaryModelSource).toHaveBeenCalledTimes(3);
   });
 
   it("routes Windows 11 summaries through the same configured summary capability", () => {
@@ -380,7 +376,8 @@ describe("Computer History summary assignment", () => {
       snapshot: { provider, model: "win-summary", signature: ["win-summary"] } }) as any);
     expect(instance.refreshComputerHistorySummaryModel()).toBe(true);
     expect(instance.modelSelectionResolver).toHaveBeenCalledWith({ capability: "memory_summary" });
-    expect(history.setLlmRuntime.mock.calls[0][0]().model).toBe("win-summary");
+    expect(history.setSummaryModelSource).toHaveBeenCalledWith("byok");
+    expect(provider.chatWithRetry).not.toHaveBeenCalled();
   });
 
   it("polls the summary configuration in the background and stops its timer", async () => {
@@ -390,7 +387,7 @@ describe("Computer History summary assignment", () => {
     (instance as any).startComputerHistoryModelSync();
     await vi.advanceTimersByTimeAsync(30_000);
     expect(instance.modelSelectionResolver).toHaveBeenCalledTimes(2);
-    expect(history.setLlmRuntime).toHaveBeenCalledOnce();
+    expect(history.setSummaryModelSource).toHaveBeenCalledOnce();
     await instance.stop();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(instance.modelSelectionResolver).toHaveBeenCalledTimes(2);

@@ -551,6 +551,7 @@ export interface ExternalEvidenceSyncRequest extends RequestEnvelope {
 
 /** Read-only reconciliation for an optional external evidence producer. */
 export interface ExternalEvidenceStatusRequest extends RequestEnvelope {
+  includeSummary?: boolean;
   source: string;
   sourceRecordIds: string[];
   skillIds?: string[];

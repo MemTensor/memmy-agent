@@ -33,6 +33,7 @@ interface SyncState {
   deleted: Record<string, string>;
   deleteAck: Record<string, string>;
   memoryIds: Record<string, string>;
+  skippedSummaries: Record<string, string>;
   skillGroups: Record<string, { revision: string; sourceRecordIds: string[]; skillId?: string }>;
   pendingSkillGroups: Record<string, HistorySkillGroup>;
 }
@@ -52,14 +53,17 @@ type SyncPayload = {
   namespace: { source: "memmy"; profileId: "default"; userId: string };
 };
 
+type L1Summary = { revision: string; title: string; text: string };
+
 type StatusPayload = {
+  includeSummary: true;
   source: "computer_history";
   sourceRecordIds: string[];
   skillIds: string[];
   namespace: SyncPayload["namespace"];
 };
 type StatusResult = {
-  evidence: Array<{ sourceRecordId: string; id?: string; status: "activated" | "deleted" | "missing" }>;
+  evidence: Array<{ sourceRecordId: string; id?: string; l1Summary?: L1Summary; skippedSummaryRevision?: string; status: "activated" | "deleted" | "missing" }>;
   skills: Array<{ id: string; status: "activated" | "resolving" | "archived" | "deleted" | "missing" }>;
 };
 
@@ -160,6 +164,7 @@ export class HistoryMemoryAdapter {
   private lastSkillError: string | null = null;
   private lastSyncedAt: string | null = null;
   private statusCursor = 0;
+  private readonly summaries = new Map<string, L1Summary>();
 
   constructor(private readonly input: {
     historyDirectory: string;
@@ -218,10 +223,19 @@ export class HistoryMemoryAdapter {
       ? this.state.memoryIds[historyId] : undefined;
   }
 
+  summaryFor(historyId: string, revision: string): ({ status: "ready" } & L1Summary) | { status: "skipped" } | undefined {
+    if (!this.memoryIdFor(historyId) || this.state.synced[historyId] !== revision) return undefined;
+    if (this.state.skippedSummaries[historyId] === revision) return { status: "skipped" };
+    const summary = this.summaries.get(historyId);
+    return summary?.revision === revision ? { ...summary, status: "ready" } : undefined;
+  }
+
   /** A deleted History must not be re-uploaded after a retry or restart. */
   remove(id: string): void {
     if (!id.endsWith("-10min-summary") && !id.endsWith("-6h-summary")) return;
     if (!this.input.enabled() && !this.state.synced[id] && !this.state.pendingUpserts[id]) return;
+    this.summaries.delete(id);
+    delete this.state.skippedSummaries[id];
     this.state.deleted[id] = new Date().toISOString();
     delete this.state.pendingUpserts[id];
     delete this.state.memoryIds[id];
@@ -240,6 +254,8 @@ export class HistoryMemoryAdapter {
 
   /** Turning off sync retracts earlier evidence, even while recording stays on. */
   revokeAll(): void {
+    this.summaries.clear();
+    this.state.skippedSummaries = {};
     for (const id of new Set([...Object.keys(this.state.synced), ...Object.keys(this.state.pendingUpserts)])) {
       this.state.deleted[id] ??= new Date().toISOString();
       delete this.state.memoryIds[id];
@@ -357,12 +373,27 @@ export class HistoryMemoryAdapter {
             .flatMap((group) => group.skillId ? [group.skillId] : []))].slice(0, 200);
           if (sourceRecordIds.length || skillIds.length) {
             const result = await (this.input.status ?? fetchStatus)({
-              source: "computer_history", sourceRecordIds, skillIds, namespace });
+              source: "computer_history", includeSummary: true, sourceRecordIds, skillIds, namespace });
             const evidenceById = new Map(result.evidence.map((item) => [item.sourceRecordId, item]));
             for (const id of sourceRecordIds) {
               const item = evidenceById.get(id);
               if (!item || !["activated", "deleted", "missing"].includes(item.status)) {
                 throw new Error("local Memory evidence status omitted a source");
+              }
+              const summary = item.l1Summary;
+              const active = item.status === "activated" && item.id && !this.state.deleted[id];
+              const skipped = active && item.skippedSummaryRevision === this.state.synced[id]
+                ? item.skippedSummaryRevision : undefined;
+              if (this.state.skippedSummaries[id] !== skipped) {
+                if (skipped) this.state.skippedSummaries[id] = skipped;
+                else delete this.state.skippedSummaries[id];
+                this.stateNeedsPersistence = true;
+              }
+              if (active && !skipped && summary && summary.revision === this.state.synced[id] && typeof summary.title === "string"
+                && typeof summary.text === "string" && summary.text.trim()) {
+                this.summaries.set(id, summary);
+              } else {
+                this.summaries.delete(id);
               }
               if (item.status === "deleted") this.remove(id);
               else if (item.status === "missing") {
@@ -374,6 +405,7 @@ export class HistoryMemoryAdapter {
                 this.writeState();
               }
             }
+            if (this.stateNeedsPersistence) this.writeState();
             const skillsById = new Map(result.skills.map((item) => [item.id, item]));
             for (const [groupId, group] of Object.entries(this.state.skillGroups)) {
               if (!group.skillId || !skillIds.includes(group.skillId)) continue;
@@ -414,9 +446,7 @@ export class HistoryMemoryAdapter {
             startedAt: item.startedAt, endedAt: item.endedAt,
             provenance: { applications: item.applications, historyId: item.id,
               summaryWindow: item.summaryWindow ?? "10min",
-              // Memory receives the narrated account, not the raw event stream.
-              // This marker describes its evidentiary limit, not task completion.
-              summarySource: "model_narrated_computer_history",
+              summarySource: "computer_history_evidence",
               summaryFactCheck: "not_independently_verified" },
             ...(item.parentSourceRecordIds?.length ? { parentSourceRecordIds: item.parentSourceRecordIds } : {}),
             namespace });
@@ -512,6 +542,8 @@ export class HistoryMemoryAdapter {
         return { ...(parsed.namespaceUserId ? { namespaceUserId: parsed.namespaceUserId } : {}),
           synced: { ...parsed.synced }, deleted: { ...parsed.deleted },
           pendingUpserts: { ...parsed.pendingUpserts },
+          skippedSummaries: parsed.skippedSummaries && typeof parsed.skippedSummaries === "object"
+            && !Array.isArray(parsed.skippedSummaries) ? { ...parsed.skippedSummaries } : {},
           memoryIds: parsed.memoryIds && typeof parsed.memoryIds === "object" && !Array.isArray(parsed.memoryIds)
             ? { ...parsed.memoryIds } : {},
           skillGroups: parsed.skillGroups && typeof parsed.skillGroups === "object" && !Array.isArray(parsed.skillGroups)
@@ -525,7 +557,7 @@ export class HistoryMemoryAdapter {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.stateCorrupt = true;
     }
-    return { synced: {}, pendingUpserts: {}, deleted: {}, deleteAck: {}, memoryIds: {}, skillGroups: {}, pendingSkillGroups: {} };
+    return { synced: {}, pendingUpserts: {}, deleted: {}, deleteAck: {}, memoryIds: {}, skippedSummaries: {}, skillGroups: {}, pendingSkillGroups: {} };
   }
 
   private writeState(): void {
